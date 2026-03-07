@@ -1294,6 +1294,7 @@ function App() {
       pointerNdcRef.current.set(nx, ny);
 
       const raycaster = raycasterRef.current;
+      raycaster.layers.enableAll();
       raycaster.setFromCamera(pointerNdcRef.current, cameraObj);
       const intersections = raycaster.intersectObject(worldRoot, true);
       for (const hit of intersections) {
@@ -1625,9 +1626,9 @@ function App() {
             renderer.clearDepth();
 
             waterStage = 'renderSceneOpaque';
-            rwRenderQueue?.pushVisibilityMask(['opaque', 'cutout']);
+            rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout']);
             renderer.render(scene, camera);
-            rwRenderQueue?.popVisibilityMask();
+            rwRenderQueue?.popCameraBucketMask(camera);
 
             waterStage = 'renderNear';
             waterPipeline.renderNear(renderer, camera);
@@ -1639,14 +1640,14 @@ function App() {
             waterPipeline.renderWake(renderer, camera);
 
             waterStage = 'renderSceneTransparent';
-            rwRenderQueue?.pushVisibilityMask(['transparent', 'additive', 'overlay']);
+            rwRenderQueue?.pushCameraBucketMask(camera, ['transparent', 'additive', 'overlay']);
             renderer.render(scene, camera);
-            rwRenderQueue?.popVisibilityMask();
+            rwRenderQueue?.popCameraBucketMask(camera);
             renderer.autoClear = true;
             scene.background = savedSceneBackground;
           } catch (waterError) {
-            rwRenderQueue?.popVisibilityMask();
-            rwRenderQueue?.popVisibilityMask();
+            rwRenderQueue?.popCameraBucketMask(camera);
+            rwRenderQueue?.popCameraBucketMask(camera);
             scene.background = savedSceneBackground;
             console.error('Water pipeline runtime error:', waterError);
             const farPos = waterPipeline?.farMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';

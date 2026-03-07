@@ -1,6 +1,14 @@
 import * as THREE from 'three';
 import { getRWMaterialDescriptor } from './RWRender';
 
+const BUCKET_LAYERS = {
+  opaque: 1,
+  cutout: 2,
+  transparent: 3,
+  additive: 4,
+  overlay: 5,
+};
+
 function getBucketPriority(bucket) {
   if (bucket === 'overlay') return 4;
   if (bucket === 'additive') return 3;
@@ -56,7 +64,7 @@ export class RWRenderQueue {
       additive: [],
       overlay: [],
     };
-    this.visibilityMaskStack = [];
+    this.cameraMaskStack = [];
     this.dirty = true;
   }
 
@@ -102,6 +110,8 @@ export class RWRenderQueue {
 
       entry.bucket = getMeshBucket(mesh);
       if (this.frameBuckets[entry.bucket]) this.frameBuckets[entry.bucket].push(entry);
+      const layer = BUCKET_LAYERS[entry.bucket] ?? 0;
+      mesh.layers.set(layer);
       if (entry.bucket === 'transparent' || entry.bucket === 'additive' || entry.bucket === 'overlay') {
         mesh.getWorldPosition(this.tempWorldPos);
         entry.distanceSq = camera.position.distanceToSquared(this.tempWorldPos);
@@ -130,23 +140,21 @@ export class RWRenderQueue {
     });
   }
 
-  pushVisibilityMask(allowedBuckets) {
-    const allowed = new Set(allowedBuckets);
-    const snapshot = [];
-    for (const entry of this.entries) {
-      const { mesh, bucket } = entry;
-      snapshot.push([mesh, mesh.visible]);
-      mesh.visible = mesh.visible && allowed.has(bucket);
+  pushCameraBucketMask(camera, allowedBuckets) {
+    if (!camera) return;
+    this.cameraMaskStack.push(camera.layers.mask);
+    camera.layers.disableAll();
+    for (const bucket of allowedBuckets) {
+      const layer = BUCKET_LAYERS[bucket];
+      if (Number.isInteger(layer)) camera.layers.enable(layer);
     }
-    this.visibilityMaskStack.push(snapshot);
   }
 
-  popVisibilityMask() {
-    const snapshot = this.visibilityMaskStack.pop();
-    if (!snapshot) return;
-    for (const [mesh, visible] of snapshot) {
-      mesh.visible = visible;
-    }
+  popCameraBucketMask(camera) {
+    if (!camera) return;
+    const mask = this.cameraMaskStack.pop();
+    if (mask === undefined) return;
+    camera.layers.mask = mask;
   }
 }
 
