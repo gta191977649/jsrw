@@ -1610,7 +1610,8 @@ function App() {
       });
       const savedSceneBackground = scene.background;
       try {
-        rwRenderQueueRef.current?.prepareFrame(camera);
+        const rwRenderQueue = rwRenderQueueRef.current;
+        rwRenderQueue?.prepareFrame(camera);
         if (waterPipeline?.hasRenderableWater() && uiStateRef.current.renderWater) {
           let waterStage = 'update';
           try {
@@ -1623,8 +1624,10 @@ function App() {
             renderer.autoClear = false;
             renderer.clearDepth();
 
-            waterStage = 'renderScene';
+            waterStage = 'renderSceneOpaque';
+            rwRenderQueue?.pushVisibilityMask(['opaque', 'cutout']);
             renderer.render(scene, camera);
+            rwRenderQueue?.popVisibilityMask();
 
             waterStage = 'renderNear';
             waterPipeline.renderNear(renderer, camera);
@@ -1634,9 +1637,16 @@ function App() {
 
             waterStage = 'renderWake';
             waterPipeline.renderWake(renderer, camera);
+
+            waterStage = 'renderSceneTransparent';
+            rwRenderQueue?.pushVisibilityMask(['transparent', 'additive', 'overlay']);
+            renderer.render(scene, camera);
+            rwRenderQueue?.popVisibilityMask();
             renderer.autoClear = true;
             scene.background = savedSceneBackground;
           } catch (waterError) {
+            rwRenderQueue?.popVisibilityMask();
+            rwRenderQueue?.popVisibilityMask();
             scene.background = savedSceneBackground;
             console.error('Water pipeline runtime error:', waterError);
             const farPos = waterPipeline?.farMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';

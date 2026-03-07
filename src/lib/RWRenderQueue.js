@@ -49,6 +49,14 @@ export class RWRenderQueue {
     this.root = root;
     this.entries = [];
     this.tempWorldPos = new THREE.Vector3();
+    this.frameBuckets = {
+      opaque: [],
+      cutout: [],
+      transparent: [],
+      additive: [],
+      overlay: [],
+    };
+    this.visibilityMaskStack = [];
     this.dirty = true;
   }
 
@@ -82,12 +90,18 @@ export class RWRenderQueue {
     const transparent = [];
     const additive = [];
     const overlay = [];
+    this.frameBuckets.opaque = [];
+    this.frameBuckets.cutout = [];
+    this.frameBuckets.transparent = [];
+    this.frameBuckets.additive = [];
+    this.frameBuckets.overlay = [];
 
     for (const entry of this.entries) {
       const { mesh } = entry;
       if (!isVisibleInWorld(mesh, this.root)) continue;
 
       entry.bucket = getMeshBucket(mesh);
+      if (this.frameBuckets[entry.bucket]) this.frameBuckets[entry.bucket].push(entry);
       if (entry.bucket === 'transparent' || entry.bucket === 'additive' || entry.bucket === 'overlay') {
         mesh.getWorldPosition(this.tempWorldPos);
         entry.distanceSq = camera.position.distanceToSquared(this.tempWorldPos);
@@ -114,6 +128,25 @@ export class RWRenderQueue {
     overlay.forEach((entry, index) => {
       entry.mesh.renderOrder = getBucketBaseOrder('overlay') + index;
     });
+  }
+
+  pushVisibilityMask(allowedBuckets) {
+    const allowed = new Set(allowedBuckets);
+    const snapshot = [];
+    for (const entry of this.entries) {
+      const { mesh, bucket } = entry;
+      snapshot.push([mesh, mesh.visible]);
+      mesh.visible = mesh.visible && allowed.has(bucket);
+    }
+    this.visibilityMaskStack.push(snapshot);
+  }
+
+  popVisibilityMask() {
+    const snapshot = this.visibilityMaskStack.pop();
+    if (!snapshot) return;
+    for (const [mesh, visible] of snapshot) {
+      mesh.visible = visible;
+    }
   }
 }
 

@@ -151,6 +151,20 @@ class DFFLoader extends THREE.Loader {
           opacity: matData.color.a / 255,
         });
 
+        const applyAlphaMode = (alphaMode, alphaRef = 0.5) => {
+          if (alphaMode === 'cutout') {
+            result.transparent = false;
+            result.alphaTest = alphaRef;
+            result.depthWrite = true;
+            return;
+          }
+          if (alphaMode === 'blend' || alphaMode === 'additive') {
+            result.transparent = true;
+            result.alphaTest = 0;
+            result.depthWrite = false;
+          }
+        };
+
         if (matData.isTextured && matData.RWTexture) {
           const textureName = matData.RWTexture.name;
           const maskName = matData.RWTexture.maskName;
@@ -162,10 +176,10 @@ class DFFLoader extends THREE.Loader {
             if (txdEntry) {
               const txdTexture = txdEntry.texture || txdEntry;
               result.map = txdTexture.clone();
-              if (txdEntry.hasAlpha) {
-                result.transparent = true;
-                result.alphaTest = 0.1;
-              }
+              const textureAlphaMode = txdTexture?.userData?.rwAlphaMode
+                || txdEntry?.texture?.userData?.rwAlphaMode
+                || (txdEntry.hasAlpha ? 'blend' : 'opaque');
+              applyAlphaMode(textureAlphaMode, 0.5);
               result.map.needsUpdate = true;
               console.log(`DFFLoader: Found TXD texture "${textureName}"`);
             } else {
@@ -218,8 +232,8 @@ class DFFLoader extends THREE.Loader {
             if (result.alphaMap) {
               result.alphaMap.wrapS = THREE.RepeatWrapping;
               result.alphaMap.wrapT = THREE.RepeatWrapping;
-              result.transparent = true;
-              result.alphaTest = 0.05;
+              const maskAlphaMode = result.alphaMap.userData?.rwAlphaMode || 'cutout';
+              applyAlphaMode(maskAlphaMode, maskAlphaMode === 'blend' ? 0 : 0.5);
             }
           }
         }
