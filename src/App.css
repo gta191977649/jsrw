@@ -1,0 +1,63 @@
+.app-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: radial-gradient(circle at 15% 25%, #96a8b6 0%, #8193a3 30%, #5f6f7e 100%);
+}
+
+.viewport {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+  z-index: 1;
+}
+
+.imgui-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: 2;
+  background: transparent;
+}
+
+.hud {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: min(420px, calc(100vw - 32px));
+  background: rgba(18, 22, 27, 0.78);
+  border: 1px solid rgba(202, 226, 255, 0.25);
+  backdrop-filter: blur(6px);
+  color: #e2f0ff;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.hud .picker {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.hud .picker span {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.hud input[type='file'] {
+  width: 100%;
+}
+
+.hud button {
+  margin-right: 8px;
+}
+
+.hud p {
+  margin: 7px 0 0;
+}
