@@ -37,10 +37,12 @@ export function applyGlobalBackfaceCulling(root, disableBackfaceCulling) {
           rwBaseSide: material.side,
         };
       }
+      const descriptor = getRWMaterialDescriptor(material);
       if (disableBackfaceCulling) {
+        if (descriptor) descriptor.side = THREE.DoubleSide;
         material.side = THREE.DoubleSide;
       } else {
-        const descriptorSide = getRWMaterialDescriptor(material)?.side;
+        const descriptorSide = descriptor?.side;
         material.side = descriptorSide ?? material.userData?.rwBaseSide ?? THREE.FrontSide;
       }
       material.needsUpdate = true;
