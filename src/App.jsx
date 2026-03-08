@@ -1667,11 +1667,15 @@ function App() {
             rwWaterPipelineRef.current?.dispose();
             rwWaterPipelineRef.current = null;
             renderer.autoClear = true;
+            rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
             renderer.render(scene, camera);
+            rwRenderQueue?.popCameraBucketMask(camera);
           }
         } else {
           renderer.autoClear = true;
+          rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
           renderer.render(scene, camera);
+          rwRenderQueue?.popCameraBucketMask(camera);
         }
 
         const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';

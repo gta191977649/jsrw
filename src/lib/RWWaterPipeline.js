@@ -216,16 +216,22 @@ function createWaterWaveMaterial(texture, options = {}) {
       varying vec3 vNormalWS;
       varying vec3 vViewDirWS;
       void main() {
-        vec4 texel = texture2D(uMap, vUv + uUvOffset);
+        vec2 uvPrimary = vUv + uUvOffset;
+        vec2 uvSecondary = (vUv * 1.75) + (uUvOffset * vec2(1.9, 0.65));
+        vec4 texel = texture2D(uMap, uvPrimary);
+        vec4 flowTexel = texture2D(uMap, uvSecondary);
         vec3 normal = normalize(vNormalWS);
         vec3 viewDir = normalize(vViewDirWS);
-        float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.0);
+        float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.4);
         float facing = 0.45 + (0.55 * max(normal.y, 0.0));
+        float streak = smoothstep(0.3, 0.95, flowTexel.r);
         vec3 litColor = texel.rgb * uColor * facing;
-        litColor += fresnel * 0.18;
+        litColor += vec3(0.10, 0.22, 0.24) * streak * (0.25 + 0.75 * fresnel);
+        litColor += vec3(0.06, 0.12, 0.13) * vNearWeight;
+        litColor += fresnel * 0.34;
         float coverage = 0.45 + (0.55 * vNearWeight);
         float alphaCoverage = mix(1.0, coverage, uDistanceAlphaStrength);
-        float alpha = texel.a * uAlpha * uAlphaScale * alphaCoverage;
+        float alpha = texel.a * uAlpha * uAlphaScale * alphaCoverage * (0.96 + (0.12 * vNearWeight));
         gl_FragColor = vec4(litColor, alpha);
       }
     `,

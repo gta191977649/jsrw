@@ -41,9 +41,9 @@ class DFFLoader extends THREE.Loader {
     }
 
     const meshes = [];
+    const meshesByGeometry = [];
 
     clump.RWGeometryList.forEach((rwGeometry) => {
-      const geometry = new THREE.BufferGeometry();
       const binMesh = rwGeometry.RWExtension?.CHUNK_BINMESH;
       const materialSplits = [];
 
@@ -93,52 +93,9 @@ class DFFLoader extends THREE.Loader {
         });
       }
 
-      const triangleCount = materialSplits.reduce((sum, split) => sum + split.triangles.length, 0);
-      const positionBuffer = new THREE.BufferAttribute(new Float32Array(triangleCount * 9), 3);
       const hasNormals = rwGeometry.morphTargets[0].hasNormals;
-      const normalBuffer = hasNormals ? new THREE.BufferAttribute(new Float32Array(triangleCount * 9), 3) : null;
       const hasColors = Boolean(rwGeometry.prelitcolor);
-      const colorBuffer = hasColors ? new THREE.BufferAttribute(new Float32Array(triangleCount * 12), 4) : null;
       const hasUVs = Boolean(rwGeometry.texCoords);
-      const uvBuffer = hasUVs ? new THREE.BufferAttribute(new Float32Array(triangleCount * 6), 2) : null;
-
-      let vertexPos = 0;
-      const newVertexIndices = {};
-
-      for (const split of materialSplits) {
-        const groupStart = vertexPos;
-        for (const indices of split.triangles) {
-          for (const index of indices) {
-            const vertex = rwGeometry.morphTargets[0].vertices[index];
-            positionBuffer.setXYZ(vertexPos, vertex.x, vertex.y, vertex.z);
-
-            if (!newVertexIndices[index]) newVertexIndices[index] = [];
-            newVertexIndices[index].push(vertexPos);
-
-            if (normalBuffer) {
-              const normal = rwGeometry.morphTargets[0].normals[index];
-              normalBuffer.setXYZ(vertexPos, normal.x, normal.y, normal.z);
-            }
-            if (uvBuffer) {
-              const uv = rwGeometry.texCoords[0][index];
-              uvBuffer.setXY(vertexPos, uv.u, uv.v);
-            }
-            if (colorBuffer) {
-              const color = rwGeometry.prelitcolor[index];
-              colorBuffer.setXYZW(vertexPos, color.r / 255, color.g / 255, color.b / 255, color.a / 255);
-            }
-            vertexPos += 1;
-          }
-        }
-        geometry.addGroup(groupStart, vertexPos - groupStart, split.matIndex);
-      }
-
-      geometry.setAttribute('position', positionBuffer);
-      if (normalBuffer) geometry.setAttribute('normal', normalBuffer);
-      else geometry.computeVertexNormals();
-      if (colorBuffer) geometry.setAttribute('color', colorBuffer);
-      if (uvBuffer) geometry.setAttribute('uv', uvBuffer);
-      geometry.computeBoundingSphere();
 
       const materials = rwGeometry.RWMaterialList.map((material) => {
         const matData = material.RWMaterial;
@@ -241,31 +198,79 @@ class DFFLoader extends THREE.Loader {
         return result;
       });
 
-      if (rwGeometry.RWExtension?.CHUNK_SKIN) {
-        const skinExtension = rwGeometry.RWExtension.CHUNK_SKIN;
-        const indicesBuffer = new THREE.Float32BufferAttribute(new Float32Array(positionBuffer.count * 4), 4);
-        const weightsBuffer = new THREE.Float32BufferAttribute(new Float32Array(positionBuffer.count * 4), 4);
+      const geometryMeshes = [];
+      for (const split of materialSplits) {
+        const triangleCount = split.triangles.length;
+        if (triangleCount <= 0) continue;
 
-        for (let index = 0; index < rwGeometry.numVertices; index += 1) {
-          if (!newVertexIndices[index]) continue;
-          newVertexIndices[index].forEach((newIndex) => {
-            const boneIndices = skinExtension.vertexBoneIndices[index];
-            const boneWeights = skinExtension.vertexBoneWeights[index];
-            indicesBuffer.setXYZW(newIndex, boneIndices.x, boneIndices.y, boneIndices.z, boneIndices.w);
-            weightsBuffer.setXYZW(newIndex, boneWeights.x, boneWeights.y, boneWeights.z, boneWeights.w);
-          });
+        const geometry = new THREE.BufferGeometry();
+        const positionBuffer = new THREE.BufferAttribute(new Float32Array(triangleCount * 9), 3);
+        const normalBuffer = hasNormals ? new THREE.BufferAttribute(new Float32Array(triangleCount * 9), 3) : null;
+        const colorBuffer = hasColors ? new THREE.BufferAttribute(new Float32Array(triangleCount * 12), 4) : null;
+        const uvBuffer = hasUVs ? new THREE.BufferAttribute(new Float32Array(triangleCount * 6), 2) : null;
+        const newVertexIndices = {};
+
+        let vertexPos = 0;
+        for (const indices of split.triangles) {
+          for (const index of indices) {
+            const vertex = rwGeometry.morphTargets[0].vertices[index];
+            positionBuffer.setXYZ(vertexPos, vertex.x, vertex.y, vertex.z);
+
+            if (!newVertexIndices[index]) newVertexIndices[index] = [];
+            newVertexIndices[index].push(vertexPos);
+
+            if (normalBuffer) {
+              const normal = rwGeometry.morphTargets[0].normals[index];
+              normalBuffer.setXYZ(vertexPos, normal.x, normal.y, normal.z);
+            }
+            if (uvBuffer) {
+              const uv = rwGeometry.texCoords[0][index];
+              uvBuffer.setXY(vertexPos, uv.u, uv.v);
+            }
+            if (colorBuffer) {
+              const color = rwGeometry.prelitcolor[index];
+              colorBuffer.setXYZW(vertexPos, color.r / 255, color.g / 255, color.b / 255, color.a / 255);
+            }
+            vertexPos += 1;
+          }
         }
 
-        geometry.setAttribute('skinIndex', indicesBuffer);
-        geometry.setAttribute('skinWeight', weightsBuffer);
-      }
+        geometry.setAttribute('position', positionBuffer);
+        if (normalBuffer) geometry.setAttribute('normal', normalBuffer);
+        else geometry.computeVertexNormals();
+        if (colorBuffer) geometry.setAttribute('color', colorBuffer);
+        if (uvBuffer) geometry.setAttribute('uv', uvBuffer);
+        geometry.computeBoundingSphere();
 
-      meshes.push({ geometry, materials });
+        if (rwGeometry.RWExtension?.CHUNK_SKIN) {
+          const skinExtension = rwGeometry.RWExtension.CHUNK_SKIN;
+          const indicesBuffer = new THREE.Float32BufferAttribute(new Float32Array(positionBuffer.count * 4), 4);
+          const weightsBuffer = new THREE.Float32BufferAttribute(new Float32Array(positionBuffer.count * 4), 4);
+
+          for (let index = 0; index < rwGeometry.numVertices; index += 1) {
+            if (!newVertexIndices[index]) continue;
+            newVertexIndices[index].forEach((newIndex) => {
+              const boneIndices = skinExtension.vertexBoneIndices[index];
+              const boneWeights = skinExtension.vertexBoneWeights[index];
+              indicesBuffer.setXYZW(newIndex, boneIndices.x, boneIndices.y, boneIndices.z, boneIndices.w);
+              weightsBuffer.setXYZW(newIndex, boneWeights.x, boneWeights.y, boneWeights.z, boneWeights.w);
+            });
+          }
+
+          geometry.setAttribute('skinIndex', indicesBuffer);
+          geometry.setAttribute('skinWeight', weightsBuffer);
+        }
+
+        const meshEntry = { geometry, material: materials[split.matIndex], materialIndex: split.matIndex };
+        geometryMeshes.push(meshEntry);
+        meshes.push(meshEntry);
+      }
+      meshesByGeometry.push(geometryMeshes);
     });
 
     clump.RWAtomicList.forEach((atomic) => {
-      const meshData = meshes[atomic.geometryIndex];
-      if (!meshData) return;
+      const geometryMeshes = meshesByGeometry[atomic.geometryIndex];
+      if (!geometryMeshes?.length) return;
 
       const nodelist = new Array(clump.RWFrameList.length);
       let nodeInfo = null;
@@ -326,7 +331,9 @@ class DFFLoader extends THREE.Loader {
         }
 
         if (bones.every((bone) => bone !== null)) {
-          meshData.skeleton = new THREE.Skeleton(bones);
+          for (const meshData of geometryMeshes) {
+            meshData.skeleton = new THREE.Skeleton(bones);
+          }
         }
       }
     });
@@ -334,12 +341,16 @@ class DFFLoader extends THREE.Loader {
     meshes.forEach((meshData) => {
       let mesh;
       if (meshData.skeleton) {
-        mesh = new THREE.SkinnedMesh(meshData.geometry, meshData.materials);
+        mesh = new THREE.SkinnedMesh(meshData.geometry, meshData.material);
         mesh.add(meshData.skeleton.bones[0]);
         mesh.bind(meshData.skeleton);
       } else {
-        mesh = new THREE.Mesh(meshData.geometry, meshData.materials);
+        mesh = new THREE.Mesh(meshData.geometry, meshData.material);
       }
+      mesh.userData = {
+        ...(mesh.userData || {}),
+        rwMaterialIndex: meshData.materialIndex,
+      };
       mesh.rotation.set(-Math.PI / 2, 0, Math.PI);
       group.add(mesh);
     });
