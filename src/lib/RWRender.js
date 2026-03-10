@@ -90,7 +90,7 @@ function buildRWDescriptor(material, geometry, overrides = {}) {
     wireframe: Boolean(material.wireframe),
     vertexColorMode: hasVertexColor ? 'multiply' : 'none',
     useVertexColors: hasVertexColor,
-    fog: false,
+    fog: true,
     toneMapped: false,
     filterMode: material.map?.minFilter === THREE.LinearFilter ? 'linear' : 'mipmap-linear',
     textureName: material.map?.name || material.userData?.textureName || '',

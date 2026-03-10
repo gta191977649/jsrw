@@ -148,6 +148,9 @@ function createWaterWaveMaterial(texture, options = {}) {
       uUvOffset: { value: new THREE.Vector2() },
       uTime: { value: 0 },
       uColor: { value: DEFAULT_WATER_COLOR.clone() },
+      uFogColor: { value: new THREE.Color(0.55, 0.68, 0.76) },
+      uFogNear: { value: 1200.0 },
+      uFogFar: { value: 2000.0 },
       uAlpha: { value: options.alpha ?? 0.72 },
       uAlphaScale: { value: 1.0 },
       uDistanceAlphaStrength: { value: 1.0 },
@@ -168,6 +171,7 @@ function createWaterWaveMaterial(texture, options = {}) {
       varying float vNearWeight;
       varying vec3 vNormalWS;
       varying vec3 vViewDirWS;
+      varying float vViewDistance;
       void main() {
         vUv = uv;
         vec3 transformed = position;
@@ -201,6 +205,7 @@ function createWaterWaveMaterial(texture, options = {}) {
         vec4 worldPos = modelMatrix * vec4(transformed, 1.0);
         vNormalWS = normalize(normalMatrix * localNormal);
         vViewDirWS = normalize(cameraPosition - worldPos.xyz);
+        vViewDistance = distance(cameraPosition, worldPos.xyz);
         gl_Position = projectionMatrix * viewMatrix * worldPos;
       }
     `,
@@ -208,6 +213,9 @@ function createWaterWaveMaterial(texture, options = {}) {
       uniform sampler2D uMap;
       uniform vec2 uUvOffset;
       uniform vec3 uColor;
+      uniform vec3 uFogColor;
+      uniform float uFogNear;
+      uniform float uFogFar;
       uniform float uAlpha;
       uniform float uAlphaScale;
       uniform float uDistanceAlphaStrength;
@@ -215,6 +223,7 @@ function createWaterWaveMaterial(texture, options = {}) {
       varying float vNearWeight;
       varying vec3 vNormalWS;
       varying vec3 vViewDirWS;
+      varying float vViewDistance;
       void main() {
         vec2 uvPrimary = vUv + uUvOffset;
         vec2 uvSecondary = (vUv * 1.75) + (uUvOffset * vec2(1.9, 0.65));
@@ -229,6 +238,8 @@ function createWaterWaveMaterial(texture, options = {}) {
         litColor += vec3(0.10, 0.22, 0.24) * streak * (0.25 + 0.75 * fresnel);
         litColor += vec3(0.06, 0.12, 0.13) * vNearWeight;
         litColor += fresnel * 0.34;
+        float fogFactor = smoothstep(uFogNear, uFogFar, vViewDistance);
+        litColor = mix(litColor, uFogColor, fogFactor);
         float coverage = 0.45 + (0.55 * vNearWeight);
         float alphaCoverage = mix(1.0, coverage, uDistanceAlphaStrength);
         float alpha = texel.a * uAlpha * uAlphaScale * alphaCoverage * (0.96 + (0.12 * vNearWeight));
@@ -294,7 +305,7 @@ export class RWWaterPipeline {
       depthWrite: true,
       side: THREE.DoubleSide,
       wireframe: Boolean(options.wireframe),
-      fog: false,
+      fog: true,
       toneMapped: false,
     });
     this.nearMaterial = createWaterWaveMaterial(this.nearTexture, {
@@ -315,7 +326,7 @@ export class RWWaterPipeline {
       depthWrite: false,
       side: THREE.DoubleSide,
       wireframe: Boolean(options.wireframe),
-      fog: false,
+      fog: true,
       toneMapped: false,
       blending: THREE.NormalBlending,
     });
@@ -507,6 +518,9 @@ export class RWWaterPipeline {
     if (timecycleState?.color?.isColor) {
       this.waterState.color.copy(timecycleState.color);
     }
+    const fogColor = timecycleState?.fogColor?.isColor ? timecycleState.fogColor : null;
+    const fogNear = Number.isFinite(timecycleState?.fogNear) ? timecycleState.fogNear : null;
+    const fogFar = Number.isFinite(timecycleState?.fogFar) ? timecycleState.fogFar : null;
     this.waterState.nearAlpha = this.settings.nearAlpha;
     this.waterState.wavyAlpha = this.settings.wavyAlpha;
     this.waterState.wakeAlpha = this.settings.wakeAlpha;
@@ -519,6 +533,24 @@ export class RWWaterPipeline {
     this.nearMaterial.uniforms.uAlpha.value = this.waterState.nearAlpha;
     this.wakeMaterial.color.copy(this.waterState.color);
     this.wakeMaterial.opacity = this.waterState.wakeAlpha;
+    if (fogColor && fogNear !== null && fogFar !== null) {
+      const farFogNear = Math.max(0, Math.min(fogNear, fogFar - 1));
+      const farFogFar = Math.max(farFogNear + 1, fogFar);
+      const fog = this.farScene.fog?.isFog ? this.farScene.fog : new THREE.Fog(fogColor.clone(), farFogNear, farFogFar);
+      fog.color.copy(fogColor);
+      fog.near = farFogNear;
+      fog.far = farFogFar;
+      this.farScene.fog = fog;
+      this.nearScene.fog = fog;
+      this.wakeScene.fog = fog;
+      this.nearMaterial.uniforms.uFogColor.value.copy(fogColor);
+      this.nearMaterial.uniforms.uFogNear.value = farFogNear;
+      this.nearMaterial.uniforms.uFogFar.value = farFogFar;
+    } else {
+      this.farScene.fog = null;
+      this.nearScene.fog = null;
+      this.wakeScene.fog = null;
+    }
 
     this.updateWakeQuad(camera);
   }

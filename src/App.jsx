@@ -10,6 +10,7 @@ import { formatConsoleArg } from './lib/console';
 import { buildFileIndex } from './lib/fileIndex';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from './lib/gtaTransforms';
 import { normalizePath, parseGtaDat, parseIde, parseIpl } from './lib/gtaParsers';
+import { parseTimecyc, sampleTimecyc, TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/Timecycle';
 import { IMGParser } from './lib/imgArchive';
 import { buildLodMapping, isLodModel } from './lib/lod';
 import { PlayerControllerAdapter } from './lib/playerControllerAdapter';
@@ -49,9 +50,34 @@ import './App.css';
 
 const MAX_CONSOLE_LINES = 500;
 const MAX_FAILED_MODELS = 5000;
+const DEFAULT_SCENE_BACKGROUND = new THREE.Color(0x8ea9b5);
 const CHUNK_ACTIVE_MARGIN = 384;
 const CHUNK_SPHERE_PADDING = WORLD_CHUNK_SIZE * 0.75;
 const HIDDEN_INSTANCE_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
+const SKY_SMALL_STRIP_HEIGHT = 4 / 400;
+const SKY_HORIZON_STRIP_HEIGHT = 48 / 400;
+const SKY_DEFAULT_TOP = DEFAULT_SCENE_BACKGROUND.clone().offsetHSL(0, 0, -0.08);
+const SKY_DEFAULT_BOTTOM = DEFAULT_SCENE_BACKGROUND.clone();
+const SKY_DEFAULT_FOG = DEFAULT_SCENE_BACKGROUND.clone();
+const TIMECYCLE_FIELD_MAP = new Map(TIMECYCLE_FIELD_GROUPS.map((field) => [field.key, field]));
+const LOW_CLOUD_OFFSETS_X = [1.0, 0.7, 0.0, -0.7, -1.0, -0.7, 0.0, 0.7, 0.8, -0.8, 0.4, -0.4];
+const LOW_CLOUD_OFFSETS_Z = [0.0, -0.7, -1.0, -0.7, 0.0, 0.7, 1.0, 0.7, 0.4, 0.4, -0.8, -0.8];
+const LOW_CLOUD_HEIGHTS = [0.0, 1.0, 0.5, 0.0, 1.0, 0.3, 0.9, 0.4, 1.3, 1.4, 1.2, 1.7];
+const FLUFFY_OFFSETS_X = [
+  0.0, 60.0, 72.0, 48.0, 21.0, 12.0, 9.0, -3.0, -8.4, -18.0, -15.0, -36.0,
+  -40.0, -48.0, -60.0, -24.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+  100.0, 100.0, -30.0, -20.0, 10.0, 30.0, 0.0, -100.0, -100.0, -100.0, -100.0, -100.0, -100.0,
+];
+const FLUFFY_OFFSETS_Z = [
+  100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+  100.0, 100.0, 100.0, 100.0, -30.0, 10.0, -25.0, -5.0, 28.0, -10.0, 10.0, 0.0,
+  15.0, 40.0, -100.0, -100.0, -100.0, -100.0, -100.0, -40.0, -20.0, 0.0, 10.0, 30.0, 35.0,
+];
+const FLUFFY_HEIGHTS = [
+  2.0, 1.0, 0.0, 0.3, 0.7, 1.4, 1.7, 0.24, 0.7, 1.3, 1.6, 1.0,
+  1.2, 0.3, 0.7, 1.4, 0.0, 0.1, 0.5, 0.4, 0.55, 0.75, 1.0, 1.4,
+  1.7, 2.0, 2.0, 2.3, 1.9, 2.4, 2.0, 2.0, 1.5, 1.2, 1.7, 1.5, 2.1,
+];
 const INSTANCE_SELECTION_MATERIAL = new THREE.MeshBasicMaterial({
   color: new THREE.Color(1, 0.1, 0.1),
   transparent: true,
@@ -62,6 +88,58 @@ const INSTANCE_SELECTION_MATERIAL = new THREE.MeshBasicMaterial({
   fog: false,
   toneMapped: false,
 });
+const SKY_VERTEX_SHADER = `
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+const SKY_FRAGMENT_SHADER = `
+uniform vec3 uSkyTop;
+uniform vec3 uSkyBottom;
+uniform vec3 uFogColor;
+uniform vec3 uCameraForward;
+uniform vec3 uCameraRight;
+uniform vec3 uCameraUp;
+uniform float uHorizonY;
+uniform float uSmallStripHeight;
+uniform float uHorizonStrength;
+uniform float uLowerBandEndY;
+uniform float uTanHalfFov;
+uniform float uAspect;
+uniform float uBelowHorizonMix;
+
+varying vec2 vUv;
+
+void main() {
+  vec2 ndc = (vUv * 2.0) - 1.0;
+  vec3 viewDir = normalize(
+    uCameraForward
+    + (ndc.x * uAspect * uTanHalfFov * uCameraRight)
+    + (ndc.y * uTanHalfFov * uCameraUp)
+  );
+  float elevation = clamp(viewDir.y * 0.5 + 0.5, 0.0, 1.0);
+  float horizonVisible = step(0.0, uHorizonY) * step(uHorizonY, 1.0);
+  float horizonAnchor = clamp(uHorizonY, 0.0, 1.0);
+
+  float skyT = smoothstep(horizonAnchor, 1.0, vUv.y);
+  vec3 color = mix(uSkyBottom, uSkyTop, clamp(skyT, 0.0, 1.0));
+
+  float smallStripHeight = max(0.003, uSmallStripHeight);
+  float smallStripMask = (1.0 - smoothstep(0.0, smallStripHeight, abs(vUv.y - horizonAnchor))) * horizonVisible;
+  color = mix(color, uFogColor, smallStripMask * uHorizonStrength);
+
+  float lowerStart = horizonAnchor - smallStripHeight;
+  float lowerEnd = min(lowerStart, uLowerBandEndY);
+  float lowerMask = (1.0 - step(horizonAnchor, vUv.y)) * smoothstep(lowerEnd, lowerStart, vUv.y) * horizonVisible;
+  vec3 belowHorizonColor = mix(vec3(0.1176), uSkyBottom, uBelowHorizonMix);
+  color = mix(color, mix(belowHorizonColor, uFogColor, smoothstep(lowerEnd, lowerStart, vUv.y)), lowerMask);
+
+  gl_FragColor = vec4(color, 1.0);
+}
+`;
 
 function yieldToBrowser() {
   return new Promise((resolve) => {
@@ -73,6 +151,201 @@ function yieldToBrowser() {
   });
 }
 
+function cloneTimecycleValue(value, type) {
+  if (type === 'rgb') return { r: value.r, g: value.g, b: value.b };
+  if (type === 'rgba') return { r: value.r, g: value.g, b: value.b, a: value.a };
+  return value;
+}
+
+function toTimecycleColorArray(value, type) {
+  const alpha = type === 'rgba' ? value.a : 255;
+  return [
+    (value.r || 0) / 255,
+    (value.g || 0) / 255,
+    (value.b || 0) / 255,
+    alpha / 255,
+  ];
+}
+
+function fromTimecycleColorArray(array, type) {
+  const base = {
+    r: THREE.MathUtils.clamp(Math.round((array[0] || 0) * 255), 0, 255),
+    g: THREE.MathUtils.clamp(Math.round((array[1] || 0) * 255), 0, 255),
+    b: THREE.MathUtils.clamp(Math.round((array[2] || 0) * 255), 0, 255),
+  };
+  if (type === 'rgba') {
+    return {
+      ...base,
+      a: THREE.MathUtils.clamp(Math.round((array[3] ?? 1) * 255), 0, 255),
+    };
+  }
+  return base;
+}
+
+function toThreeColorFromTimecycleValue(value) {
+  return new THREE.Color(
+    (value.r || 0) / 255,
+    (value.g || 0) / 255,
+    (value.b || 0) / 255,
+  );
+}
+
+function computeProjectedHorizonUvY(camera, scratch = {}) {
+  const cameraForward = scratch.cameraForward || new THREE.Vector3();
+  const flatForward = scratch.flatForward || new THREE.Vector3();
+  const horizonPoint = scratch.horizonPoint || new THREE.Vector3();
+
+  camera.getWorldDirection(cameraForward);
+  flatForward.set(cameraForward.x, 0, cameraForward.z);
+  const flatLengthSq = flatForward.lengthSq();
+  if (flatLengthSq < 1e-8) {
+    return cameraForward.y >= 0 ? -1 : 2;
+  }
+
+  flatForward.normalize();
+  horizonPoint.copy(camera.position).addScaledVector(flatForward, 3000);
+  horizonPoint.y = 0;
+  horizonPoint.project(camera);
+  return (horizonPoint.y * 0.5) + 0.5;
+}
+
+function createLowCloudTexture(seed = 0) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return new THREE.Texture();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const baseGradient = ctx.createLinearGradient(0, canvas.height * 0.5, 0, canvas.height);
+  baseGradient.addColorStop(0, 'rgba(255,255,255,0.0)');
+  baseGradient.addColorStop(0.45, 'rgba(255,255,255,0.7)');
+  baseGradient.addColorStop(1, 'rgba(255,255,255,0.0)');
+  ctx.fillStyle = baseGradient;
+  ctx.fillRect(0, canvas.height * 0.18, canvas.width, canvas.height * 0.64);
+
+  ctx.globalCompositeOperation = 'destination-in';
+  const blobs = [
+    [0.14, 0.52, 0.24, 0.18],
+    [0.34, 0.47, 0.28, 0.20],
+    [0.56, 0.50, 0.30, 0.18],
+    [0.77, 0.48, 0.24, 0.16],
+    [0.90, 0.50, 0.12, 0.10],
+  ];
+  for (let i = 0; i < blobs.length; i += 1) {
+    const [x, y, rx, ry] = blobs[(i + seed) % blobs.length];
+    const gradient = ctx.createRadialGradient(
+      canvas.width * x,
+      canvas.height * y,
+      0,
+      canvas.width * x,
+      canvas.height * y,
+      canvas.width * rx,
+    );
+    gradient.addColorStop(0, 'rgba(255,255,255,0.96)');
+    gradient.addColorStop(0.45, 'rgba(255,255,255,0.72)');
+    gradient.addColorStop(0.8, 'rgba(255,255,255,0.22)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.ellipse(
+      canvas.width * x,
+      canvas.height * y,
+      canvas.width * rx,
+      canvas.height * ry,
+      0,
+      0,
+      Math.PI * 2,
+    );
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipMapLinearFilter;
+  return texture;
+}
+
+function createFluffyCloudTexture(topColor, bottomColor) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  updateFluffyCloudTexture(canvas, topColor, bottomColor);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  return texture;
+}
+
+function updateFluffyCloudTexture(canvas, topColor, bottomColor) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  gradient.addColorStop(0, `rgb(${Math.round(topColor.r * 255)}, ${Math.round(topColor.g * 255)}, ${Math.round(topColor.b * 255)})`);
+  gradient.addColorStop(1, `rgb(${Math.round(bottomColor.r * 255)}, ${Math.round(bottomColor.g * 255)}, ${Math.round(bottomColor.b * 255)})`);
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.globalCompositeOperation = 'destination-in';
+  const puffs = [
+    [0.50, 0.48, 0.28],
+    [0.33, 0.58, 0.20],
+    [0.67, 0.56, 0.18],
+    [0.50, 0.67, 0.22],
+    [0.46, 0.34, 0.16],
+  ];
+  for (const [x, y, r] of puffs) {
+    const maskGradient = ctx.createRadialGradient(
+      canvas.width * x,
+      canvas.height * y,
+      0,
+      canvas.width * x,
+      canvas.height * y,
+      canvas.width * r,
+    );
+    maskGradient.addColorStop(0, 'rgba(255,255,255,0.92)');
+    maskGradient.addColorStop(0.7, 'rgba(255,255,255,0.42)');
+    maskGradient.addColorStop(1, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = maskGradient;
+    ctx.beginPath();
+    ctx.arc(canvas.width * x, canvas.height * y, canvas.width * r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function applyTimecycleOverrides(sampled, overrides) {
+  if (!sampled || !overrides || Object.keys(overrides).length === 0) return sampled;
+  const next = {
+    ...sampled,
+    values: { ...sampled.values },
+    three: { ...sampled.three },
+  };
+  for (const [key, overrideValue] of Object.entries(overrides)) {
+    const field = TIMECYCLE_FIELD_MAP.get(key);
+    if (!field) continue;
+    next.values[key] = cloneTimecycleValue(overrideValue, field.type);
+  }
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'fogColor') && next.values.skyTop && next.values.skyBottom) {
+    next.values.fogColor = {
+      r: (next.values.skyTop.r + (2 * next.values.skyBottom.r)) / 3,
+      g: (next.values.skyTop.g + (2 * next.values.skyBottom.g)) / 3,
+      b: (next.values.skyTop.b + (2 * next.values.skyBottom.b)) / 3,
+    };
+  }
+  if (next.values.skyTop) next.three.skyTop = toThreeColorFromTimecycleValue(next.values.skyTop);
+  if (next.values.skyBottom) next.three.skyBottom = toThreeColorFromTimecycleValue(next.values.skyBottom);
+  if (next.values.fogColor) next.three.fogColor = toThreeColorFromTimecycleValue(next.values.fogColor);
+  else if (sampled.three.fogColor?.isColor) next.three.fogColor = sampled.three.fogColor.clone();
+  if (next.values.water) next.three.waterColor = toThreeColorFromTimecycleValue(next.values.water);
+  return next;
+}
+
 function App() {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
@@ -82,6 +355,13 @@ function App() {
   const rendererRef = useRef(null);
   const sceneRef = useRef(null);
   const cameraRef = useRef(null);
+  const skySceneRef = useRef(null);
+  const skyCameraRef = useRef(null);
+  const skyMaterialRef = useRef(null);
+  const skyCloudSceneRef = useRef(null);
+  const lowCloudSpritesRef = useRef([]);
+  const fluffyCloudSpritesRef = useRef([]);
+  const fluffyCloudTextureRef = useRef(null);
   const worldRootRef = useRef(new THREE.Group());
   const rwRenderQueueRef = useRef(null);
   const rwWaterPipelineRef = useRef(null);
@@ -100,6 +380,26 @@ function App() {
   const selectedInstanceHighlightRef = useRef(null);
   const selectedObjectRef = useRef(null);
   const selectedTextureDetailRef = useRef(null);
+  const timecycleDataRef = useRef(null);
+  const timecycleStateRef = useRef({
+    sourcePath: '',
+    data: null,
+    current: null,
+    weatherNames: [...VCS_WEATHER_NAMES],
+    controls: {
+      hour: 12,
+      minute: 0,
+      weatherA: 0,
+      weatherB: 0,
+      weatherBlend: 0,
+      extraColour: -1,
+      overrides: {},
+    },
+  });
+  const cloudMotionRef = useRef({
+    cloudRotation: 0,
+    individualRotation: 0,
+  });
   const chunkFrustumRef = useRef(new THREE.Frustum());
   const chunkProjScreenMatrixRef = useRef(new THREE.Matrix4());
   const raycasterRef = useRef(new THREE.Raycaster());
@@ -165,6 +465,7 @@ function App() {
     quaternionOrder: 'XYZW',
     drawDistance: 300,
     renderingDistance: 5000,
+    lodDistMultiplier: 1,
     showLods: true,
     forceLodOnly: false,
     showTobjs: false,
@@ -378,6 +679,22 @@ function App() {
     disposeWorld(worldRoot);
     rwWaterPipelineRef.current?.dispose();
     rwWaterPipelineRef.current = null;
+    timecycleDataRef.current = null;
+    timecycleStateRef.current = {
+      sourcePath: '',
+      data: null,
+      current: null,
+      weatherNames: [...VCS_WEATHER_NAMES],
+      controls: {
+        hour: 12,
+        minute: 0,
+        weatherA: 0,
+        weatherB: 0,
+        weatherBlend: 0,
+        extraColour: -1,
+        overrides: {},
+      },
+    };
     renderItemsRef.current = [];
     renderChunksRef.current = [];
     renderMetricsRef.current = {
@@ -566,6 +883,70 @@ function App() {
       }
       pushConsoleLine('info', `IDE/IPL parsed in ${(performance.now() - parseStartTime).toFixed(1)} ms`);
 
+      const timecycRecord = trackAndResolveFile('DAT', 'data/timecyc.dat', {
+        declaredDetail: 'optional',
+        foundDetail: 'loaded',
+        missingDetail: 'missing optional',
+        warnOnMissing: false,
+      });
+      if (timecycRecord) {
+        try {
+          const parsedTimecycle = parseTimecyc(await timecycRecord.file.text(), {
+            gameVersion: uiStateRef.current.gameVersion,
+          });
+          const previousControls = timecycleStateRef.current?.controls || {};
+          const weatherNames = Array.isArray(parsedTimecycle.weatherNames) && parsedTimecycle.weatherNames.length > 0
+            ? parsedTimecycle.weatherNames
+            : [...VCS_WEATHER_NAMES];
+          const controls = {
+            hour: Number.isFinite(previousControls.hour) ? previousControls.hour : 12,
+            minute: Number.isFinite(previousControls.minute) ? previousControls.minute : 0,
+            weatherA: Number.isFinite(previousControls.weatherA) ? previousControls.weatherA : 0,
+            weatherB: Number.isFinite(previousControls.weatherB) ? previousControls.weatherB : 0,
+            weatherBlend: Number.isFinite(previousControls.weatherBlend) ? previousControls.weatherBlend : 0,
+            extraColour: Number.isFinite(previousControls.extraColour) ? previousControls.extraColour : -1,
+            overrides: previousControls.overrides && typeof previousControls.overrides === 'object'
+              ? { ...previousControls.overrides }
+              : {},
+          };
+          controls.weatherA = Math.min(Math.max(controls.weatherA, 0), weatherNames.length - 1);
+          controls.weatherB = Math.min(Math.max(controls.weatherB, 0), weatherNames.length - 1);
+          const current = applyTimecycleOverrides(sampleTimecyc(parsedTimecycle, controls), controls.overrides);
+          timecycleDataRef.current = parsedTimecycle;
+          timecycleStateRef.current = {
+            sourcePath: timecycRecord.resolvedPath,
+            data: parsedTimecycle,
+            current,
+            weatherNames,
+            controls,
+          };
+          pushConsoleLine(
+            'info',
+            `timecyc.dat loaded: ${parsedTimecycle.hours} hours x ${weatherNames.length} weathers (${timecycRecord.resolvedPath})`,
+          );
+        } catch (error) {
+          timecycleDataRef.current = null;
+          timecycleStateRef.current = {
+            sourcePath: '',
+            data: null,
+            current: null,
+            weatherNames: [...VCS_WEATHER_NAMES],
+            controls: {
+              hour: 12,
+              minute: 0,
+              weatherA: 0,
+              weatherB: 0,
+              weatherBlend: 0,
+              extraColour: -1,
+              overrides: {},
+            },
+          };
+          pushConsoleLine('warn', `timecyc.dat parse failed: ${formatConsoleArg(error)}`);
+        }
+      } else {
+        pushConsoleLine('warn', 'timecyc.dat not found. Fog/timecycle disabled.');
+      }
+
       totalObjectsRef.current = placements.length;
 
       setStats({
@@ -707,7 +1088,21 @@ function App() {
         });
         pendingWaterPipeline?.dispose();
         pendingWaterPipeline = pipeline;
-        pipeline.setTimecycleProvider(() => null);
+        pipeline.setTimecycleProvider(() => {
+          const current = timecycleStateRef.current?.current;
+          if (!current) return null;
+          const fogNear = Math.max(
+            cameraRef.current?.near ?? 0.1,
+            Math.min(current.values.fogStart, current.values.farClip - 1),
+          );
+          const fogFar = Math.max(fogNear + 1, current.values.farClip);
+          return {
+            color: current.three?.waterColor || null,
+            fogColor: current.three?.fogColor || null,
+            fogNear,
+            fogFar,
+          };
+        });
         const nearPosition = pipeline.nearMesh.geometry.getAttribute('position');
         const waterCells = nearPosition ? Math.floor(nearPosition.count / 6) : 0;
         pipeline.nearMesh.userData.water = {
@@ -726,14 +1121,53 @@ function App() {
           if (buildTokenRef.current !== token) return;
           const waterTextureEntry = particleTxd?.get?.(waterTextureName) || null;
           const waterTexture = waterTextureEntry?.texture || waterTextureEntry || null;
+          const lowCloudTextures = ['cloud1', 'cloud2', 'cloud3']
+            .map((name) => particleTxd?.get?.(name)?.texture || particleTxd?.get?.(name) || null)
+            .filter(Boolean);
+          const fluffyCloudTexture = particleTxd?.get?.('cloudmasked')?.texture || particleTxd?.get?.('cloudmasked') || null;
 
           if (!waterTexture) {
             pushConsoleLine('warn', `Water texture missing: particle/${waterConfig.textureName}. Using flat color water.`);
-            return;
+          } else {
+            pendingWaterPipeline?.setTexture(waterTexture);
+            pushConsoleLine('info', `Water texture applied: particle/${waterConfig.textureName}`);
           }
 
-          pendingWaterPipeline?.setTexture(waterTexture);
-          pushConsoleLine('info', `Water texture applied: particle/${waterConfig.textureName}`);
+          if (lowCloudTextures.length > 0) {
+            for (let index = 0; index < lowCloudSpritesRef.current.length; index += 1) {
+              const sprite = lowCloudSpritesRef.current[index];
+              if (!sprite?.material) continue;
+              const texture = lowCloudTextures[index % lowCloudTextures.length];
+              if (!texture) continue;
+              texture.wrapS = THREE.ClampToEdgeWrapping;
+              texture.wrapT = THREE.ClampToEdgeWrapping;
+              texture.magFilter = THREE.LinearFilter;
+              texture.minFilter = THREE.LinearMipmapLinearFilter;
+              texture.needsUpdate = true;
+              sprite.material.map = texture;
+              sprite.material.needsUpdate = true;
+            }
+            pushConsoleLine('info', `Cloud textures applied: particle/${lowCloudTextures.length >= 3 ? 'cloud1-3' : 'cloud*'}`);
+          } else {
+            pushConsoleLine('warn', 'Low cloud textures missing: particle/cloud1-3. Using fallback sprites.');
+          }
+
+          if (fluffyCloudTexture) {
+            fluffyCloudTexture.wrapS = THREE.ClampToEdgeWrapping;
+            fluffyCloudTexture.wrapT = THREE.ClampToEdgeWrapping;
+            fluffyCloudTexture.magFilter = THREE.LinearFilter;
+            fluffyCloudTexture.minFilter = THREE.LinearMipmapLinearFilter;
+            fluffyCloudTexture.needsUpdate = true;
+            fluffyCloudTextureRef.current = fluffyCloudTexture;
+            for (const sprite of fluffyCloudSpritesRef.current) {
+              if (!sprite?.material) continue;
+              sprite.material.map = fluffyCloudTexture;
+              sprite.material.needsUpdate = true;
+            }
+            pushConsoleLine('info', 'Cloud texture applied: particle/cloudmasked');
+          } else {
+            pushConsoleLine('warn', 'Fluffy cloud texture missing: particle/cloudmasked. Using fallback sprite.');
+          }
         })();
       } catch (error) {
         pushConsoleLine('error', `waterpro.dat parse failed: ${formatConsoleArg(error)}`);
@@ -1401,7 +1835,71 @@ function App() {
     canvas.tabIndex = 1;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x8ea9b5);
+    scene.background = null;
+    const skyScene = new THREE.Scene();
+    const skyCloudScene = new THREE.Scene();
+    const skyCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+    const skyMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uSkyTop: { value: SKY_DEFAULT_TOP.clone() },
+        uSkyBottom: { value: SKY_DEFAULT_BOTTOM.clone() },
+        uFogColor: { value: SKY_DEFAULT_FOG.clone() },
+        uCameraForward: { value: new THREE.Vector3(0, 0, -1) },
+        uCameraRight: { value: new THREE.Vector3(1, 0, 0) },
+        uCameraUp: { value: new THREE.Vector3(0, 1, 0) },
+        uHorizonY: { value: 0.5 },
+        uSmallStripHeight: { value: SKY_SMALL_STRIP_HEIGHT },
+        uHorizonStrength: { value: 0.8 },
+        uLowerBandEndY: { value: 0.38 },
+        uTanHalfFov: { value: Math.tan(THREE.MathUtils.degToRad(60 * 0.5)) },
+        uAspect: { value: 1 },
+        uBelowHorizonMix: { value: 0 },
+      },
+      vertexShader: SKY_VERTEX_SHADER,
+      fragmentShader: SKY_FRAGMENT_SHADER,
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+      toneMapped: false,
+    });
+    const skyQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), skyMaterial);
+    skyQuad.frustumCulled = false;
+    skyScene.add(skyQuad);
+    const lowCloudTextures = [createLowCloudTexture(0), createLowCloudTexture(1), createLowCloudTexture(2)];
+    const lowCloudSprites = LOW_CLOUD_OFFSETS_X.map((_, index) => {
+      const material = new THREE.SpriteMaterial({
+        map: lowCloudTextures[index % lowCloudTextures.length],
+        color: SKY_DEFAULT_FOG.clone(),
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        fog: false,
+        blending: THREE.AdditiveBlending,
+        toneMapped: false,
+      });
+      const sprite = new THREE.Sprite(material);
+      sprite.scale.set(900, 120, 1);
+      sprite.renderOrder = -900;
+      skyCloudScene.add(sprite);
+      return sprite;
+    });
+    const fluffyCloudTexture = createFluffyCloudTexture(SKY_DEFAULT_TOP, SKY_DEFAULT_BOTTOM);
+    const fluffyCloudSprites = FLUFFY_OFFSETS_X.map(() => {
+      const material = new THREE.SpriteMaterial({
+        map: fluffyCloudTexture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        fog: false,
+        blending: THREE.NormalBlending,
+        toneMapped: false,
+      });
+      const sprite = new THREE.Sprite(material);
+      sprite.scale.set(110, 110, 1);
+      sprite.renderOrder = -850;
+      skyCloudScene.add(sprite);
+      return sprite;
+    });
     const hudScene = new THREE.Scene();
     const hudCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
     hudCamera.position.set(0, 0, 1);
@@ -1516,6 +2014,13 @@ function App() {
     rendererRef.current = renderer;
     sceneRef.current = scene;
     cameraRef.current = camera;
+    skySceneRef.current = skyScene;
+    skyCameraRef.current = skyCamera;
+    skyMaterialRef.current = skyMaterial;
+    skyCloudSceneRef.current = skyCloudScene;
+    lowCloudSpritesRef.current = lowCloudSprites;
+    fluffyCloudSpritesRef.current = fluffyCloudSprites;
+    fluffyCloudTextureRef.current = fluffyCloudTexture;
     rwRenderQueueRef.current = new RWRenderQueue(worldRootRef.current);
     gridRef.current = grid;
     axesRef.current = axes;
@@ -1850,10 +2355,156 @@ function App() {
         }
       }
 
+      const timecycleInfo = timecycleStateRef.current;
+      const parsedTimecycle = timecycleDataRef.current;
+      if (parsedTimecycle) {
+        const sampled = applyTimecycleOverrides(
+          sampleTimecyc(parsedTimecycle, timecycleInfo.controls),
+          timecycleInfo.controls?.overrides,
+        );
+        timecycleInfo.current = sampled;
+      } else {
+        timecycleInfo.current = null;
+      }
+      const timecycleCurrent = timecycleInfo.current;
+      const effectiveFarClip = Number.isFinite(timecycleCurrent?.values?.farClip)
+        ? timecycleCurrent.values.farClip
+        : uiStateRef.current.renderingDistance;
+      const targetFarClip = Math.max(camera.near + 1, effectiveFarClip);
+      if (Math.abs(camera.far - targetFarClip) > 1e-6) {
+        camera.far = targetFarClip;
+        camera.updateProjectionMatrix();
+      }
+      const skyMaterial = skyMaterialRef.current;
+      const skyTopColor = timecycleCurrent?.three?.skyTop?.isColor
+        ? timecycleCurrent.three.skyTop
+        : SKY_DEFAULT_TOP;
+      const skyBottomColor = timecycleCurrent?.three?.skyBottom?.isColor
+        ? timecycleCurrent.three.skyBottom
+        : SKY_DEFAULT_BOTTOM;
+      const fogColor = timecycleCurrent?.three?.fogColor?.isColor
+        ? timecycleCurrent.three.fogColor
+        : SKY_DEFAULT_FOG;
+      const lowCloudColor = timecycleCurrent?.values?.lowClouds
+        ? toThreeColorFromTimecycleValue(timecycleCurrent.values.lowClouds)
+        : fogColor;
+      const fluffyTopColor = timecycleCurrent?.values?.fluffyCloudTop
+        ? toThreeColorFromTimecycleValue(timecycleCurrent.values.fluffyCloudTop)
+        : skyTopColor;
+      const fluffyBottomColor = timecycleCurrent?.values?.fluffyCloudBottom
+        ? toThreeColorFromTimecycleValue(timecycleCurrent.values.fluffyCloudBottom)
+        : skyBottomColor;
+      const cloudCoverage = THREE.MathUtils.clamp(timecycleCurrent?.cloudCoverage ?? 0, 0, 1);
+      const foggyness = THREE.MathUtils.clamp(timecycleCurrent?.foggyness ?? 0, 0, 1);
+      const extraSunnyness = THREE.MathUtils.clamp(timecycleCurrent?.extraSunnyness ?? 0, 0, 1);
+      const lowCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(cloudCoverage, foggyness, extraSunnyness), 0, 1) * 0.42;
+      const fluffyCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(foggyness, extraSunnyness), 0, 1) * 0.5;
+      const cloudMotion = cloudMotionRef.current;
+      if (skyMaterial?.uniforms) {
+        const cameraForward = new THREE.Vector3();
+        const cameraRight = new THREE.Vector3();
+        const cameraUp = new THREE.Vector3();
+        const horizonScratch = {
+          cameraForward: new THREE.Vector3(),
+          flatForward: new THREE.Vector3(),
+          horizonPoint: new THREE.Vector3(),
+        };
+        camera.getWorldDirection(cameraForward);
+        cameraRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+        cameraUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+        const projectedHorizonY = computeProjectedHorizonUvY(camera, horizonScratch);
+        const lodDistMultiplier = Math.max(0, uiStateRef.current.lodDistMultiplier ?? 1);
+        const horizonStripSpan = (
+          SKY_HORIZON_STRIP_HEIGHT
+          + (Math.max(camera.position.y, 0) / 300)
+          + (cameraUp.y < 0 ? 1.0 : Math.abs(cameraRight.y))
+        ) * lodDistMultiplier;
+        const lowerBandEndY = THREE.MathUtils.clamp(projectedHorizonY - SKY_SMALL_STRIP_HEIGHT - horizonStripSpan, 0, 1);
+        skyMaterial.uniforms.uSkyTop.value.copy(skyTopColor);
+        skyMaterial.uniforms.uSkyBottom.value.copy(skyBottomColor);
+        skyMaterial.uniforms.uFogColor.value.copy(fogColor);
+        skyMaterial.uniforms.uCameraForward.value.copy(cameraForward);
+        skyMaterial.uniforms.uCameraRight.value.copy(cameraRight);
+        skyMaterial.uniforms.uCameraUp.value.copy(cameraUp);
+        skyMaterial.uniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+        skyMaterial.uniforms.uAspect.value = camera.aspect;
+        skyMaterial.uniforms.uBelowHorizonMix.value = THREE.MathUtils.clamp((camera.position.y - 25) / 80, 0, 1);
+        skyMaterial.uniforms.uHorizonY.value = projectedHorizonY;
+        skyMaterial.uniforms.uSmallStripHeight.value = SKY_SMALL_STRIP_HEIGHT;
+        skyMaterial.uniforms.uHorizonStrength.value = 1.0;
+        skyMaterial.uniforms.uLowerBandEndY.value = lowerBandEndY;
+      }
+      const fluffyCloudTexture = fluffyCloudTextureRef.current;
+      if (fluffyCloudTexture?.image && typeof fluffyCloudTexture.image.getContext === 'function') {
+        const topHex = fluffyTopColor.getHexString();
+        const bottomHex = fluffyBottomColor.getHexString();
+        if (fluffyCloudTexture.userData.topHex !== topHex || fluffyCloudTexture.userData.bottomHex !== bottomHex) {
+          updateFluffyCloudTexture(fluffyCloudTexture.image, fluffyTopColor, fluffyBottomColor);
+          fluffyCloudTexture.needsUpdate = true;
+          fluffyCloudTexture.userData.topHex = topHex;
+          fluffyCloudTexture.userData.bottomHex = bottomHex;
+        }
+      }
+      const cameraForwardForClouds = new THREE.Vector3();
+      camera.getWorldDirection(cameraForwardForClouds);
+      const cloudTurnFactor = Math.sin(Math.atan2(cameraForwardForClouds.x, cameraForwardForClouds.z) - 0.85);
+      const cloudWind = 1.0;
+      if (dt > 0) {
+        // Match VC's incremental update model instead of binding cloud motion to absolute wall time.
+        cloudMotion.cloudRotation += cloudWind * cloudTurnFactor * 0.075 * dt;
+        cloudMotion.individualRotation += ((cloudWind * 50) + 9) * (Math.PI / 65336) * dt;
+      }
+      const cloudRotSin = Math.sin(cloudMotion.cloudRotation);
+      const cloudRotCos = Math.cos(cloudMotion.cloudRotation);
+      const lowCloudSprites = lowCloudSpritesRef.current;
+      for (let index = 0; index < lowCloudSprites.length; index += 1) {
+        const sprite = lowCloudSprites[index];
+        if (!sprite) continue;
+        sprite.visible = lowCloudAlpha > 0.001;
+        sprite.position.set(
+          camera.position.x + (800 * LOW_CLOUD_OFFSETS_X[index]),
+          (60 * LOW_CLOUD_HEIGHTS[index]) + 40,
+          camera.position.z + (800 * LOW_CLOUD_OFFSETS_Z[index]),
+        );
+        sprite.material.color.copy(lowCloudColor);
+        sprite.material.opacity = lowCloudAlpha;
+      }
+      const fluffyCloudSprites = fluffyCloudSpritesRef.current;
+      for (let index = 0; index < fluffyCloudSprites.length; index += 1) {
+        const sprite = fluffyCloudSprites[index];
+        if (!sprite) continue;
+        const localX = 2 * FLUFFY_OFFSETS_X[index];
+        const localZ = 2 * FLUFFY_OFFSETS_Z[index];
+        sprite.visible = fluffyCloudAlpha > 0.001;
+        sprite.position.set(
+          camera.position.x + (localX * cloudRotCos) + (localZ * cloudRotSin),
+          (40 * FLUFFY_HEIGHTS[index]) + 40,
+          camera.position.z + (localX * cloudRotSin) - (localZ * cloudRotCos),
+        );
+        sprite.material.color.copy(fluffyBottomColor).lerp(fluffyTopColor, 0.4);
+        sprite.material.opacity = fluffyCloudAlpha;
+        sprite.material.rotation = cloudMotion.individualRotation;
+      }
+
+      if (timecycleCurrent?.three?.fogColor?.isColor) {
+        const fogNear = Math.max(camera.near, Math.min(timecycleCurrent.values.fogStart, timecycleCurrent.values.farClip - 1));
+        const fogFar = Math.max(fogNear + 1, timecycleCurrent.values.farClip);
+        if (!scene.fog || !scene.fog.isFog) {
+          scene.fog = new THREE.Fog(timecycleCurrent.three.fogColor.clone(), fogNear, fogFar);
+        } else {
+          scene.fog.color.copy(timecycleCurrent.three.fogColor);
+          scene.fog.near = fogNear;
+          scene.fog.far = fogFar;
+        }
+      } else {
+        scene.fog = null;
+      }
+      scene.background = null;
+
       lodUpdateAccumulatorRef.current += dt;
       const lodState = lodUpdateStateRef.current;
       const drawDistance = uiStateRef.current.drawDistance;
-      const renderingDistance = uiStateRef.current.renderingDistance;
+      const renderingDistance = effectiveFarClip;
       const showLods = uiStateRef.current.showLods;
       const forceLodOnly = uiStateRef.current.forceLodOnly;
       const showTobjs = uiStateRef.current.showTobjs;
@@ -1998,12 +2649,6 @@ function App() {
 
       grid.visible = uiStateRef.current.showGrid;
       axes.visible = uiStateRef.current.showAxes;
-      const targetFarClip = Math.max(camera.near + 1, uiStateRef.current.renderingDistance);
-      if (Math.abs(camera.far - targetFarClip) > 1e-6) {
-        camera.far = targetFarClip;
-        camera.updateProjectionMatrix();
-      }
-
       if (lastWireframeRef.current !== uiStateRef.current.wireframe) {
         applyWireframe(worldRootRef.current, uiStateRef.current.wireframe);
         rwWaterPipelineRef.current?.setWireframe(uiStateRef.current.wireframe);
@@ -2032,19 +2677,33 @@ function App() {
         showWavy: uiStateRef.current.waterShowWavy,
         showWake: uiStateRef.current.waterShowWake ?? false,
       });
-      const savedSceneBackground = scene.background;
+      const skyScene = skySceneRef.current;
+      const skyCamera = skyCameraRef.current;
+      const skyCloudScene = skyCloudSceneRef.current;
+      const farBackgroundColor = skyBottomColor;
       try {
         const rwRenderQueue = rwRenderQueueRef.current;
         rwRenderQueue?.prepareFrame(camera);
+        renderer.autoClear = true;
+        if (skyScene && skyCamera) {
+          renderer.render(skyScene, skyCamera);
+        } else {
+          renderer.setClearColor(farBackgroundColor, 1);
+          renderer.clear(true, true, true);
+        }
+        renderer.autoClear = false;
+        renderer.clearDepth();
+        if (skyCloudScene) {
+          renderer.render(skyCloudScene, camera);
+          renderer.clearDepth();
+        }
         if (waterPipeline?.hasRenderableWater() && uiStateRef.current.renderWater) {
           let waterStage = 'update';
           try {
             waterPipeline.update(camera, time, dt);
-            scene.background = null;
 
             waterStage = 'renderFar';
-            renderer.autoClear = true;
-            waterPipeline.renderFar(renderer, camera, savedSceneBackground);
+            waterPipeline.renderFar(renderer, camera, null);
             renderer.autoClear = false;
             renderer.clearDepth();
 
@@ -2067,11 +2726,9 @@ function App() {
             renderer.render(scene, camera);
             rwRenderQueue?.popCameraBucketMask(camera);
             renderer.autoClear = true;
-            scene.background = savedSceneBackground;
           } catch (waterError) {
             rwRenderQueue?.popCameraBucketMask(camera);
             rwRenderQueue?.popCameraBucketMask(camera);
-            scene.background = savedSceneBackground;
             console.error('Water pipeline runtime error:', waterError);
             const farPos = waterPipeline?.farMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
             const farUv = waterPipeline?.farMesh?.geometry?.getAttribute?.('uv')?.array?.byteLength ?? 'missing';
@@ -2089,13 +2746,13 @@ function App() {
             setStatus(`Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}. Water disabled.`);
             rwWaterPipelineRef.current?.dispose();
             rwWaterPipelineRef.current = null;
-            renderer.autoClear = true;
+            renderer.autoClear = false;
             rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
             renderer.render(scene, camera);
             rwRenderQueue?.popCameraBucketMask(camera);
           }
         } else {
-          renderer.autoClear = true;
+          renderer.autoClear = false;
           rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
           renderer.render(scene, camera);
           rwRenderQueue?.popCameraBucketMask(camera);
@@ -2125,7 +2782,6 @@ function App() {
         renderer.render(hudScene, hudCamera);
         renderer.autoClear = true;
       } catch (error) {
-        scene.background = savedSceneBackground;
         console.error('Renderer runtime error:', error);
         if (!backendRuntimeFailed) {
           backendRuntimeFailed = true;
@@ -2290,15 +2946,29 @@ function App() {
           20,
           3000,
         );
-        ImGui.Text('rendering dist: max visible distance (hide all beyond this)');
+        const currentFarClip = timecycleStateRef.current?.current?.values?.farClip;
+        ImGui.Text('far clip: max visible distance (timecyc-driven when loaded)');
+        if (Number.isFinite(currentFarClip)) ImGui.BeginDisabled();
         ImGui.SliderInt(
-          'rendering dist',
-          (value = Math.round(uiStateRef.current.renderingDistance)) => {
-            uiStateRef.current.renderingDistance = value;
-            return value;
+          'Far Clip',
+          (value = Math.round(Number.isFinite(currentFarClip) ? currentFarClip : uiStateRef.current.renderingDistance)) => {
+            if (!Number.isFinite(currentFarClip)) uiStateRef.current.renderingDistance = value;
+            return Math.round(Number.isFinite(currentFarClip) ? currentFarClip : value);
           },
           50,
           20000,
+        );
+        if (Number.isFinite(currentFarClip)) ImGui.EndDisabled();
+        ImGui.Text('lod dist multiplier: VC horizon strip scale');
+        ImGui.SliderFloat(
+          'LOD Dist Multiplier',
+          (value = uiStateRef.current.lodDistMultiplier) => {
+            uiStateRef.current.lodDistMultiplier = value;
+            return value;
+          },
+          0,
+          4,
+          '%.2f',
         );
         ImGui.PopItemWidth();
         ImGui.Checkbox(
@@ -2337,6 +3007,162 @@ function App() {
         }
 
           ImGui.TextWrapped(liveStatus);
+          ImGui.End();
+        }
+
+        if (isWindowOpen('timecycle')) {
+          ImGui.SetNextWindowPos(new Vec2(460, 16), ImGui.Cond.Once);
+          ImGui.SetNextWindowSize(new Vec2(420, 0), ImGui.Cond.Once);
+          ImGui.Begin(
+            'Time & Weather',
+            (value = isWindowOpen('timecycle')) => setWindowOpen('timecycle', value),
+          );
+          const tcState = timecycleStateRef.current;
+          const tcData = tcState?.data;
+          const tcCurrent = tcState?.current;
+          const tcControls = tcState?.controls;
+          const weatherNames = Array.isArray(tcState?.weatherNames) && tcState.weatherNames.length > 0
+            ? tcState.weatherNames
+            : [...VCS_WEATHER_NAMES];
+          if (!tcData || !tcCurrent || !tcControls) {
+            ImGui.TextWrapped('No timecyc.dat loaded or current game version format is not implemented.');
+          } else {
+            const timecycleRow = (label, drawControl) => {
+              ImGui.PushID(label);
+              ImGui.Columns(2, `timecycle-row-${label}`, false);
+              ImGui.SetColumnWidth(0, 130);
+              ImGui.AlignTextToFramePadding();
+              ImGui.TextUnformatted(label);
+              ImGui.NextColumn();
+              ImGui.PushItemWidth(-1);
+              drawControl();
+              ImGui.PopItemWidth();
+              ImGui.Columns(1);
+              ImGui.PopID();
+            };
+
+            ImGui.TextWrapped(`Source: ${tcState.sourcePath || 'data/timecyc.dat'}`);
+            if (Object.keys(tcControls.overrides || {}).length > 0) {
+              if (ImGui.Button('Reset Overrides')) {
+                tcControls.overrides = {};
+              }
+              ImGui.Separator();
+            }
+            const defaultOpen = ImGui.TreeNodeFlags?.DefaultOpen ?? 0;
+            if (ImGui.CollapsingHeader('Time Controls', defaultOpen)) {
+              timecycleRow('Time Of Day', () => {
+                ImGui.SliderInt(
+                  '##time-of-day',
+                  (value = ((tcControls.hour * 60) + tcControls.minute)) => {
+                    const totalMinutes = Math.max(0, Math.min(1439, Math.round(value)));
+                    tcControls.hour = Math.floor(totalMinutes / 60);
+                    tcControls.minute = totalMinutes % 60;
+                    return totalMinutes;
+                  },
+                  0,
+                  1439,
+                  `${String(tcControls.hour).padStart(2, '0')}:${String(tcControls.minute).padStart(2, '0')}`,
+                );
+              });
+              timecycleRow('Weather A', () => {
+                if (ImGui.BeginCombo('##weather-a', weatherNames[tcControls.weatherA] || 'UNKNOWN')) {
+                  for (let index = 0; index < weatherNames.length; index += 1) {
+                    const selected = tcControls.weatherA === index;
+                    if (ImGui.Selectable(`${index}: ${weatherNames[index]}`, selected)) tcControls.weatherA = index;
+                    if (selected) ImGui.SetItemDefaultFocus();
+                  }
+                  ImGui.EndCombo();
+                }
+              });
+              timecycleRow('Weather B', () => {
+                if (ImGui.BeginCombo('##weather-b', weatherNames[tcControls.weatherB] || 'UNKNOWN')) {
+                  for (let index = 0; index < weatherNames.length; index += 1) {
+                    const selected = tcControls.weatherB === index;
+                    if (ImGui.Selectable(`${index}: ${weatherNames[index]}`, selected)) tcControls.weatherB = index;
+                    if (selected) ImGui.SetItemDefaultFocus();
+                  }
+                  ImGui.EndCombo();
+                }
+              });
+              timecycleRow('Weather Blend', () => {
+                ImGui.SliderFloat(
+                  '##weather-blend',
+                  (value = tcControls.weatherBlend) => {
+                    tcControls.weatherBlend = Math.max(0, Math.min(1, value));
+                    return tcControls.weatherBlend;
+                  },
+                  0,
+                  1,
+                  '%.3f',
+                );
+              });
+              if (tcData.extraColourCount > 0 && tcData.extraColourWeatherIndex >= 0) {
+                timecycleRow('Extra Colour', () => {
+                  ImGui.SliderInt(
+                    '##extra-colour',
+                    (value = tcControls.extraColour) => {
+                      tcControls.extraColour = Math.max(-1, Math.min((tcData.extraColourCount * tcData.hours) - 1, Math.round(value)));
+                      return tcControls.extraColour;
+                    },
+                    -1,
+                    (tcData.extraColourCount * tcData.hours) - 1,
+                    tcControls.extraColour < 0 ? 'Disabled' : `Hour ${tcControls.extraColour % tcData.hours}`,
+                  );
+                });
+              }
+              ImGui.TextWrapped(`Current Weather: ${tcCurrent.weatherNameA} -> ${tcCurrent.weatherNameB}`);
+              ImGui.Text(`Time Alpha: ${tcCurrent.timeAlpha.toFixed(3)}`);
+              if (tcCurrent.extraColourEnabled) {
+                ImGui.Text(`Extra Colour Active: ${tcCurrent.extraColour}`);
+              }
+            }
+
+            if (ImGui.CollapsingHeader('Timecycle Parameters', defaultOpen)) {
+              for (const field of TIMECYCLE_FIELD_GROUPS) {
+                const value = tcCurrent.values[field.key];
+                if (value == null) continue;
+                timecycleRow(field.label, () => {
+                if (field.type === 'rgb' || field.type === 'rgba') {
+                  let color = toTimecycleColorArray(value, field.type);
+                  const changed = field.type === 'rgba'
+                    ? ImGui.ColorEdit4(`##${field.key}`, color)
+                    : ImGui.ColorEdit3(`##${field.key}`, color);
+                  if (changed) {
+                    tcControls.overrides[field.key] = fromTimecycleColorArray(color, field.type);
+                  }
+                } else if (field.key === 'farClip' || field.key === 'fogStart') {
+                  let nextValue = Number(tcControls.overrides[field.key] ?? value);
+                  const changed = ImGui.SliderFloat(
+                    `##${field.key}`,
+                    (editValue = nextValue) => {
+                      nextValue = editValue;
+                      return editValue;
+                    },
+                    field.key === 'farClip' ? 50 : -128,
+                    4000,
+                    '%.3f',
+                  );
+                  if (changed) tcControls.overrides[field.key] = nextValue;
+                } else {
+                  let nextValue = Number(tcControls.overrides[field.key] ?? value);
+                  const changed = ImGui.InputFloat(
+                    `##${field.key}`,
+                    (editValue = nextValue) => {
+                      nextValue = editValue;
+                      return editValue;
+                    },
+                    0.1,
+                    1,
+                    '%.3f',
+                  );
+                  if (changed) tcControls.overrides[field.key] = nextValue;
+                }
+                  ImGui.SameLine();
+                  if (ImGui.SmallButton(`Reset##${field.key}`)) delete tcControls.overrides[field.key];
+                });
+              }
+            }
+          }
           ImGui.End();
         }
 
@@ -2707,6 +3533,38 @@ function App() {
                   1,
                 );
               }
+              if (ImGui.CollapsingHeader('Sky', defaultOpen)) {
+                const renderSkySliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
+                  ImGui.PushID(id);
+                  ImGui.Columns(2, `sky-row-${id}`, false);
+                  ImGui.SetColumnWidth(0, 170);
+                  ImGui.PushItemWidth(-1);
+                  ImGui.SliderFloat(
+                    '##value',
+                    (value = getter()) => {
+                      setter(value);
+                      return value;
+                    },
+                    min,
+                    max,
+                    format,
+                  );
+                  ImGui.PopItemWidth();
+                  ImGui.NextColumn();
+                  ImGui.AlignTextToFramePadding();
+                  ImGui.TextUnformatted(label);
+                  ImGui.Columns(1);
+                  ImGui.PopID();
+                };
+                renderSkySliderRow(
+                  'lod-dist-multiplier',
+                  'LOD Dist Multiplier',
+                  () => uiStateRef.current.lodDistMultiplier,
+                  (value) => { uiStateRef.current.lodDistMultiplier = value; },
+                  0,
+                  4,
+                );
+              }
               ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem('Backend')) {
@@ -2893,6 +3751,16 @@ function App() {
       if (renderer && typeof renderer.dispose === 'function') renderer.dispose();
       Object.values(iconTextures).forEach((texture) => texture.dispose());
       iconMaterial.dispose();
+      for (const sprite of lowCloudSpritesRef.current) {
+        sprite.material.map?.dispose?.();
+        sprite.material.dispose?.();
+      }
+      for (const sprite of fluffyCloudSpritesRef.current) {
+        sprite.material.dispose?.();
+      }
+      fluffyCloudTextureRef.current?.dispose?.();
+      skyQuad.geometry.dispose();
+      skyMaterial.dispose();
       imguiGlRef.current = null;
       rwWaterPipelineRef.current?.dispose();
       rwWaterPipelineRef.current = null;
