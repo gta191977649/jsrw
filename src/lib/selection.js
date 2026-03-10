@@ -4,7 +4,7 @@ const OVERLAY_MATERIAL = new THREE.MeshBasicMaterial({
   color: new THREE.Color(1, 0.1, 0.1),
   transparent: true,
   opacity: 0.45,
-  depthTest: true,
+  depthTest: false,
   depthWrite: false,
   side: THREE.DoubleSide,
   fog: false,

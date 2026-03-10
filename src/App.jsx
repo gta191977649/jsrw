@@ -15,6 +15,9 @@ import { buildLodMapping, isLodModel } from './lib/lod';
 import { PlayerControllerAdapter } from './lib/playerControllerAdapter';
 import { APP_MODE_EDITOR, APP_MODE_TEST, PlayerModeManager } from './lib/PlayerModeManager';
 import {
+  cloneRWMaterialDescriptor,
+  createThreeMaterialFromRW,
+  getRWMaterialDescriptor,
   applyDisableVertexColor,
   normalizeTextureDictionary,
   prepareTobjInstanceMaterials,
@@ -28,6 +31,8 @@ import {
   applyGlobalBackfaceCulling,
   applyWireframe,
   disposeWorld,
+  getChunkCenterFromKey,
+  getChunkKeyFromPosition,
   makeAssetKey,
 } from './lib/worldUtils';
 import { WINDOW_DEFS } from './ui/windows';
@@ -43,6 +48,18 @@ import './App.css';
 
 const MAX_CONSOLE_LINES = 500;
 const MAX_FAILED_MODELS = 5000;
+const CHUNK_ACTIVE_MARGIN = 384;
+const HIDDEN_INSTANCE_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
+const INSTANCE_SELECTION_MATERIAL = new THREE.MeshBasicMaterial({
+  color: new THREE.Color(1, 0.1, 0.1),
+  transparent: true,
+  opacity: 0.45,
+  depthTest: false,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  fog: false,
+  toneMapped: false,
+});
 
 function yieldToBrowser() {
   return new Promise((resolve) => {
@@ -67,7 +84,17 @@ function App() {
   const rwRenderQueueRef = useRef(null);
   const rwWaterPipelineRef = useRef(null);
   const renderItemsRef = useRef([]);
+  const renderChunksRef = useRef([]);
+  const renderMetricsRef = useRef({
+    activeChunks: 0,
+    activeItems: 0,
+    visibleNear: 0,
+    visibleLod: 0,
+    drawCalls: 0,
+    triangles: 0,
+  });
   const selectedObjectRootRef = useRef(null);
+  const selectedInstanceHighlightRef = useRef(null);
   const selectedObjectRef = useRef(null);
   const selectedTextureDetailRef = useRef(null);
   const raycasterRef = useRef(new THREE.Raycaster());
@@ -167,6 +194,9 @@ function App() {
     failed: 0,
     unresolved: 0,
     nearOnly: 0,
+    totalChunks: 0,
+    instancedBatches: 0,
+    instancedItems: 0,
   });
   const [consoleLines, setConsoleLines] = useState([]);
   const [failedModels, setFailedModels] = useState([]);
@@ -321,6 +351,10 @@ function App() {
   }, []);
 
   const clearWorld = useCallback(() => {
+    if (selectedInstanceHighlightRef.current?.parent) {
+      selectedInstanceHighlightRef.current.parent.remove(selectedInstanceHighlightRef.current);
+    }
+    selectedInstanceHighlightRef.current = null;
     if (selectedObjectRootRef.current) {
       clearObjectSelectionHighlight(selectedObjectRootRef.current);
       selectedObjectRootRef.current = null;
@@ -335,12 +369,30 @@ function App() {
     rwWaterPipelineRef.current?.dispose();
     rwWaterPipelineRef.current = null;
     renderItemsRef.current = [];
+    renderChunksRef.current = [];
+    renderMetricsRef.current = {
+      activeChunks: 0,
+      activeItems: 0,
+      visibleNear: 0,
+      visibleLod: 0,
+      drawCalls: 0,
+      triangles: 0,
+    };
     rwRenderQueueRef.current?.markDirty();
     lodUpdateStateRef.current.needsRefresh = true;
     lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
     setShowGameIcon(false);
     setBuildProgress({ active: false, current: 0, total: 0 });
-    setStats((prev) => ({ ...prev, loaded: 0, failed: 0, unresolved: 0, nearOnly: 0 }));
+    setStats((prev) => ({
+      ...prev,
+      loaded: 0,
+      failed: 0,
+      unresolved: 0,
+      nearOnly: 0,
+      totalChunks: 0,
+      instancedBatches: 0,
+      instancedItems: 0,
+    }));
     setFailedModels([]);
     pushConsoleLine('info', 'World cleared');
   }, [pushConsoleLine, resetImguiTextureCache]);
@@ -510,6 +562,9 @@ function App() {
         failed: 0,
         unresolved: 0,
         nearOnly: 0,
+        totalChunks: 0,
+        instancedBatches: 0,
+        instancedItems: 0,
       });
 
       const txdLoader = new TXDLoader();
@@ -846,6 +901,155 @@ function App() {
       placement.position.z,
     ));
     const renderItems = [];
+    const renderChunkMap = new Map();
+    const instancedBatchMap = new Map();
+    let instancedItems = 0;
+
+    const getRenderChunk = (anchor) => {
+      const chunkKey = getChunkKeyFromPosition(anchor);
+      if (renderChunkMap.has(chunkKey)) return renderChunkMap.get(chunkKey);
+      const chunk = {
+        key: chunkKey,
+        center: getChunkCenterFromKey(chunkKey),
+        items: [],
+        active: false,
+      };
+      renderChunkMap.set(chunkKey, chunk);
+      return chunk;
+    };
+
+    const registerRenderItem = (item) => {
+      renderItems.push(item);
+      const chunk = getRenderChunk(item.anchor);
+      chunk.items.push(item);
+      item.chunkKey = chunk.key;
+      return item;
+    };
+
+    const buildPlacementWorldMatrix = (placement, anchor) => {
+      const placementQuaternion = gtaPlacementQuaternionToThree(
+        placement.rotation.x,
+        placement.rotation.y,
+        placement.rotation.z,
+        placement.rotation.w,
+        uiStateRef.current.quaternionOrder,
+      );
+      return new THREE.Matrix4().compose(
+        anchor,
+        placementQuaternion,
+        new THREE.Vector3(1, 1, 1),
+      );
+    };
+
+    const buildObjectDetail = (ide, placement, lodKind, model) => ({
+      id: ide.id,
+      placementId: placement.id,
+      modelName: ide.modelName,
+      txdName: ide.txdName,
+      flags: ide.flags | 0,
+      activeFlagNames: decodeRwIdeFlags(ide.flags).activeFlags,
+      section: ide.section,
+      drawDistance: ide.drawDistance,
+      lodKind,
+      position: {
+        x: placement.position.x,
+        y: placement.position.y,
+        z: placement.position.z,
+      },
+      rotation: {
+        x: placement.rotation.x,
+        y: placement.rotation.y,
+        z: placement.rotation.z,
+        w: placement.rotation.w,
+      },
+      usedTextureEntries: model.usedTextureEntries || [],
+    });
+
+    const canUseInstancing = (model, ide) => {
+      if (!model?.instancable || !Array.isArray(model.meshDescriptors) || model.meshDescriptors.length === 0) {
+        return false;
+      }
+      if (ide?.section === 'tobjs') return false;
+      const decoded = decodeRwIdeFlags(ide?.flags);
+      if (decoded.drawLast || decoded.additive || decoded.noZWrite) return false;
+      return model.meshDescriptors.every((descriptor) => {
+        if (!descriptor?.geometry || !descriptor?.material || Array.isArray(descriptor.material)) return false;
+        const rwMaterial = getRWMaterialDescriptor(descriptor.material);
+        if (!rwMaterial) return false;
+        return rwMaterial.renderBucket === 'opaque' || rwMaterial.renderBucket === 'cutout';
+      });
+    };
+
+    const ensureInstancedBatch = (model, lodKind, ide, descriptorIndex, descriptor) => {
+      const batchKey = `${model.key}|${lodKind}|${descriptorIndex}|${ide.flags | 0}`;
+      if (instancedBatchMap.has(batchKey)) return instancedBatchMap.get(batchKey);
+      const rwMaterial = getRWMaterialDescriptor(descriptor.material);
+      const material = createThreeMaterialFromRW(cloneRWMaterialDescriptor(rwMaterial), descriptor.geometry);
+      const mesh = new THREE.InstancedMesh(descriptor.geometry, material, 1);
+      mesh.count = 0;
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      mesh.frustumCulled = false;
+      mesh.matrixAutoUpdate = false;
+      mesh.matrixWorldAutoUpdate = false;
+      mesh.visible = true;
+      applyRwIdeFlagsToInstance(mesh, ide.flags);
+      worldRoot.add(mesh);
+      const batch = {
+        key: batchKey,
+        mesh,
+        entries: [],
+        visibleCount: 0,
+      };
+      instancedBatchMap.set(batchKey, batch);
+      return batch;
+    };
+
+    const tryBuildInstancedHandles = async (placement, lodKind, anchor) => {
+      const ide = ideByModel.get(placement.modelName) ?? ideById.get(placement.id);
+      if (!ide) {
+        unresolved += 1;
+        pushConsoleLine('error', `Missing IDE def for placement: model=${placement.modelName} id=${placement.id}`, 'build');
+        return null;
+      }
+
+      try {
+        const model = await getModelTemplate(ide.modelName, ide.txdName);
+        if (!canUseInstancing(model, ide)) return null;
+        const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
+        const handles = [];
+        model.meshDescriptors.forEach((descriptor, descriptorIndex) => {
+          const batch = ensureInstancedBatch(model, lodKind, ide, descriptorIndex, descriptor);
+          const matrix = worldMatrix.clone().multiply(descriptor.localMatrix);
+          const handle = {
+            batch,
+            index: -1,
+            matrix,
+            placementMatrix: worldMatrix.clone(),
+            visible: false,
+            objectDetail: buildObjectDetail(ide, placement, lodKind, model),
+            selectionTemplate: model.template,
+          };
+          batch.entries.push(handle);
+          handles.push(handle);
+        });
+        loaded += 1;
+        instancedItems += 1;
+        return {
+          handles,
+          ide,
+          model,
+        };
+      } catch (error) {
+        failed += 1;
+        pushConsoleLine(
+          'error',
+          `Build failed: model=${ide.modelName} txd=${ide.txdName} lod=${lodKind} (${formatConsoleArg(error)})`,
+          'build',
+        );
+        pushFailedModel(`model=${ide.modelName} txd=${ide.txdName} lod=${lodKind} error=${formatConsoleArg(error)}`);
+        return null;
+      }
+    };
 
     const buildPlacementObject = async (placement, lodKind, anchor) => {
       const ide = ideByModel.get(placement.modelName) ?? ideById.get(placement.id);
@@ -857,20 +1061,7 @@ function App() {
 
       try {
         const model = await getModelTemplate(ide.modelName, ide.txdName);
-
-        const threePosition = anchor;
-        const placementQuaternion = gtaPlacementQuaternionToThree(
-          placement.rotation.x,
-          placement.rotation.y,
-          placement.rotation.z,
-          placement.rotation.w,
-          uiStateRef.current.quaternionOrder,
-        );
-        const worldMatrix = new THREE.Matrix4().compose(
-          threePosition,
-          placementQuaternion,
-          new THREE.Vector3(1, 1, 1),
-        );
+        const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
 
         const instance = SkeletonUtils.clone(model.template);
         instance.applyMatrix4(worldMatrix);
@@ -882,32 +1073,16 @@ function App() {
         applyRwIdeFlagsToInstance(instance, ide.flags);
         applyDisableVertexColor(instance, uiStateRef.current.disableVertexColor);
         applyGlobalBackfaceCulling(instance, uiStateRef.current.disableBackfaceCulling);
+        instance.updateMatrixWorld(true);
+        instance.traverse((node) => {
+          if (!node.isObject3D) return;
+          node.matrixAutoUpdate = false;
+          node.matrixWorldAutoUpdate = false;
+        });
         instance.visible = false;
         instance.userData.lodKind = lodKind;
         instance.userData.selectableRoot = true;
-        instance.userData.objectDetail = {
-          id: ide.id,
-          placementId: placement.id,
-          modelName: ide.modelName,
-          txdName: ide.txdName,
-          flags: ide.flags | 0,
-          activeFlagNames: decodeRwIdeFlags(ide.flags).activeFlags,
-          section: ide.section,
-          drawDistance: ide.drawDistance,
-          lodKind,
-          position: {
-            x: placement.position.x,
-            y: placement.position.y,
-            z: placement.position.z,
-          },
-          rotation: {
-            x: placement.rotation.x,
-            y: placement.rotation.y,
-            z: placement.rotation.z,
-            w: placement.rotation.w,
-          },
-          usedTextureEntries: model.usedTextureEntries || [],
-        };
+        instance.userData.objectDetail = buildObjectDetail(ide, placement, lodKind, model);
         worldRoot.add(instance);
         loaded += 1;
         return instance;
@@ -940,14 +1115,18 @@ function App() {
         const lodAnchor = placementAnchors[lodIndex];
         const nearDef = getPlacementDef(placement);
         const isTobj = nearDef?.section === 'tobjs';
-        const nearObj = await buildPlacementObject(placement, 'near', anchor);
-        const lodObj = await buildPlacementObject(lodPlacement, 'lod', lodAnchor);
-        if (nearObj || lodObj) {
-          renderItems.push({
+        const nearInstanced = await tryBuildInstancedHandles(placement, 'near', anchor);
+        const lodInstanced = await tryBuildInstancedHandles(lodPlacement, 'lod', lodAnchor);
+        const nearObj = nearInstanced ? null : await buildPlacementObject(placement, 'near', anchor);
+        const lodObj = lodInstanced ? null : await buildPlacementObject(lodPlacement, 'lod', lodAnchor);
+        if (nearObj || lodObj || nearInstanced || lodInstanced) {
+          registerRenderItem({
             isTobj,
             anchor: anchor.clone(),
             nearObj,
             lodObj,
+            nearHandles: nearInstanced?.handles || [],
+            lodHandles: lodInstanced?.handles || [],
             nearDrawDistance: Number.isFinite(nearDef?.drawDistance) ? nearDef.drawDistance : null,
             mode: 'hidden',
           });
@@ -973,13 +1152,16 @@ function App() {
         const anchor = placementAnchors[index];
         const nearDef = getPlacementDef(placement);
         const isTobj = nearDef?.section === 'tobjs';
-        const nearObj = await buildPlacementObject(placement, 'near', anchor);
-        if (nearObj) {
-          renderItems.push({
+        const nearInstanced = await tryBuildInstancedHandles(placement, 'near', anchor);
+        const nearObj = nearInstanced ? null : await buildPlacementObject(placement, 'near', anchor);
+        if (nearObj || nearInstanced) {
+          registerRenderItem({
             isTobj,
             anchor: anchor.clone(),
             nearObj,
             lodObj: null,
+            nearHandles: nearInstanced?.handles || [],
+            lodHandles: [],
             nearDrawDistance: Number.isFinite(nearDef?.drawDistance) ? nearDef.drawDistance : null,
             mode: 'hidden',
           });
@@ -1005,13 +1187,16 @@ function App() {
         const anchor = placementAnchors[index];
         const lodDef = getPlacementDef(placement);
         const isTobj = lodDef?.section === 'tobjs';
-        const lodObj = await buildPlacementObject(placement, 'lod', anchor);
-        if (lodObj) {
-          renderItems.push({
+        const lodInstanced = await tryBuildInstancedHandles(placement, 'lod', anchor);
+        const lodObj = lodInstanced ? null : await buildPlacementObject(placement, 'lod', anchor);
+        if (lodObj || lodInstanced) {
+          registerRenderItem({
             isTobj,
             anchor: anchor.clone(),
             nearObj: null,
             lodObj,
+            nearHandles: [],
+            lodHandles: lodInstanced?.handles || [],
             nearDrawDistance: null,
             mode: 'hidden',
           });
@@ -1025,15 +1210,54 @@ function App() {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
+      for (const batch of instancedBatchMap.values()) {
+        const entryCount = batch.entries.length;
+        const sourceGeometry = batch.mesh.geometry;
+        const sourceMaterial = batch.mesh.material;
+        const instancedMesh = new THREE.InstancedMesh(sourceGeometry, sourceMaterial, Math.max(1, entryCount));
+        instancedMesh.count = entryCount;
+        instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        instancedMesh.frustumCulled = false;
+        instancedMesh.matrixAutoUpdate = false;
+        instancedMesh.matrixWorldAutoUpdate = false;
+        instancedMesh.visible = false;
+        instancedMesh.material = sourceMaterial;
+        instancedMesh.userData = {
+          ...(batch.mesh.userData || {}),
+          rwInstanceEntries: batch.entries,
+        };
+        worldRoot.remove(batch.mesh);
+        batch.mesh = instancedMesh;
+        worldRoot.add(instancedMesh);
+        for (let index = 0; index < batch.entries.length; index += 1) {
+          const entry = batch.entries[index];
+          entry.index = index;
+          instancedMesh.setMatrixAt(index, HIDDEN_INSTANCE_MATRIX);
+        }
+        instancedMesh.instanceMatrix.needsUpdate = true;
+      }
+
       rwWaterPipelineRef.current?.dispose();
       rwWaterPipelineRef.current = pendingWaterPipeline;
       renderItemsRef.current = renderItems;
+      renderChunksRef.current = Array.from(renderChunkMap.values());
       rwRenderQueueRef.current?.markDirty();
       lodUpdateStateRef.current.needsRefresh = true;
       lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
       setBuildProgress({ active: false, current: buildTotal, total: buildTotal });
       setStatus(`Done. Loaded ${loaded} placements.`);
       setShowGameIcon(true);
+      setStats((prev) => ({
+        ...prev,
+        loaded,
+        failed,
+        unresolved,
+        totalChunks: renderChunkMap.size,
+        instancedBatches: instancedBatchMap.size,
+        instancedItems,
+      }));
+      pushConsoleLine('info', `Chunk visible set: ${renderChunkMap.size} chunks`);
+      pushConsoleLine('info', `Instanced batches: ${instancedBatchMap.size}, instanced placements: ${instancedItems}`);
       pushConsoleLine('info', `Build done. loaded=${loaded} failed=${failed} unresolved=${unresolved} tobjBuilt=${tobjBuilt}`);
       pushConsoleLine('info', `Placement build finished in ${(performance.now() - placementStartTime).toFixed(1)} ms`);
     } finally {
@@ -1052,6 +1276,34 @@ function App() {
     setStats((prev) => ({ ...prev, files: index.count }));
     setStatus(`Indexed ${index.count} files. Click Build World.`);
   }, [pushConsoleLine]);
+
+  const setInstanceHandlesVisible = useCallback((handles, visible, dirtyBatches) => {
+    if (!Array.isArray(handles) || handles.length === 0) return;
+    for (const handle of handles) {
+      if (!handle?.batch?.mesh || handle.index < 0 || handle.visible === visible) continue;
+      handle.batch.mesh.setMatrixAt(handle.index, visible ? handle.matrix : HIDDEN_INSTANCE_MATRIX);
+      handle.visible = visible;
+      handle.batch.visibleCount += visible ? 1 : -1;
+      handle.batch.mesh.visible = handle.batch.visibleCount > 0;
+      dirtyBatches?.add(handle.batch);
+    }
+  }, []);
+
+  const setRenderItemMode = useCallback((item, targetMode, dirtyBatches) => {
+    item.mode = targetMode;
+    if (item.nearObj) item.nearObj.visible = targetMode === 'near';
+    if (item.lodObj) item.lodObj.visible = targetMode === 'lod';
+    setInstanceHandlesVisible(item.nearHandles, targetMode === 'near', dirtyBatches);
+    setInstanceHandlesVisible(item.lodHandles, targetMode === 'lod', dirtyBatches);
+  }, [setInstanceHandlesVisible]);
+
+  const hasNearRenderable = useCallback((item) => (
+    Boolean(item?.nearObj) || (Array.isArray(item?.nearHandles) && item.nearHandles.length > 0)
+  ), []);
+
+  const hasLodRenderable = useCallback((item) => (
+    Boolean(item?.lodObj) || (Array.isArray(item?.lodHandles) && item.lodHandles.length > 0)
+  ), []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -1261,11 +1513,21 @@ function App() {
     const onKeyUp = (event) => {
       setKeyState(event.code, false);
     };
-    const setSelectedObjectRoot = (nextRoot) => {
+    const clearSelectedVisual = () => {
+      if (selectedInstanceHighlightRef.current?.parent) {
+        selectedInstanceHighlightRef.current.parent.remove(selectedInstanceHighlightRef.current);
+      }
+      selectedInstanceHighlightRef.current = null;
       const previous = selectedObjectRootRef.current;
-      if (previous && previous !== nextRoot) {
+      if (previous) {
         clearObjectSelectionHighlight(previous);
         rwRenderQueueRef.current?.markDirty();
+      }
+    };
+    const setSelectedObjectRoot = (nextRoot) => {
+      const previous = selectedObjectRootRef.current;
+      if (previous !== nextRoot || selectedInstanceHighlightRef.current) {
+        clearSelectedVisual();
       }
       if (!nextRoot) {
         selectedObjectRootRef.current = null;
@@ -1278,6 +1540,50 @@ function App() {
       selectedObjectRootRef.current = nextRoot;
       selectedObjectRef.current = nextRoot.userData?.objectDetail || null;
       setSelectedObject(selectedObjectRef.current);
+      setWindowOpen('objectDetail', true);
+    };
+
+    const buildInstanceSelectionHighlight = (entry) => {
+      if (!entry?.selectionTemplate?.traverse || !entry?.placementMatrix) return null;
+      const proxyRoot = new THREE.Group();
+      proxyRoot.name = 'instance_selection_highlight';
+      proxyRoot.userData = {
+        ...(proxyRoot.userData || {}),
+        rwInstanceSelectionProxy: true,
+      };
+      entry.selectionTemplate.traverse((node) => {
+        if (!node.isMesh) return;
+        const proxyMesh = new THREE.Mesh(node.geometry, INSTANCE_SELECTION_MATERIAL);
+        proxyMesh.name = `${node.name || 'mesh'}__instance_selection`;
+        proxyMesh.matrixAutoUpdate = false;
+        proxyMesh.matrixWorldAutoUpdate = false;
+        proxyMesh.frustumCulled = false;
+        proxyMesh.renderOrder = Math.max(node.renderOrder || 0, 9998);
+        proxyMesh.raycast = () => {};
+        proxyMesh.matrix.copy(entry.placementMatrix).multiply(node.matrixWorld);
+        proxyMesh.matrixWorld.copy(proxyMesh.matrix);
+        proxyRoot.add(proxyMesh);
+      });
+      return proxyRoot;
+    };
+
+    const setSelectedInstanceEntry = (entry) => {
+      clearSelectedVisual();
+      if (!entry?.objectDetail) {
+        selectedObjectRootRef.current = null;
+        selectedObjectRef.current = null;
+        setSelectedObject(null);
+        return;
+      }
+      const highlight = buildInstanceSelectionHighlight(entry);
+      if (highlight) {
+        worldRoot.add(highlight);
+        selectedInstanceHighlightRef.current = highlight;
+        rwRenderQueueRef.current?.markDirty();
+      }
+      selectedObjectRootRef.current = null;
+      selectedObjectRef.current = entry.objectDetail;
+      setSelectedObject(entry.objectDetail);
       setWindowOpen('objectDetail', true);
     };
 
@@ -1298,6 +1604,12 @@ function App() {
       raycaster.setFromCamera(pointerNdcRef.current, cameraObj);
       const intersections = raycaster.intersectObject(worldRoot, true);
       for (const hit of intersections) {
+        if (hit.object?.isInstancedMesh && Number.isInteger(hit.instanceId)) {
+          const entry = hit.object.userData?.rwInstanceEntries?.[hit.instanceId];
+          if (!entry) continue;
+          setSelectedInstanceEntry(entry);
+          return;
+        }
         const selectable = getSelectableRootFromObject(hit.object);
         if (!selectable || !selectable.visible) continue;
         setSelectedObjectRoot(selectable);
@@ -1533,43 +1845,81 @@ function App() {
         lodUpdateAccumulatorRef.current = 0;
         const renderDistSq = renderingDistance * renderingDistance;
         const drawDistSq = drawDistance * drawDistance;
-        for (const item of renderItemsRef.current) {
-          const distSq = camera.position.distanceToSquared(item.anchor);
-          const inRange = distSq <= renderDistSq;
-
-          let targetMode = 'hidden';
-          if (inRange) {
-            const tobjAllowed = !item.isTobj || showTobjs;
-            if (!tobjAllowed) {
-              targetMode = 'hidden';
-            } else if (forceLodOnly) {
-              targetMode = item.lodObj ? 'lod' : 'hidden';
-            } else if (!showLods) {
-              targetMode = item.nearObj ? 'near' : (item.lodObj ? 'lod' : 'hidden');
-            } else if (!item.nearObj && item.lodObj) {
-              targetMode = 'lod';
-            } else if (item.nearObj && item.lodObj) {
-              targetMode = distSq > drawDistSq ? 'lod' : 'near';
-            } else {
-              targetMode = item.nearObj ? 'near' : (item.lodObj ? 'lod' : 'hidden');
+        const chunkActiveDist = renderingDistance + CHUNK_ACTIVE_MARGIN;
+        const chunkActiveDistSq = chunkActiveDist * chunkActiveDist;
+        const dirtyBatches = new Set();
+        let activeChunks = 0;
+        let activeItems = 0;
+        let visibleNear = 0;
+        let visibleLod = 0;
+        for (const chunk of renderChunksRef.current) {
+          const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
+          if (!chunkInRange) {
+            if (chunk.active) {
+              chunk.active = false;
+              for (const item of chunk.items) {
+                setRenderItemMode(item, 'hidden', dirtyBatches);
+              }
             }
+            continue;
+          }
 
-            // mapviewer-like behavior: if this placement has no LOD pair,
-            // keep near model only within IDE draw distance.
-            if (targetMode === 'near' && item.nearObj && !item.lodObj && !item.isTobj) {
-              const ideDrawDistance = Number(item.nearDrawDistance);
-              if (Number.isFinite(ideDrawDistance) && ideDrawDistance > 0) {
-                if (distSq > (ideDrawDistance * ideDrawDistance)) {
-                  targetMode = 'hidden';
+          chunk.active = true;
+          activeChunks += 1;
+          activeItems += chunk.items.length;
+          for (const item of chunk.items) {
+            const distSq = camera.position.distanceToSquared(item.anchor);
+            const inRange = distSq <= renderDistSq;
+            const hasNear = hasNearRenderable(item);
+            const hasLod = hasLodRenderable(item);
+
+            let targetMode = 'hidden';
+            if (inRange) {
+              const tobjAllowed = !item.isTobj || showTobjs;
+              if (!tobjAllowed) {
+                targetMode = 'hidden';
+              } else if (forceLodOnly) {
+                targetMode = hasLod ? 'lod' : 'hidden';
+              } else if (!showLods) {
+                targetMode = hasNear ? 'near' : (hasLod ? 'lod' : 'hidden');
+              } else if (!hasNear && hasLod) {
+                targetMode = 'lod';
+              } else if (hasNear && hasLod) {
+                targetMode = distSq > drawDistSq ? 'lod' : 'near';
+              } else {
+                targetMode = hasNear ? 'near' : (hasLod ? 'lod' : 'hidden');
+              }
+
+              // mapviewer-like behavior: if this placement has no LOD pair,
+              // keep near model only within IDE draw distance.
+              if (targetMode === 'near' && hasNear && !hasLod && !item.isTobj) {
+                const ideDrawDistance = Number(item.nearDrawDistance);
+                if (Number.isFinite(ideDrawDistance) && ideDrawDistance > 0) {
+                  if (distSq > (ideDrawDistance * ideDrawDistance)) {
+                    targetMode = 'hidden';
+                  }
                 }
               }
             }
-          }
 
-          item.mode = targetMode;
-          if (item.nearObj) item.nearObj.visible = targetMode === 'near';
-          if (item.lodObj) item.lodObj.visible = targetMode === 'lod';
+            if (targetMode === 'near') visibleNear += 1;
+            if (targetMode === 'lod') visibleLod += 1;
+            setRenderItemMode(item, targetMode, dirtyBatches);
+          }
         }
+        for (const batch of dirtyBatches) {
+          batch.mesh.instanceMatrix.needsUpdate = true;
+          batch.mesh.boundingBox = null;
+          batch.mesh.boundingSphere = null;
+        }
+        renderMetricsRef.current = {
+          activeChunks,
+          activeItems,
+          visibleNear,
+          visibleLod,
+          drawCalls: renderer.info.render.calls,
+          triangles: renderer.info.render.triangles,
+        };
         lodState.needsRefresh = false;
       }
 
@@ -2057,7 +2407,15 @@ function App() {
             const fpsAvg = fpsCount > 0 ? (fpsSum / fpsCount) : 0;
             const fpsCurrentIndex = (fpsHistoryIndexRef.current - 1 + fpsValues.length) % fpsValues.length;
             const fpsCurrent = fpsValues[fpsCurrentIndex] || 0;
+            const rendererInfo = rendererRef.current?.info?.render;
+            const renderMetrics = renderMetricsRef.current;
             ImGui.Text(`FPS: ${fpsCurrent.toFixed(1)} | avg ${fpsAvg.toFixed(1)} | min ${fpsCount > 0 ? fpsMin.toFixed(1) : '0.0'} | max ${fpsMax.toFixed(1)}`);
+            ImGui.Text(`Draw Calls: ${rendererInfo?.calls ?? renderMetrics.drawCalls}`);
+            ImGui.Text(`Triangles: ${rendererInfo?.triangles ?? renderMetrics.triangles}`);
+            ImGui.Text(`Chunks: ${renderMetrics.activeChunks}/${statsRef.current.totalChunks}`);
+            ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
+            ImGui.Text(`Visible: near ${renderMetrics.visibleNear} | lod ${renderMetrics.visibleLod}`);
+            ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
             ImGui.Text('FPS Graph');
             const fpsPlotValues = Array.from({ length: fpsValues.length }, (_, i) => {
               const idx = (fpsHistoryIndexRef.current + i) % fpsValues.length;
@@ -2467,7 +2825,7 @@ function App() {
       rwWaterPipelineRef.current = null;
       disposeWorld(worldRoot);
     };
-  }, [activeBackend, clearWorld, isWindowOpen, pushConsoleLine, rebuildWorld, resetImguiTextureCache, setWindowOpen]);
+  }, [activeBackend, clearWorld, hasLodRenderable, hasNearRenderable, isWindowOpen, pushConsoleLine, rebuildWorld, resetImguiTextureCache, setRenderItemMode, setWindowOpen]);
 
   const fileSummary = useMemo(() => `Indexed files: ${stats.files}`, [stats.files]);
 
