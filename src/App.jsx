@@ -34,6 +34,7 @@ import {
   getChunkCenterFromKey,
   getChunkKeyFromPosition,
   makeAssetKey,
+  WORLD_CHUNK_SIZE,
 } from './lib/worldUtils';
 import { WINDOW_DEFS } from './ui/windows';
 import {
@@ -49,6 +50,7 @@ import './App.css';
 const MAX_CONSOLE_LINES = 500;
 const MAX_FAILED_MODELS = 5000;
 const CHUNK_ACTIVE_MARGIN = 384;
+const CHUNK_SPHERE_PADDING = WORLD_CHUNK_SIZE * 0.75;
 const HIDDEN_INSTANCE_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 const INSTANCE_SELECTION_MATERIAL = new THREE.MeshBasicMaterial({
   color: new THREE.Color(1, 0.1, 0.1),
@@ -87,6 +89,7 @@ function App() {
   const renderChunksRef = useRef([]);
   const renderMetricsRef = useRef({
     activeChunks: 0,
+    frustumChunks: 0,
     activeItems: 0,
     visibleNear: 0,
     visibleLod: 0,
@@ -97,6 +100,8 @@ function App() {
   const selectedInstanceHighlightRef = useRef(null);
   const selectedObjectRef = useRef(null);
   const selectedTextureDetailRef = useRef(null);
+  const chunkFrustumRef = useRef(new THREE.Frustum());
+  const chunkProjScreenMatrixRef = useRef(new THREE.Matrix4());
   const raycasterRef = useRef(new THREE.Raycaster());
   const pointerNdcRef = useRef(new THREE.Vector2());
   const imguiGlRef = useRef(null);
@@ -143,11 +148,16 @@ function App() {
   const lodUpdateStateRef = useRef({
     needsRefresh: true,
     lastCameraPos: new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN),
+    lastCameraQuat: new THREE.Quaternion(Number.NaN, Number.NaN, Number.NaN, Number.NaN),
     lastDrawDistance: 300,
     lastRenderingDistance: 5000,
     lastShowLods: true,
     lastForceLodOnly: false,
     lastShowTobjs: false,
+    lastCameraAspect: Number.NaN,
+    lastCameraFov: Number.NaN,
+    lastCameraNear: Number.NaN,
+    lastCameraFar: Number.NaN,
   });
 
   const uiStateRef = useRef({
@@ -372,6 +382,7 @@ function App() {
     renderChunksRef.current = [];
     renderMetricsRef.current = {
       activeChunks: 0,
+      frustumChunks: 0,
       activeItems: 0,
       visibleNear: 0,
       visibleLod: 0,
@@ -381,6 +392,11 @@ function App() {
     rwRenderQueueRef.current?.markDirty();
     lodUpdateStateRef.current.needsRefresh = true;
     lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
+    lodUpdateStateRef.current.lastCameraQuat.set(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+    lodUpdateStateRef.current.lastCameraAspect = Number.NaN;
+    lodUpdateStateRef.current.lastCameraFov = Number.NaN;
+    lodUpdateStateRef.current.lastCameraNear = Number.NaN;
+    lodUpdateStateRef.current.lastCameraFar = Number.NaN;
     setShowGameIcon(false);
     setBuildProgress({ active: false, current: 0, total: 0 });
     setStats((prev) => ({
@@ -913,6 +929,9 @@ function App() {
         center: getChunkCenterFromKey(chunkKey),
         items: [],
         active: false,
+        boundsMin: new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY),
+        boundsMax: new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY),
+        boundingSphere: new THREE.Sphere(),
       };
       renderChunkMap.set(chunkKey, chunk);
       return chunk;
@@ -922,6 +941,8 @@ function App() {
       renderItems.push(item);
       const chunk = getRenderChunk(item.anchor);
       chunk.items.push(item);
+      chunk.boundsMin.min(item.anchor);
+      chunk.boundsMax.max(item.anchor);
       item.chunkKey = chunk.key;
       return item;
     };
@@ -1210,6 +1231,21 @@ function App() {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
+      for (const chunk of renderChunkMap.values()) {
+        if (chunk.items.length === 0) {
+          chunk.boundingSphere.center.copy(chunk.center);
+          chunk.boundingSphere.radius = CHUNK_SPHERE_PADDING;
+          continue;
+        }
+        const sphereCenter = chunk.boundsMin.clone().add(chunk.boundsMax).multiplyScalar(0.5);
+        let radiusSq = 0;
+        for (const item of chunk.items) {
+          radiusSq = Math.max(radiusSq, sphereCenter.distanceToSquared(item.anchor));
+        }
+        chunk.boundingSphere.center.copy(sphereCenter);
+        chunk.boundingSphere.radius = Math.sqrt(radiusSq) + CHUNK_SPHERE_PADDING;
+      }
+
       for (const batch of instancedBatchMap.values()) {
         const entryCount = batch.entries.length;
         const sourceGeometry = batch.mesh.geometry;
@@ -1244,6 +1280,11 @@ function App() {
       rwRenderQueueRef.current?.markDirty();
       lodUpdateStateRef.current.needsRefresh = true;
       lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
+      lodUpdateStateRef.current.lastCameraQuat.set(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+      lodUpdateStateRef.current.lastCameraAspect = Number.NaN;
+      lodUpdateStateRef.current.lastCameraFov = Number.NaN;
+      lodUpdateStateRef.current.lastCameraNear = Number.NaN;
+      lodUpdateStateRef.current.lastCameraFar = Number.NaN;
       setBuildProgress({ active: false, current: buildTotal, total: buildTotal });
       setStatus(`Done. Loaded ${loaded} placements.`);
       setShowGameIcon(true);
@@ -1841,20 +1882,51 @@ function App() {
         lodState.needsRefresh = true;
       }
 
+      const knownCameraQuat = Number.isFinite(lodState.lastCameraQuat.x)
+        && Number.isFinite(lodState.lastCameraQuat.y)
+        && Number.isFinite(lodState.lastCameraQuat.z)
+        && Number.isFinite(lodState.lastCameraQuat.w);
+      const cameraQuatDot = knownCameraQuat ? Math.abs(camera.quaternion.dot(lodState.lastCameraQuat)) : 0;
+      if (!knownCameraQuat || cameraQuatDot < 0.99995) {
+        lodState.lastCameraQuat.copy(camera.quaternion);
+        lodState.needsRefresh = true;
+      }
+
+      const projectionChanged = (
+        Math.abs((lodState.lastCameraAspect ?? 0) - camera.aspect) > 1e-6
+        || Math.abs((lodState.lastCameraFov ?? 0) - camera.fov) > 1e-6
+        || Math.abs((lodState.lastCameraNear ?? 0) - camera.near) > 1e-6
+        || Math.abs((lodState.lastCameraFar ?? 0) - camera.far) > 1e-6
+      );
+      if (projectionChanged) {
+        lodState.lastCameraAspect = camera.aspect;
+        lodState.lastCameraFov = camera.fov;
+        lodState.lastCameraNear = camera.near;
+        lodState.lastCameraFar = camera.far;
+        lodState.needsRefresh = true;
+      }
+
       if (lodState.needsRefresh && lodUpdateAccumulatorRef.current >= 0.02) {
         lodUpdateAccumulatorRef.current = 0;
         const renderDistSq = renderingDistance * renderingDistance;
         const drawDistSq = drawDistance * drawDistance;
         const chunkActiveDist = renderingDistance + CHUNK_ACTIVE_MARGIN;
         const chunkActiveDistSq = chunkActiveDist * chunkActiveDist;
+        const chunkFrustum = chunkFrustumRef.current;
+        const chunkProjScreenMatrix = chunkProjScreenMatrixRef.current;
+        chunkProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        chunkFrustum.setFromProjectionMatrix(chunkProjScreenMatrix);
         const dirtyBatches = new Set();
         let activeChunks = 0;
+        let frustumChunks = 0;
         let activeItems = 0;
         let visibleNear = 0;
         let visibleLod = 0;
         for (const chunk of renderChunksRef.current) {
           const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
-          if (!chunkInRange) {
+          const chunkInFrustum = chunkInRange && chunkFrustum.intersectsSphere(chunk.boundingSphere);
+          if (chunkInRange) frustumChunks += chunkInFrustum ? 1 : 0;
+          if (!chunkInFrustum) {
             if (chunk.active) {
               chunk.active = false;
               for (const item of chunk.items) {
@@ -1914,6 +1986,7 @@ function App() {
         }
         renderMetricsRef.current = {
           activeChunks,
+          frustumChunks,
           activeItems,
           visibleNear,
           visibleLod,
@@ -2412,7 +2485,7 @@ function App() {
             ImGui.Text(`FPS: ${fpsCurrent.toFixed(1)} | avg ${fpsAvg.toFixed(1)} | min ${fpsCount > 0 ? fpsMin.toFixed(1) : '0.0'} | max ${fpsMax.toFixed(1)}`);
             ImGui.Text(`Draw Calls: ${rendererInfo?.calls ?? renderMetrics.drawCalls}`);
             ImGui.Text(`Triangles: ${rendererInfo?.triangles ?? renderMetrics.triangles}`);
-            ImGui.Text(`Chunks: ${renderMetrics.activeChunks}/${statsRef.current.totalChunks}`);
+            ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
             ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
             ImGui.Text(`Visible: near ${renderMetrics.visibleNear} | lod ${renderMetrics.visibleLod}`);
             ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
