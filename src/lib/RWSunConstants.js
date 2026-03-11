@@ -1,0 +1,31 @@
+export const RW_SUN_FLARE_DEFS = Object.freeze([
+  { position: -0.5, size: 15.0, color: { r: 50, g: 50, b: 0 }, alpha: 200, texture: 'hex' },
+  { position: -1.0, size: 10.0, color: { r: 50, g: 20, b: 0 }, alpha: 200, texture: 'circle' },
+  { position: -1.5, size: 15.0, color: { r: 50, g: 0, b: 0 }, alpha: 200, texture: 'ring' },
+  { position: -2.5, size: 25.0, color: { r: 50, g: 0, b: 0 }, alpha: 200, texture: 'hex' },
+  { position: 0.5, size: 12.5, color: { r: 40, g: 40, b: 25 }, alpha: 200, texture: 'hex' },
+  { position: 0.05, size: 20.0, color: { r: 30, g: 22, b: 9 }, alpha: 200, texture: 'circle' },
+  { position: 1.3, size: 7.5, color: { r: 50, g: 30, b: 9 }, alpha: 200, texture: 'ring' },
+]);
+
+export const RW_SUN_DEBUG_DEFAULTS = Object.freeze({
+  enabled: true,
+  useWorldOcclusion: true,
+  useCloudOcclusion: false,
+  distance: 150,
+  coreSizeScale: 1,
+  coreSizeBias: 10,
+  coreJitterAmplitude: 1,
+  coronaSizeScale: 25,
+  flareScale: 1,
+  flareOffsetScale: 1,
+  flareAlphaScale: 1,
+  coreAlpha: 1,
+  coronaAlpha: 1,
+  fadeSpeed: 15,
+  occlusionCheckIntervalMs: 250,
+  cloudHighlightRadius: 0.5,
+  cloudHighlightStrength: 1,
+  cloudBlockRadius: 0.1,
+  debugBypassFade: false,
+});

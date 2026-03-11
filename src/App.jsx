@@ -27,6 +27,12 @@ import {
 } from './lib/RWRender';
 import { RWRenderQueue } from './lib/RWRenderQueue';
 import { RWWaterPipeline } from './lib/RWWaterPipeline';
+import { RW_MOON_DEBUG_DEFAULTS } from './lib/RWMoonConstants';
+import { RWMoonPipeline } from './lib/RWMoonPipeline';
+import { RW_STARS_DEBUG_DEFAULTS } from './lib/RWStarsConstants';
+import { RWStarsPipeline } from './lib/RWStarsPipeline';
+import { RW_SUN_DEBUG_DEFAULTS } from './lib/RWSunConstants';
+import { RWSunPipeline } from './lib/RWSunPipeline';
 import { applyRwIdeFlagsToInstance, decodeRwIdeFlags } from './lib/rwFlags';
 import {
   applyGlobalBackfaceCulling,
@@ -314,6 +320,11 @@ function App() {
   const lowCloudSpritesRef = useRef([]);
   const fluffyCloudSpritesRef = useRef([]);
   const fluffyCloudTextureRef = useRef(null);
+  const moonPipelineRef = useRef(null);
+  const starsPipelineRef = useRef(null);
+  const sunPipelineRef = useRef(null);
+  const sunLightRef = useRef(null);
+  const hemiLightRef = useRef(null);
   const worldRootRef = useRef(new THREE.Group());
   const rwRenderQueueRef = useRef(null);
   const rwWaterPipelineRef = useRef(null);
@@ -430,6 +441,9 @@ function App() {
     waterUvSpeed: 1,
     waterWaveHeight: 35,
     waterAlpha: 0.72,
+    moon: { ...RW_MOON_DEBUG_DEFAULTS },
+    stars: { ...RW_STARS_DEBUG_DEFAULTS },
+    sun: { ...RW_SUN_DEBUG_DEFAULTS },
     appMode: APP_MODE_EDITOR,
     backendSelection: 'WebGL',
     windows: Object.fromEntries(WINDOW_DEFS.map((item) => [item.key, item.defaultVisible])),
@@ -1116,6 +1130,33 @@ function App() {
             pushConsoleLine('info', 'Cloud texture applied: particle/cloudmasked');
           } else {
             pushConsoleLine('warn', 'Fluffy cloud texture missing: particle/cloudmasked. Using fallback sprite.');
+          }
+
+          const sunTextures = {
+            star: particleTxd?.get?.('coronastar')?.texture || particleTxd?.get?.('coronastar') || null,
+            hex: particleTxd?.get?.('coronahex')?.texture || particleTxd?.get?.('coronahex') || null,
+            circle: particleTxd?.get?.('coronacircle')?.texture || particleTxd?.get?.('coronacircle') || null,
+            ring: particleTxd?.get?.('coronaringa')?.texture || particleTxd?.get?.('coronaringa') || null,
+          };
+          const starTexture = sunTextures.star;
+          const moonTexture = particleTxd?.get?.('coronamoon')?.texture || particleTxd?.get?.('coronamoon') || null;
+          moonPipelineRef.current?.setTexture(moonTexture);
+          starsPipelineRef.current?.setTexture(starTexture);
+          if (moonTexture) {
+            pushConsoleLine('info', 'Moon texture applied: particle/coronamoon');
+          } else {
+            pushConsoleLine('warn', 'Moon texture missing: particle/coronamoon. Using fallback sprite.');
+          }
+          if (starTexture) {
+            pushConsoleLine('info', 'Stars texture applied: particle/coronastar');
+          } else {
+            pushConsoleLine('warn', 'Stars texture missing: particle/coronastar. Using fallback sprite.');
+          }
+          sunPipelineRef.current?.setTextureSet(sunTextures);
+          if (sunTextures.star && sunTextures.hex && sunTextures.circle && sunTextures.ring) {
+            pushConsoleLine('info', 'Sun textures applied: particle/coronastar, coronahex, coronacircle, coronaringa');
+          } else {
+            pushConsoleLine('warn', 'Some sun textures are missing in particle.txd. Fallback procedural sprites remain in use for missing entries.');
           }
         })();
       } catch (error) {
@@ -1855,6 +1896,9 @@ function App() {
     const hudScene = new THREE.Scene();
     const hudCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
     hudCamera.position.set(0, 0, 1);
+    const moonPipeline = new RWMoonPipeline();
+    const starsPipeline = new RWStarsPipeline();
+    const sunPipeline = new RWSunPipeline();
 
     const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 60000);
     camera.up.copy(WORLD_UP);
@@ -1943,7 +1987,7 @@ function App() {
     const axes = new THREE.AxesHelper(150);
     axes.visible = false;
 
-    scene.add(hemi, sun, grid, axes, worldRootRef.current);
+    scene.add(hemi, sun, sun.target, grid, axes, worldRootRef.current);
 
     const textureLoader = new THREE.TextureLoader();
     const iconTextures = {
@@ -1973,9 +2017,14 @@ function App() {
     lowCloudSpritesRef.current = lowCloudSprites;
     fluffyCloudSpritesRef.current = fluffyCloudSprites;
     fluffyCloudTextureRef.current = fluffyCloudTexture;
+    moonPipelineRef.current = moonPipeline;
+    starsPipelineRef.current = starsPipeline;
+    sunPipelineRef.current = sunPipeline;
     rwRenderQueueRef.current = new RWRenderQueue(worldRootRef.current);
     gridRef.current = grid;
     axesRef.current = axes;
+    sunLightRef.current = sun;
+    hemiLightRef.current = hemi;
 
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
@@ -1989,6 +2038,9 @@ function App() {
       if (!rendererReady) return;
       renderer.setPixelRatio(dpr);
       renderer.setSize(width, height, false);
+      moonPipeline.setViewport(width * dpr, height * dpr);
+      starsPipeline.setViewport(width * dpr, height * dpr);
+      sunPipeline.setViewport(width * dpr, height * dpr);
     };
 
     resize();
@@ -2354,6 +2406,7 @@ function App() {
       const extraSunnyness = THREE.MathUtils.clamp(timecycleCurrent?.extraSunnyness ?? 0, 0, 1);
       const lowCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(cloudCoverage, foggyness, extraSunnyness), 0, 1) * 0.42;
       const fluffyCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(foggyness, extraSunnyness), 0, 1) * 0.5;
+      const sunPipeline = sunPipelineRef.current;
       const cloudMotion = cloudMotionRef.current;
       if (skyMaterial?.uniforms) {
         const cameraForward = new THREE.Vector3();
@@ -2412,6 +2465,20 @@ function App() {
       }
       const cloudRotSin = Math.sin(cloudMotion.cloudRotation);
       const cloudRotCos = Math.cos(cloudMotion.cloudRotation);
+      renderer.getDrawingBufferSize(drawingBufferSize);
+      const viewportWidth = Math.max(1, drawingBufferSize.x);
+      const viewportHeight = Math.max(1, drawingBufferSize.y);
+      const moonPipeline = moonPipelineRef.current;
+      const starsPipeline = starsPipelineRef.current;
+      moonPipeline?.setViewport(viewportWidth, viewportHeight);
+      starsPipeline?.setViewport(viewportWidth, viewportHeight);
+      sunPipeline?.setViewport(viewportWidth, viewportHeight);
+      const moonSettings = uiStateRef.current.moon;
+      moonPipeline?.update(camera, timecycleCurrent, moonSettings);
+      const starsSettings = uiStateRef.current.stars;
+      starsPipeline?.update(camera, timecycleCurrent, starsSettings);
+      const sunSettings = uiStateRef.current.sun;
+      const sunMetrics = sunPipeline?.updateSunMetrics(camera, timecycleCurrent, sunSettings) ?? null;
       const lowCloudSprites = lowCloudSpritesRef.current;
       for (let index = 0; index < lowCloudSprites.length; index += 1) {
         const sprite = lowCloudSprites[index];
@@ -2426,6 +2493,8 @@ function App() {
         sprite.material.opacity = lowCloudAlpha;
       }
       const fluffyCloudSprites = fluffyCloudSpritesRef.current;
+      const sunHighlightColor = new THREE.Color().setRGB(1, 190 / 255, 190 / 255, THREE.SRGBColorSpace);
+      let sunBlockedByClouds = false;
       for (let index = 0; index < fluffyCloudSprites.length; index += 1) {
         const sprite = fluffyCloudSprites[index];
         if (!sprite) continue;
@@ -2438,8 +2507,53 @@ function App() {
           camera.position.z + (localX * cloudRotSin) - (localZ * cloudRotCos),
         );
         sprite.material.color.copy(fluffyBottomColor).lerp(fluffyTopColor, 0.4);
+        if (sunMetrics?.visible && sunSettings.enabled) {
+          const spriteNdc = sprite.position.clone().project(camera);
+          const spriteScreenX = (spriteNdc.x * 0.5 + 0.5) * viewportWidth;
+          const spriteScreenY = (-spriteNdc.y * 0.5 + 0.5) * viewportHeight;
+          const distanceToSun = Math.hypot(spriteScreenX - sunMetrics.screenX, spriteScreenY - sunMetrics.screenY);
+          const highlight = (
+            (1 - Math.max(foggyness, cloudCoverage))
+            * THREE.MathUtils.clamp(1 - (distanceToSun / (viewportWidth * sunSettings.cloudHighlightRadius)), 0, 1)
+            * sunSettings.cloudHighlightStrength
+          );
+          if (highlight > 0) {
+            sprite.material.color.lerp(sunHighlightColor, THREE.MathUtils.clamp(highlight, 0, 1));
+          }
+          if (distanceToSun < viewportWidth * sunSettings.cloudBlockRadius) {
+            sunBlockedByClouds = true;
+          }
+        }
         sprite.material.opacity = fluffyCloudAlpha;
         sprite.material.rotation = cloudMotion.individualRotation;
+      }
+      const sunState = sunPipeline?.update(
+        camera,
+        worldRootRef.current,
+        timecycleCurrent,
+        sunSettings,
+        dt,
+        time,
+        sunBlockedByClouds,
+      );
+
+      const sunLight = sunLightRef.current;
+      const hemiLight = hemiLightRef.current;
+      if (sunLight) {
+        const directionalColor = timecycleCurrent?.values?.directional
+          ? toThreeColorFromTimecycleValue(timecycleCurrent.values.directional)
+          : new THREE.Color(1, 1, 1);
+        sunLight.color.copy(directionalColor);
+        sunLight.position.copy(camera.position).addScaledVector(sunState?.direction || new THREE.Vector3(0.5, 1, 0.3), 1200);
+        sunLight.target.position.copy(camera.position);
+        sunLight.target.updateMatrixWorld();
+        sunLight.intensity = THREE.MathUtils.lerp(0.15, 0.8, THREE.MathUtils.clamp(sunState?.fadeAlpha ?? 0, 0, 1));
+      }
+      if (hemiLight) {
+        if (timecycleCurrent?.values?.ambient) {
+          hemiLight.color.copy(toThreeColorFromTimecycleValue(timecycleCurrent.values.ambient));
+        }
+        hemiLight.intensity = 0.8;
       }
 
       if (timecycleCurrent?.three?.fogColor?.isColor) {
@@ -2645,6 +2759,8 @@ function App() {
         }
         renderer.autoClear = false;
         renderer.clearDepth();
+        moonPipeline?.render(renderer);
+        starsPipeline?.render(renderer);
         if (skyCloudScene) {
           renderer.render(skyCloudScene, camera);
           renderer.clearDepth();
@@ -2711,9 +2827,6 @@ function App() {
         const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
         gameIconSprite.material.map = iconTextures[activeIcon];
         gameIconSprite.visible = showGameIconRef.current;
-        renderer.getDrawingBufferSize(drawingBufferSize);
-        const viewportWidth = Math.max(1, drawingBufferSize.x);
-        const viewportHeight = Math.max(1, drawingBufferSize.y);
         const iconPx = 80;
         const padXPx = 20;
         const padYPx = 56;
@@ -2728,6 +2841,8 @@ function App() {
           1,
         );
         renderer.autoClear = false;
+        renderer.clearDepth();
+        sunPipeline?.render(renderer);
         renderer.clearDepth();
         renderer.render(hudScene, hudCamera);
         renderer.autoClear = true;
@@ -3494,6 +3609,157 @@ function App() {
               }
               ImGui.EndTabItem();
             }
+            if (ImGui.BeginTabItem('SUN')) {
+              const renderSunSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
+                ImGui.PushID(id);
+                ImGui.Columns(2, `sun-row-${id}`, false);
+                ImGui.SetColumnWidth(0, 170);
+                ImGui.PushItemWidth(-1);
+                ImGui.SliderFloat(
+                  '##value',
+                  (value = getter()) => {
+                    setter(value);
+                    return value;
+                  },
+                  min,
+                  max,
+                  format,
+                );
+                ImGui.PopItemWidth();
+                ImGui.NextColumn();
+                ImGui.AlignTextToFramePadding();
+                ImGui.TextUnformatted(label);
+                ImGui.Columns(1);
+                ImGui.PopID();
+              };
+              const sunSettings = uiStateRef.current.sun;
+              ImGui.Checkbox(
+                'Enable RW Sun',
+                (value = sunSettings.enabled) => (sunSettings.enabled = value),
+              );
+              ImGui.Checkbox(
+                'World Occlusion',
+                (value = sunSettings.useWorldOcclusion) => (sunSettings.useWorldOcclusion = value),
+              );
+              ImGui.Checkbox(
+                'Cloud Occlusion',
+                (value = sunSettings.useCloudOcclusion) => (sunSettings.useCloudOcclusion = value),
+              );
+              ImGui.Checkbox(
+                'Bypass Fade',
+                (value = sunSettings.debugBypassFade) => (sunSettings.debugBypassFade = value),
+              );
+              renderSunSliderRow('distance', 'Sun Distance', () => sunSettings.distance, (value) => { sunSettings.distance = value; }, 50, 1000, '%.0f');
+              renderSunSliderRow('core-size-scale', 'Core Size Scale', () => sunSettings.coreSizeScale, (value) => { sunSettings.coreSizeScale = value; }, 0, 4);
+              renderSunSliderRow('core-size-bias', 'Core Size Bias', () => sunSettings.coreSizeBias, (value) => { sunSettings.coreSizeBias = value; }, 0, 32);
+              renderSunSliderRow('core-jitter', 'Core Jitter', () => sunSettings.coreJitterAmplitude, (value) => { sunSettings.coreJitterAmplitude = value; }, 0, 8);
+              renderSunSliderRow('corona-size-scale', 'Corona Size Scale', () => sunSettings.coronaSizeScale, (value) => { sunSettings.coronaSizeScale = value; }, 0, 64);
+              renderSunSliderRow('flare-scale', 'Flare Scale', () => sunSettings.flareScale, (value) => { sunSettings.flareScale = value; }, 0, 4);
+              renderSunSliderRow('flare-offset-scale', 'Flare Offset Scale', () => sunSettings.flareOffsetScale, (value) => { sunSettings.flareOffsetScale = value; }, 0, 4);
+              renderSunSliderRow('flare-alpha-scale', 'Flare Alpha Scale', () => sunSettings.flareAlphaScale, (value) => { sunSettings.flareAlphaScale = value; }, 0, 4);
+              renderSunSliderRow('core-alpha', 'Core Alpha', () => sunSettings.coreAlpha, (value) => { sunSettings.coreAlpha = value; }, 0, 2);
+              renderSunSliderRow('corona-alpha', 'Corona Alpha', () => sunSettings.coronaAlpha, (value) => { sunSettings.coronaAlpha = value; }, 0, 2);
+              renderSunSliderRow('fade-speed', 'Fade Speed', () => sunSettings.fadeSpeed, (value) => { sunSettings.fadeSpeed = value; }, 0, 8);
+              renderSunSliderRow('occlusion-interval', 'Occlusion Interval ms', () => sunSettings.occlusionCheckIntervalMs, (value) => { sunSettings.occlusionCheckIntervalMs = value; }, 16, 2000, '%.0f');
+              renderSunSliderRow('cloud-highlight-radius', 'Cloud Highlight Radius', () => sunSettings.cloudHighlightRadius, (value) => { sunSettings.cloudHighlightRadius = value; }, 0.01, 1);
+              renderSunSliderRow('cloud-highlight-strength', 'Cloud Highlight Strength', () => sunSettings.cloudHighlightStrength, (value) => { sunSettings.cloudHighlightStrength = value; }, 0, 2);
+              renderSunSliderRow('cloud-block-radius', 'Cloud Block Radius', () => sunSettings.cloudBlockRadius, (value) => { sunSettings.cloudBlockRadius = value; }, 0.01, 0.5);
+              ImGui.TextWrapped('RW mapping: core/corona sizes come from timecycle sun size, flares follow RW corona positions, and cloud blocking fades the corona path instead of using postprocess god rays.');
+              ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem('MOON')) {
+              const renderMoonSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
+                ImGui.PushID(id);
+                ImGui.Columns(2, `moon-row-${id}`, false);
+                ImGui.SetColumnWidth(0, 170);
+                ImGui.PushItemWidth(-1);
+                ImGui.SliderFloat(
+                  '##value',
+                  (value = getter()) => {
+                    setter(value);
+                    return value;
+                  },
+                  min,
+                  max,
+                  format,
+                );
+                ImGui.PopItemWidth();
+                ImGui.NextColumn();
+                ImGui.AlignTextToFramePadding();
+                ImGui.TextUnformatted(label);
+                ImGui.Columns(1);
+                ImGui.PopID();
+              };
+              const moonSettings = uiStateRef.current.moon;
+              ImGui.Checkbox(
+                'Enable RW Moon',
+                (value = moonSettings.enabled) => (moonSettings.enabled = value),
+              );
+              ImGui.Checkbox(
+                'Small Moon',
+                (value = moonSettings.smallMoon) => (moonSettings.smallMoon = value),
+              );
+              ImGui.Checkbox(
+                'Coverage Dimming',
+                (value = moonSettings.coverageDimming) => (moonSettings.coverageDimming = value),
+              );
+              renderMoonSliderRow('offset-x', 'Offset X', () => moonSettings.offsetX, (value) => { moonSettings.offsetX = value; }, -300, 300, '%.0f');
+              renderMoonSliderRow('offset-y', 'Offset Y', () => moonSettings.offsetY, (value) => { moonSettings.offsetY = value; }, -300, 300, '%.0f');
+              renderMoonSliderRow('offset-z', 'Offset Z', () => moonSettings.offsetZ, (value) => { moonSettings.offsetZ = value; }, -100, 100, '%.0f');
+              renderMoonSliderRow('base-scale', 'Base Scale', () => moonSettings.baseScale, (value) => { moonSettings.baseScale = value; }, 0, 32);
+              renderMoonSliderRow('small-scale', 'Small Moon Scale', () => moonSettings.smallMoonScale, (value) => { moonSettings.smallMoonScale = value; }, 0, 16);
+              renderMoonSliderRow('brightness-scale', 'Brightness Scale', () => moonSettings.brightnessScale, (value) => { moonSettings.brightnessScale = value; }, 0, 4);
+              renderMoonSliderRow('fade-center', 'Fade Center Minutes', () => moonSettings.fadeCenterMinutes, (value) => { moonSettings.fadeCenterMinutes = value; }, 0, 1440, '%.0f');
+              renderMoonSliderRow('fade-window', 'Fade Window Minutes', () => moonSettings.fadeWindowMinutes, (value) => { moonSettings.fadeWindowMinutes = value; }, 1, 720, '%.0f');
+              ImGui.TextWrapped('RW mapping: moon is rendered in the clouds pass with particle/coronamoon, a camera-relative offset, weather coverage dimming, and the original 3AM-centered fade window.');
+              ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem('STARS')) {
+              const renderStarsSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
+                ImGui.PushID(id);
+                ImGui.Columns(2, `stars-row-${id}`, false);
+                ImGui.SetColumnWidth(0, 170);
+                ImGui.PushItemWidth(-1);
+                ImGui.SliderFloat(
+                  '##value',
+                  (value = getter()) => {
+                    setter(value);
+                    return value;
+                  },
+                  min,
+                  max,
+                  format,
+                );
+                ImGui.PopItemWidth();
+                ImGui.NextColumn();
+                ImGui.AlignTextToFramePadding();
+                ImGui.TextUnformatted(label);
+                ImGui.Columns(1);
+                ImGui.PopID();
+              };
+              const starsSettings = uiStateRef.current.stars;
+              ImGui.Checkbox(
+                'Enable RW Stars',
+                (value = starsSettings.enabled) => (starsSettings.enabled = value),
+              );
+              ImGui.Checkbox(
+                'Coverage Dimming',
+                (value = starsSettings.coverageDimming) => (starsSettings.coverageDimming = value),
+              );
+              renderStarsSliderRow('brightness-scale', 'Brightness Scale', () => starsSettings.brightnessScale, (value) => { starsSettings.brightnessScale = value; }, 0, 4);
+              renderStarsSliderRow('logo-offset-x', 'Logo Offset X', () => starsSettings.logoOffsetX, (value) => { starsSettings.logoOffsetX = value; }, -300, 300, '%.0f');
+              renderStarsSliderRow('logo-offset-y', 'Logo Offset Y', () => starsSettings.logoOffsetY, (value) => { starsSettings.logoOffsetY = value; }, -300, 300, '%.0f');
+              renderStarsSliderRow('logo-offset-z', 'Logo Offset Z', () => starsSettings.logoOffsetZ, (value) => { starsSettings.logoOffsetZ = value; }, -100, 100, '%.0f');
+              renderStarsSliderRow('logo-span-y', 'Logo Span Y', () => starsSettings.logoSpanY, (value) => { starsSettings.logoSpanY = value; }, 0, 180, '%.0f');
+              renderStarsSliderRow('logo-span-z', 'Logo Span Z', () => starsSettings.logoSpanZ, (value) => { starsSettings.logoSpanZ = value; }, 0, 180, '%.0f');
+              renderStarsSliderRow('star-scale', 'Star Scale', () => starsSettings.starScale, (value) => { starsSettings.starScale = value; }, 0, 4);
+              renderStarsSliderRow('sparkle-offset-y', 'Sparkle Offset Y', () => starsSettings.sparkleOffsetY, (value) => { starsSettings.sparkleOffsetY = value; }, -180, 180, '%.0f');
+              renderStarsSliderRow('sparkle-scale', 'Sparkle Scale', () => starsSettings.sparkleScale, (value) => { starsSettings.sparkleScale = value; }, 0, 16);
+              renderStarsSliderRow('sparkle-min', 'Sparkle Min Flicker', () => starsSettings.sparkleMinFlicker, (value) => { starsSettings.sparkleMinFlicker = value; }, 0, 1);
+              renderStarsSliderRow('sparkle-range', 'Sparkle Flicker Range', () => starsSettings.sparkleFlickerRange, (value) => { starsSettings.sparkleFlickerRange = value; }, 0, 1);
+              ImGui.TextWrapped('RW mapping: stars are the fixed Rockstar-logo sprite pattern from Clouds.cpp plus the flickering star, using particle/coronastar and the original night visibility curve with weather coverage dimming.');
+              ImGui.EndTabItem();
+            }
             if (ImGui.BeginTabItem('Backend')) {
               ImGui.Text(`WebGPU: ${WebGPU.isAvailable() ? 'available' : 'unavailable'}`);
               const backendOptions = ['WebGL', 'WebGPU'];
@@ -3686,6 +3952,12 @@ function App() {
         sprite.material.dispose?.();
       }
       fluffyCloudTextureRef.current?.dispose?.();
+      moonPipelineRef.current?.dispose();
+      moonPipelineRef.current = null;
+      starsPipelineRef.current?.dispose();
+      starsPipelineRef.current = null;
+      sunPipelineRef.current?.dispose();
+      sunPipelineRef.current = null;
       skyQuad.geometry.dispose();
       skyMaterial.dispose();
       imguiGlRef.current = null;

@@ -60,6 +60,7 @@ export function decodeRwIdeFlags(flags) {
     additive: hasRwIdeFlag(value, RW_IDE_FLAG.ADDITIVE),
     noZWrite: hasRwIdeFlag(value, RW_IDE_FLAG.NO_ZBUFFER_WRITE),
     dontReceiveShadows: hasRwIdeFlag(value, RW_IDE_FLAG.DONT_RECEIVE_SHADOWS),
+    isGlass: hasRwIdeFlag(value, RW_IDE_FLAG.IS_GLASS_TYPE_1) || hasRwIdeFlag(value, RW_IDE_FLAG.IS_GLASS_TYPE_2),
     isTree: hasRwIdeFlag(value, RW_IDE_FLAG.IS_TREE),
     isPalm: hasRwIdeFlag(value, RW_IDE_FLAG.IS_PALM),
     disableBackfaceCulling: hasRwIdeFlag(value, RW_IDE_FLAG.DISABLE_BACKFACE_CULLING),
