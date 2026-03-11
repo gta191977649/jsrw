@@ -61,6 +61,10 @@ const MAX_FAILED_MODELS = 5000;
 const DEFAULT_SCENE_BACKGROUND = new THREE.Color(0x8ea9b5);
 const CHUNK_ACTIVE_MARGIN = 384;
 const CHUNK_SPHERE_PADDING = WORLD_CHUNK_SIZE * 0.75;
+const ENABLE_WORLD_INSTANCING = false;
+const RW_DISTANCE_FADE_WINDOW = 20;
+const RW_STREAM_ALPHA_PER_SECOND = 3.2;
+const RW_FADE_EPSILON = 0.001;
 const HIDDEN_INSTANCE_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 const SKY_SMALL_STRIP_HEIGHT = 4 / 400;
 const SKY_HORIZON_STRIP_HEIGHT = 48 / 400;
@@ -96,6 +100,85 @@ const INSTANCE_SELECTION_MATERIAL = new THREE.MeshBasicMaterial({
   fog: false,
   toneMapped: false,
 });
+
+function clamp01(value) {
+  return THREE.MathUtils.clamp(value, 0, 1);
+}
+
+function approachValue(current, target, delta) {
+  if (current < target) return Math.min(current + delta, target);
+  if (current > target) return Math.max(current - delta, target);
+  return current;
+}
+
+function resolveRenderableDistance(value, fallback) {
+  if (Number.isFinite(value) && value > 0) return value;
+  return fallback;
+}
+
+function computeDistanceFadeAlpha(distance, endDistance) {
+  if (!Number.isFinite(endDistance) || endDistance <= 0) return 1;
+  if (distance <= endDistance) return 1;
+  return clamp01((endDistance + RW_DISTANCE_FADE_WINDOW - distance) / RW_DISTANCE_FADE_WINDOW);
+}
+
+function disposeObjectMaterialsOnly(root) {
+  if (!root?.traverse) return;
+  root.traverse((node) => {
+    if (!node.isMesh) return;
+    const materials = Array.isArray(node.material) ? node.material : [node.material];
+    for (const material of materials) {
+      material?.dispose?.();
+    }
+  });
+}
+
+function createFadeMaterial(material, geometry) {
+  if (!material) return material;
+  const descriptor = getRWMaterialDescriptor(material);
+  if (descriptor) {
+    const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);
+    if (fadeDescriptor.rwFlags?.additive) {
+      fadeDescriptor.alphaMode = 'additive';
+      fadeDescriptor.blending = THREE.AdditiveBlending;
+      fadeDescriptor.renderBucket = 'additive';
+    } else {
+      fadeDescriptor.alphaMode = 'blend';
+      fadeDescriptor.blending = THREE.NormalBlending;
+      fadeDescriptor.renderBucket = 'transparent';
+    }
+    fadeDescriptor.transparent = true;
+    fadeDescriptor.depthTest = true;
+    fadeDescriptor.depthWrite = false;
+    fadeDescriptor.alphaRef = 0;
+    fadeDescriptor.opacity = 1;
+    return createThreeMaterialFromRW(fadeDescriptor, geometry);
+  }
+
+  const cloned = material.clone();
+  cloned.transparent = true;
+  cloned.opacity = 1;
+  cloned.depthTest = true;
+  cloned.depthWrite = false;
+  cloned.alphaTest = 0;
+  if (cloned.blending !== THREE.AdditiveBlending) {
+    cloned.blending = THREE.NormalBlending;
+  }
+  cloned.needsUpdate = true;
+  return cloned;
+}
+
+function setFadeProxyOpacity(proxyRoot, opacity) {
+  const clampedOpacity = clamp01(opacity);
+  const materials = Array.isArray(proxyRoot?.userData?.rwFadeMaterials) ? proxyRoot.userData.rwFadeMaterials : [];
+  for (const material of materials) {
+    if (!material) continue;
+    const descriptor = getRWMaterialDescriptor(material);
+    if (descriptor) descriptor.opacity = clampedOpacity;
+    material.opacity = clampedOpacity;
+  }
+}
+
 function yieldToBrowser() {
   return new Promise((resolve) => {
     if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
@@ -383,6 +466,7 @@ function App() {
   const fpsHistoryRef = useRef(new Float32Array(180));
   const fpsHistoryIndexRef = useRef(0);
   const lodUpdateAccumulatorRef = useRef(0);
+  const activeFadeCountRef = useRef(0);
   const lookStateRef = useRef({
     active: false,
     yaw: 0,
@@ -659,6 +743,7 @@ function App() {
     };
     renderItemsRef.current = [];
     renderChunksRef.current = [];
+    activeFadeCountRef.current = 0;
     renderMetricsRef.current = {
       activeChunks: 0,
       frustumChunks: 0,
@@ -839,6 +924,14 @@ function App() {
       pushConsoleLine('info', `Loading IPL: ${iplRecord.requestedPath}`);
 
       const parsed = parseIpl(await iplRecord.file.text(), { gameVersion: uiStateRef.current.gameVersion });
+      const placementBaseIndex = placements.length;
+      for (const placement of parsed) {
+        if (Number.isInteger(placement.lod) && placement.lod >= 0) {
+          placement.lod += placementBaseIndex;
+        } else {
+          placement.lod = -1;
+        }
+      }
       parsedIplFiles += 1;
       pushLoadedFile('IPL', iplRecord.resolvedPath, 'loaded');
       placements.push(...parsed);
@@ -1371,6 +1464,24 @@ function App() {
       return item;
     };
 
+    const buildRenderSideState = (obj, handles, drawDistanceValue, defaultIsTobj) => {
+      const firstHandle = Array.isArray(handles) && handles.length > 0 ? handles[0] : null;
+      const placementMatrix = obj?.userData?.placementMatrix || firstHandle?.placementMatrix || null;
+      return {
+        streamAlpha: (obj || firstHandle) ? 0 : 1,
+        currentOpacity: 0,
+        renderObject: obj || null,
+        fadeBindings: null,
+        proxyRoot: null,
+        template: obj?.userData?.fadeTemplate || firstHandle?.selectionTemplate || null,
+        placementMatrix: placementMatrix?.clone?.() || null,
+        ideFlags: obj?.userData?.rwIdeFlags ?? firstHandle?.ideFlags ?? 0,
+        isTobj: Boolean(obj?.userData?.isTobj ?? firstHandle?.isTobj ?? defaultIsTobj),
+        objectDetail: obj?.userData?.objectDetail || firstHandle?.objectDetail || null,
+        drawDistance: Number.isFinite(drawDistanceValue) ? drawDistanceValue : null,
+      };
+    };
+
     const buildPlacementWorldMatrix = (placement, anchor) => {
       const placementQuaternion = gtaPlacementQuaternionToThree(
         placement.rotation.x,
@@ -1411,6 +1522,7 @@ function App() {
     });
 
     const canUseInstancing = (model, ide) => {
+      if (!ENABLE_WORLD_INSTANCING) return false;
       if (!model?.instancable || !Array.isArray(model.meshDescriptors) || model.meshDescriptors.length === 0) {
         return false;
       }
@@ -1462,6 +1574,7 @@ function App() {
         if (!canUseInstancing(model, ide)) return null;
         const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
         const handles = [];
+        const objectDetail = buildObjectDetail(ide, placement, lodKind, model);
         model.meshDescriptors.forEach((descriptor, descriptorIndex) => {
           const batch = ensureInstancedBatch(model, lodKind, ide, descriptorIndex, descriptor);
           const matrix = worldMatrix.clone().multiply(descriptor.localMatrix);
@@ -1471,8 +1584,10 @@ function App() {
             matrix,
             placementMatrix: worldMatrix.clone(),
             visible: false,
-            objectDetail: buildObjectDetail(ide, placement, lodKind, model),
+            objectDetail,
             selectionTemplate: model.template,
+            ideFlags: ide.flags | 0,
+            isTobj: ide.section === 'tobjs',
           };
           batch.entries.push(handle);
           handles.push(handle);
@@ -1528,6 +1643,10 @@ function App() {
         instance.userData.lodKind = lodKind;
         instance.userData.selectableRoot = true;
         instance.userData.objectDetail = buildObjectDetail(ide, placement, lodKind, model);
+        instance.userData.fadeTemplate = model.template;
+        instance.userData.placementMatrix = worldMatrix.clone();
+        instance.userData.rwIdeFlags = ide.flags | 0;
+        instance.userData.isTobj = ide.section === 'tobjs';
         worldRoot.add(instance);
         loaded += 1;
         return instance;
@@ -1559,20 +1678,22 @@ function App() {
         const lodPlacement = effectivePlacements[lodIndex];
         const lodAnchor = placementAnchors[lodIndex];
         const nearDef = getPlacementDef(placement);
+        const lodDef = getPlacementDef(lodPlacement);
         const isTobj = nearDef?.section === 'tobjs';
-        const nearInstanced = await tryBuildInstancedHandles(placement, 'near', anchor);
-        const lodInstanced = await tryBuildInstancedHandles(lodPlacement, 'lod', lodAnchor);
-        const nearObj = nearInstanced ? null : await buildPlacementObject(placement, 'near', anchor);
-        const lodObj = lodInstanced ? null : await buildPlacementObject(lodPlacement, 'lod', lodAnchor);
-        if (nearObj || lodObj || nearInstanced || lodInstanced) {
+        const nearObj = await buildPlacementObject(placement, 'near', anchor);
+        const lodObj = await buildPlacementObject(lodPlacement, 'lod', lodAnchor);
+        if (nearObj || lodObj) {
           registerRenderItem({
             isTobj,
             anchor: anchor.clone(),
             nearObj,
             lodObj,
-            nearHandles: nearInstanced?.handles || [],
-            lodHandles: lodInstanced?.handles || [],
+            nearHandles: [],
+            lodHandles: [],
             nearDrawDistance: Number.isFinite(nearDef?.drawDistance) ? nearDef.drawDistance : null,
+            lodDrawDistance: Number.isFinite(lodDef?.drawDistance) ? lodDef.drawDistance : null,
+            nearState: buildRenderSideState(nearObj, [], nearDef?.drawDistance, isTobj),
+            lodState: buildRenderSideState(lodObj, [], lodDef?.drawDistance, lodDef?.section === 'tobjs'),
             mode: 'hidden',
           });
         }
@@ -1608,6 +1729,9 @@ function App() {
             nearHandles: nearInstanced?.handles || [],
             lodHandles: [],
             nearDrawDistance: Number.isFinite(nearDef?.drawDistance) ? nearDef.drawDistance : null,
+            lodDrawDistance: null,
+            nearState: buildRenderSideState(nearObj, nearInstanced?.handles || [], nearDef?.drawDistance, isTobj),
+            lodState: buildRenderSideState(null, [], null, false),
             mode: 'hidden',
           });
         }
@@ -1643,6 +1767,9 @@ function App() {
             nearHandles: [],
             lodHandles: lodInstanced?.handles || [],
             nearDrawDistance: null,
+            lodDrawDistance: Number.isFinite(lodDef?.drawDistance) ? lodDef.drawDistance : null,
+            nearState: buildRenderSideState(null, [], null, isTobj),
+            lodState: buildRenderSideState(lodObj, lodInstanced?.handles || [], lodDef?.drawDistance, isTobj),
             mode: 'hidden',
           });
         }
@@ -1754,13 +1881,187 @@ function App() {
     }
   }, []);
 
-  const setRenderItemMode = useCallback((item, targetMode, dirtyBatches) => {
-    item.mode = targetMode;
-    if (item.nearObj) item.nearObj.visible = targetMode === 'near';
-    if (item.lodObj) item.lodObj.visible = targetMode === 'lod';
-    setInstanceHandlesVisible(item.nearHandles, targetMode === 'near', dirtyBatches);
-    setInstanceHandlesVisible(item.lodHandles, targetMode === 'lod', dirtyBatches);
+  const setRenderSideOriginalVisible = useCallback((item, side, visible, dirtyBatches) => {
+    if (side === 'near') {
+      if (item.nearObj) item.nearObj.visible = visible;
+      setInstanceHandlesVisible(item.nearHandles, visible, dirtyBatches);
+      return;
+    }
+    if (item.lodObj) item.lodObj.visible = visible;
+    setInstanceHandlesVisible(item.lodHandles, visible, dirtyBatches);
   }, [setInstanceHandlesVisible]);
+
+  const ensureRenderSideObjectFade = useCallback((sideState) => {
+    const root = sideState?.renderObject;
+    if (!root?.traverse) return false;
+    if (Array.isArray(sideState.fadeBindings)) return true;
+
+    const bindings = [];
+    root.traverse((node) => {
+      if (!node.isMesh) return;
+      const sourceMaterials = Array.isArray(node.material) ? node.material : [node.material];
+      const fadeMaterials = sourceMaterials.map((material) => createFadeMaterial(material, node.geometry));
+      bindings.push({
+        node,
+        originalMaterial: node.material,
+        fadeMaterials,
+        isArray: Array.isArray(node.material),
+      });
+      node.material = Array.isArray(node.material) ? fadeMaterials : fadeMaterials[0];
+    });
+    sideState.fadeBindings = bindings;
+    return true;
+  }, []);
+
+  const setRenderSideObjectFadeOpacity = useCallback((sideState, opacity) => {
+    const bindings = Array.isArray(sideState?.fadeBindings) ? sideState.fadeBindings : [];
+    const clampedOpacity = clamp01(opacity);
+    for (const binding of bindings) {
+      for (const material of binding.fadeMaterials) {
+        const descriptor = getRWMaterialDescriptor(material);
+        if (descriptor) descriptor.opacity = clampedOpacity;
+        material.opacity = clampedOpacity;
+      }
+    }
+  }, []);
+
+  const disposeRenderSideObjectFade = useCallback((sideState) => {
+    const bindings = Array.isArray(sideState?.fadeBindings) ? sideState.fadeBindings : null;
+    if (!bindings) return false;
+    for (const binding of bindings) {
+      binding.node.material = binding.originalMaterial;
+      for (const material of binding.fadeMaterials) {
+        material?.dispose?.();
+      }
+    }
+    sideState.fadeBindings = null;
+    return true;
+  }, []);
+
+  const buildRenderSideFadeProxy = useCallback((item, side) => {
+    const sideState = side === 'near' ? item?.nearState : item?.lodState;
+    if (!sideState?.template?.traverse || !sideState?.placementMatrix) return null;
+
+    const proxy = SkeletonUtils.clone(sideState.template);
+    proxy.name = `${side}_fade_proxy`;
+    proxy.applyMatrix4(sideState.placementMatrix);
+    applyWireframe(proxy, uiStateRef.current.wireframe);
+    if (sideState.isTobj) {
+      prepareTobjInstanceMaterials(proxy, uiStateRef.current.disableVertexColor);
+    }
+    applyRwIdeFlagsToInstance(proxy, sideState.ideFlags || 0);
+    applyDisableVertexColor(proxy, uiStateRef.current.disableVertexColor);
+    applyGlobalBackfaceCulling(proxy, uiStateRef.current.disableBackfaceCulling);
+    proxy.visible = false;
+    proxy.userData = {
+      ...(proxy.userData || {}),
+      rwFadeProxy: true,
+      selectableRoot: false,
+      objectDetail: sideState.objectDetail || null,
+    };
+
+    const fadeMaterials = [];
+    proxy.traverse((node) => {
+      if (!node.isObject3D) return;
+      node.matrixAutoUpdate = false;
+      node.matrixWorldAutoUpdate = false;
+      if (!node.isMesh) return;
+      node.frustumCulled = false;
+      node.raycast = () => {};
+      const sourceMaterials = Array.isArray(node.material) ? node.material : [node.material];
+      const nextMaterials = sourceMaterials.map((material) => {
+        const fadeMaterial = createFadeMaterial(material, node.geometry);
+        if (fadeMaterial) fadeMaterials.push(fadeMaterial);
+        return fadeMaterial;
+      });
+      node.material = Array.isArray(node.material) ? nextMaterials : nextMaterials[0];
+    });
+    proxy.userData.rwFadeMaterials = fadeMaterials;
+    proxy.updateMatrixWorld(true);
+    return proxy;
+  }, []);
+
+  const disposeRenderSideFadeProxy = useCallback((sideState) => {
+    const proxyRoot = sideState?.proxyRoot;
+    if (!proxyRoot) return false;
+    if (proxyRoot.parent) proxyRoot.parent.remove(proxyRoot);
+    disposeObjectMaterialsOnly(proxyRoot);
+    sideState.proxyRoot = null;
+    sideState.currentOpacity = 0;
+    return true;
+  }, []);
+
+  const ensureRenderSideFadeProxy = useCallback((item, side) => {
+    const sideState = side === 'near' ? item?.nearState : item?.lodState;
+    if (!sideState) return null;
+    if (sideState.proxyRoot) return sideState.proxyRoot;
+    const proxy = buildRenderSideFadeProxy(item, side);
+    if (!proxy) return null;
+    worldRootRef.current.add(proxy);
+    sideState.proxyRoot = proxy;
+    rwRenderQueueRef.current?.markDirty();
+    return proxy;
+  }, [buildRenderSideFadeProxy]);
+
+  const applyRenderSideOpacity = useCallback((item, side, opacity, dirtyBatches) => {
+    const sideState = side === 'near' ? item?.nearState : item?.lodState;
+    if (!sideState) return false;
+    const clampedOpacity = clamp01(opacity);
+
+    if (clampedOpacity <= RW_FADE_EPSILON) {
+      if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty();
+      setRenderSideOriginalVisible(item, side, false, dirtyBatches);
+      if (disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty();
+      return false;
+    }
+
+    if (clampedOpacity >= (1 - RW_FADE_EPSILON)) {
+      if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty();
+      if (disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty();
+      setRenderSideOriginalVisible(item, side, true, dirtyBatches);
+      sideState.currentOpacity = 1;
+      return false;
+    }
+
+    if (ensureRenderSideObjectFade(sideState)) {
+      if (disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty();
+      sideState.renderObject.visible = true;
+      setRenderSideObjectFadeOpacity(sideState, clampedOpacity);
+      sideState.currentOpacity = clampedOpacity;
+      return false;
+    }
+
+    setRenderSideOriginalVisible(item, side, false, dirtyBatches);
+    const proxy = ensureRenderSideFadeProxy(item, side);
+    if (!proxy) {
+      setRenderSideOriginalVisible(item, side, true, dirtyBatches);
+      sideState.currentOpacity = 1;
+      return false;
+    }
+    setFadeProxyOpacity(proxy, clampedOpacity);
+    proxy.visible = true;
+    sideState.currentOpacity = clampedOpacity;
+    return true;
+  }, [
+    disposeRenderSideFadeProxy,
+    disposeRenderSideObjectFade,
+    ensureRenderSideFadeProxy,
+    ensureRenderSideObjectFade,
+    setRenderSideObjectFadeOpacity,
+    setRenderSideOriginalVisible,
+  ]);
+
+  const hideRenderItemCompletely = useCallback((item, dirtyBatches) => {
+    item.mode = 'hidden';
+    setRenderSideOriginalVisible(item, 'near', false, dirtyBatches);
+    setRenderSideOriginalVisible(item, 'lod', false, dirtyBatches);
+    let queueDirty = false;
+    if (disposeRenderSideObjectFade(item?.nearState)) queueDirty = true;
+    if (disposeRenderSideObjectFade(item?.lodState)) queueDirty = true;
+    if (disposeRenderSideFadeProxy(item?.nearState)) queueDirty = true;
+    if (disposeRenderSideFadeProxy(item?.lodState)) queueDirty = true;
+    if (queueDirty) rwRenderQueueRef.current?.markDirty();
+  }, [disposeRenderSideFadeProxy, disposeRenderSideObjectFade, setRenderSideOriginalVisible]);
 
   const hasNearRenderable = useCallback((item) => (
     Boolean(item?.nearObj) || (Array.isArray(item?.nearHandles) && item.nearHandles.length > 0)
@@ -2627,10 +2928,9 @@ function App() {
         lodState.needsRefresh = true;
       }
 
-      if (lodState.needsRefresh && lodUpdateAccumulatorRef.current >= 0.02) {
+      const needsFadeTick = activeFadeCountRef.current > 0;
+      if ((lodState.needsRefresh || needsFadeTick) && lodUpdateAccumulatorRef.current >= 0.02) {
         lodUpdateAccumulatorRef.current = 0;
-        const renderDistSq = renderingDistance * renderingDistance;
-        const drawDistSq = drawDistance * drawDistance;
         const chunkActiveDist = renderingDistance + CHUNK_ACTIVE_MARGIN;
         const chunkActiveDistSq = chunkActiveDist * chunkActiveDist;
         const chunkFrustum = chunkFrustumRef.current;
@@ -2643,6 +2943,7 @@ function App() {
         let activeItems = 0;
         let visibleNear = 0;
         let visibleLod = 0;
+        let activeFades = 0;
         for (const chunk of renderChunksRef.current) {
           const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
           const chunkInFrustum = chunkInRange && chunkFrustum.intersectsSphere(chunk.boundingSphere);
@@ -2651,7 +2952,7 @@ function App() {
             if (chunk.active) {
               chunk.active = false;
               for (const item of chunk.items) {
-                setRenderItemMode(item, 'hidden', dirtyBatches);
+                hideRenderItemCompletely(item, dirtyBatches);
               }
             }
             continue;
@@ -2662,42 +2963,131 @@ function App() {
           activeItems += chunk.items.length;
           for (const item of chunk.items) {
             const distSq = camera.position.distanceToSquared(item.anchor);
-            const inRange = distSq <= renderDistSq;
             const hasNear = hasNearRenderable(item);
             const hasLod = hasLodRenderable(item);
-
-            let targetMode = 'hidden';
-            if (inRange) {
-              const tobjAllowed = !item.isTobj || showTobjs;
-              if (!tobjAllowed) {
-                targetMode = 'hidden';
-              } else if (forceLodOnly) {
-                targetMode = hasLod ? 'lod' : 'hidden';
-              } else if (!showLods) {
-                targetMode = hasNear ? 'near' : (hasLod ? 'lod' : 'hidden');
-              } else if (!hasNear && hasLod) {
-                targetMode = 'lod';
-              } else if (hasNear && hasLod) {
-                targetMode = distSq > drawDistSq ? 'lod' : 'near';
-              } else {
-                targetMode = hasNear ? 'near' : (hasLod ? 'lod' : 'hidden');
-              }
-
-              // mapviewer-like behavior: if this placement has no LOD pair,
-              // keep near model only within IDE draw distance.
-              if (targetMode === 'near' && hasNear && !hasLod && !item.isTobj) {
-                const ideDrawDistance = Number(item.nearDrawDistance);
-                if (Number.isFinite(ideDrawDistance) && ideDrawDistance > 0) {
-                  if (distSq > (ideDrawDistance * ideDrawDistance)) {
-                    targetMode = 'hidden';
-                  }
-                }
-              }
+            const tobjAllowed = !item.isTobj || showTobjs;
+            const dist = Math.sqrt(distSq);
+            if (!tobjAllowed || dist > (renderingDistance + RW_DISTANCE_FADE_WINDOW)) {
+              hideRenderItemCompletely(item, dirtyBatches);
+              continue;
             }
 
-            if (targetMode === 'near') visibleNear += 1;
-            if (targetMode === 'lod') visibleLod += 1;
-            setRenderItemMode(item, targetMode, dirtyBatches);
+            const pairedItem = hasNear && hasLod;
+            const nearEndDistance = Math.min(
+              resolveRenderableDistance(
+                pairedItem
+                  ? (showLods ? drawDistance : renderingDistance)
+                  : item.nearState?.drawDistance,
+                renderingDistance,
+              ),
+              renderingDistance,
+            );
+            const lodEndDistance = Math.min(
+              resolveRenderableDistance(item.lodState?.drawDistance, renderingDistance),
+              renderingDistance,
+            );
+
+            let nearShouldShow = false;
+            let lodShouldShow = false;
+            let nearOpacity = 0;
+            let lodOpacity = 0;
+
+            if (pairedItem && showLods && !forceLodOnly) {
+              const nearCoreRange = dist <= drawDistance;
+              const nearFadeRange = dist <= (drawDistance + RW_DISTANCE_FADE_WINDOW);
+              const lodVisibleRange = dist <= (lodEndDistance + RW_DISTANCE_FADE_WINDOW);
+
+              if (nearFadeRange && item.nearState) {
+                item.nearState.streamAlpha = approachValue(
+                  item.nearState.streamAlpha,
+                  1,
+                  dt * RW_STREAM_ALPHA_PER_SECOND,
+                );
+              }
+              if (lodVisibleRange && item.lodState) {
+                item.lodState.streamAlpha = approachValue(
+                  item.lodState.streamAlpha,
+                  1,
+                  dt * RW_STREAM_ALPHA_PER_SECOND,
+                );
+              }
+
+              const nearStreamAlpha = item.nearState?.streamAlpha ?? 1;
+              const lodStreamAlpha = item.lodState?.streamAlpha ?? 1;
+              const nearDistanceAlpha = nearCoreRange ? 1 : computeDistanceFadeAlpha(dist, drawDistance);
+              const lodDistanceAlpha = lodVisibleRange ? computeDistanceFadeAlpha(dist, lodEndDistance) : 0;
+
+              nearOpacity = nearFadeRange ? clamp01(nearStreamAlpha * nearDistanceAlpha) : 0;
+              if (nearCoreRange) {
+                lodOpacity = lodVisibleRange
+                  ? clamp01((nearStreamAlpha < (1 - RW_FADE_EPSILON) ? 1 : 0) * lodStreamAlpha * lodDistanceAlpha)
+                  : 0;
+              } else {
+                lodOpacity = lodVisibleRange ? clamp01(lodStreamAlpha * lodDistanceAlpha) : 0;
+              }
+              nearShouldShow = nearOpacity > RW_FADE_EPSILON;
+              lodShouldShow = lodOpacity > RW_FADE_EPSILON;
+            } else {
+              nearShouldShow = hasNear
+                && !forceLodOnly
+                && dist <= (nearEndDistance + RW_DISTANCE_FADE_WINDOW);
+              const lodShouldShowBase = hasLod
+                && (
+                  forceLodOnly
+                  || (!showLods && !hasNear)
+                  || (showLods && (!hasNear || dist > drawDistance))
+                );
+
+              if (nearShouldShow && item.nearState) {
+                item.nearState.streamAlpha = approachValue(
+                  item.nearState.streamAlpha,
+                  1,
+                  dt * RW_STREAM_ALPHA_PER_SECOND,
+                );
+              }
+              const nearDistanceAlpha = nearShouldShow
+                ? computeDistanceFadeAlpha(dist, nearEndDistance)
+                : 0;
+              nearOpacity = nearShouldShow
+                ? clamp01((item.nearState?.streamAlpha ?? 1) * nearDistanceAlpha)
+                : 0;
+
+              lodShouldShow = hasLod
+                && dist <= (lodEndDistance + RW_DISTANCE_FADE_WINDOW)
+                && lodShouldShowBase;
+              if (lodShouldShow && item.lodState) {
+                item.lodState.streamAlpha = approachValue(
+                  item.lodState.streamAlpha,
+                  1,
+                  dt * RW_STREAM_ALPHA_PER_SECOND,
+                );
+              }
+              const lodDistanceAlpha = lodShouldShow
+                ? computeDistanceFadeAlpha(dist, lodEndDistance)
+                : 0;
+              lodOpacity = lodShouldShow
+                ? clamp01((item.lodState?.streamAlpha ?? 1) * lodDistanceAlpha)
+                : 0;
+            }
+
+            item.mode = nearOpacity > RW_FADE_EPSILON
+              ? (lodOpacity > RW_FADE_EPSILON ? 'near+lod' : 'near')
+              : (lodOpacity > RW_FADE_EPSILON ? 'lod' : 'hidden');
+
+            if (nearOpacity > RW_FADE_EPSILON) visibleNear += 1;
+            if (lodOpacity > RW_FADE_EPSILON) visibleLod += 1;
+
+            applyRenderSideOpacity(item, 'near', nearOpacity, dirtyBatches);
+            applyRenderSideOpacity(item, 'lod', lodOpacity, dirtyBatches);
+
+            if (
+              (nearOpacity > RW_FADE_EPSILON && nearOpacity < (1 - RW_FADE_EPSILON))
+              || (lodOpacity > RW_FADE_EPSILON && lodOpacity < (1 - RW_FADE_EPSILON))
+              || (nearShouldShow && (item.nearState?.streamAlpha ?? 1) < (1 - RW_FADE_EPSILON))
+              || (lodShouldShow && (item.lodState?.streamAlpha ?? 1) < (1 - RW_FADE_EPSILON))
+            ) {
+              activeFades += 1;
+            }
           }
         }
         for (const batch of dirtyBatches) {
@@ -2714,7 +3104,8 @@ function App() {
           drawCalls: renderer.info.render.calls,
           triangles: renderer.info.render.triangles,
         };
-        lodState.needsRefresh = false;
+        activeFadeCountRef.current = activeFades;
+        lodState.needsRefresh = activeFades > 0;
       }
 
       grid.visible = uiStateRef.current.showGrid;
@@ -3965,7 +4356,19 @@ function App() {
       rwWaterPipelineRef.current = null;
       disposeWorld(worldRoot);
     };
-  }, [activeBackend, clearWorld, hasLodRenderable, hasNearRenderable, isWindowOpen, pushConsoleLine, rebuildWorld, resetImguiTextureCache, setRenderItemMode, setWindowOpen]);
+  }, [
+    activeBackend,
+    applyRenderSideOpacity,
+    clearWorld,
+    hasLodRenderable,
+    hasNearRenderable,
+    hideRenderItemCompletely,
+    isWindowOpen,
+    pushConsoleLine,
+    rebuildWorld,
+    resetImguiTextureCache,
+    setWindowOpen,
+  ]);
 
   const fileSummary = useMemo(() => `Indexed files: ${stats.files}`, [stats.files]);
 

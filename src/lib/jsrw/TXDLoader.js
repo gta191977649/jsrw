@@ -74,7 +74,7 @@ class TXDLoader extends THREE.Loader {
 
     this.readHeader();
     const textureCount = this.readUInt16();
-    const deviceId = this.readUInt16();
+    const _deviceId = this.readUInt16();
 
     for (let i = 0; i < textureCount; i += 1) {
       try {
