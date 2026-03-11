@@ -46,6 +46,8 @@ import {
 import { getWaterConfig, parseWaterproDat } from './lib/waterpro';
 import saIcon from './assets/sa.png';
 import vcsIcon from './assets/vcs.png';
+import skyVertexShader from './shaders/sky.vertex.glsl.js';
+import skyFragmentShader from './shaders/sky.fragment.glsl.js';
 import './App.css';
 
 const MAX_CONSOLE_LINES = 500;
@@ -88,59 +90,6 @@ const INSTANCE_SELECTION_MATERIAL = new THREE.MeshBasicMaterial({
   fog: false,
   toneMapped: false,
 });
-const SKY_VERTEX_SHADER = `
-varying vec2 vUv;
-
-void main() {
-  vUv = uv;
-  gl_Position = vec4(position.xy, 0.0, 1.0);
-}
-`;
-const SKY_FRAGMENT_SHADER = `
-uniform vec3 uSkyTop;
-uniform vec3 uSkyBottom;
-uniform vec3 uFogColor;
-uniform vec3 uCameraForward;
-uniform vec3 uCameraRight;
-uniform vec3 uCameraUp;
-uniform float uHorizonY;
-uniform float uSmallStripHeight;
-uniform float uHorizonStrength;
-uniform float uLowerBandEndY;
-uniform float uTanHalfFov;
-uniform float uAspect;
-uniform float uBelowHorizonMix;
-
-varying vec2 vUv;
-
-void main() {
-  vec2 ndc = (vUv * 2.0) - 1.0;
-  vec3 viewDir = normalize(
-    uCameraForward
-    + (ndc.x * uAspect * uTanHalfFov * uCameraRight)
-    + (ndc.y * uTanHalfFov * uCameraUp)
-  );
-  float elevation = clamp(viewDir.y * 0.5 + 0.5, 0.0, 1.0);
-  float horizonVisible = step(0.0, uHorizonY) * step(uHorizonY, 1.0);
-  float horizonAnchor = clamp(uHorizonY, 0.0, 1.0);
-
-  float skyT = smoothstep(horizonAnchor, 1.0, vUv.y);
-  vec3 color = mix(uSkyBottom, uSkyTop, clamp(skyT, 0.0, 1.0));
-
-  float smallStripHeight = max(0.003, uSmallStripHeight);
-  float smallStripMask = (1.0 - smoothstep(0.0, smallStripHeight, abs(vUv.y - horizonAnchor))) * horizonVisible;
-  color = mix(color, uFogColor, smallStripMask * uHorizonStrength);
-
-  float lowerStart = horizonAnchor - smallStripHeight;
-  float lowerEnd = min(lowerStart, uLowerBandEndY);
-  float lowerMask = (1.0 - step(horizonAnchor, vUv.y)) * smoothstep(lowerEnd, lowerStart, vUv.y) * horizonVisible;
-  vec3 belowHorizonColor = mix(vec3(0.1176), uSkyBottom, uBelowHorizonMix);
-  color = mix(color, mix(belowHorizonColor, uFogColor, smoothstep(lowerEnd, lowerStart, vUv.y)), lowerMask);
-
-  gl_FragColor = vec4(color, 1.0);
-}
-`;
-
 function yieldToBrowser() {
   return new Promise((resolve) => {
     if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
@@ -183,10 +132,11 @@ function fromTimecycleColorArray(array, type) {
 }
 
 function toThreeColorFromTimecycleValue(value) {
-  return new THREE.Color(
+  return new THREE.Color().setRGB(
     (value.r || 0) / 255,
     (value.g || 0) / 255,
     (value.b || 0) / 255,
+    THREE.SRGBColorSpace,
   );
 }
 
@@ -260,6 +210,7 @@ function createLowCloudTexture(seed = 0) {
   }
   ctx.globalCompositeOperation = 'source-over';
   const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
   texture.needsUpdate = true;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -274,6 +225,7 @@ function createFluffyCloudTexture(topColor, bottomColor) {
   canvas.height = 256;
   updateFluffyCloudTexture(canvas, topColor, bottomColor);
   const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
   texture.needsUpdate = true;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -1096,8 +1048,17 @@ function App() {
             Math.min(current.values.fogStart, current.values.farClip - 1),
           );
           const fogFar = Math.max(fogNear + 1, current.values.farClip);
+          const waterAlpha = THREE.MathUtils.clamp(
+            (Number(current.values?.water?.a) || 0) / 255,
+            0,
+            1,
+          );
           return {
             color: current.three?.waterColor || null,
+            farAlpha: waterAlpha,
+            nearAlpha: waterAlpha,
+            wavyAlpha: waterAlpha,
+            wakeAlpha: waterAlpha,
             fogColor: current.three?.fogColor || null,
             fogNear,
             fogFar,
@@ -1831,6 +1792,8 @@ function App() {
       rendererReady = true;
       backendSwitchingRef.current = false;
     }
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.NoToneMapping;
 
     canvas.tabIndex = 1;
 
@@ -1844,6 +1807,7 @@ function App() {
         uSkyTop: { value: SKY_DEFAULT_TOP.clone() },
         uSkyBottom: { value: SKY_DEFAULT_BOTTOM.clone() },
         uFogColor: { value: SKY_DEFAULT_FOG.clone() },
+        uBelowHorizonColor: { value: new THREE.Color().setRGB(30 / 255, 30 / 255, 30 / 255, THREE.SRGBColorSpace) },
         uCameraForward: { value: new THREE.Vector3(0, 0, -1) },
         uCameraRight: { value: new THREE.Vector3(1, 0, 0) },
         uCameraUp: { value: new THREE.Vector3(0, 1, 0) },
@@ -1855,8 +1819,8 @@ function App() {
         uAspect: { value: 1 },
         uBelowHorizonMix: { value: 0 },
       },
-      vertexShader: SKY_VERTEX_SHADER,
-      fragmentShader: SKY_FRAGMENT_SHADER,
+      vertexShader: skyVertexShader,
+      fragmentShader: skyFragmentShader,
       depthTest: false,
       depthWrite: false,
       fog: false,
@@ -2385,6 +2349,9 @@ function App() {
       const fogColor = timecycleCurrent?.three?.fogColor?.isColor
         ? timecycleCurrent.three.fogColor
         : SKY_DEFAULT_FOG;
+      const belowHorizonColor = timecycleCurrent?.three?.belowHorizonColor?.isColor
+        ? timecycleCurrent.three.belowHorizonColor
+        : new THREE.Color().setRGB(30 / 255, 30 / 255, 30 / 255, THREE.SRGBColorSpace);
       const lowCloudColor = timecycleCurrent?.values?.lowClouds
         ? toThreeColorFromTimecycleValue(timecycleCurrent.values.lowClouds)
         : fogColor;
@@ -2423,6 +2390,7 @@ function App() {
         skyMaterial.uniforms.uSkyTop.value.copy(skyTopColor);
         skyMaterial.uniforms.uSkyBottom.value.copy(skyBottomColor);
         skyMaterial.uniforms.uFogColor.value.copy(fogColor);
+        skyMaterial.uniforms.uBelowHorizonColor.value.copy(belowHorizonColor);
         skyMaterial.uniforms.uCameraForward.value.copy(cameraForward);
         skyMaterial.uniforms.uCameraRight.value.copy(cameraRight);
         skyMaterial.uniforms.uCameraUp.value.copy(cameraUp);
@@ -2702,15 +2670,13 @@ function App() {
           try {
             waterPipeline.update(camera, time, dt);
 
-            waterStage = 'renderFar';
-            waterPipeline.renderFar(renderer, camera, null);
-            renderer.autoClear = false;
-            renderer.clearDepth();
-
             waterStage = 'renderSceneOpaque';
             rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout']);
             renderer.render(scene, camera);
             rwRenderQueue?.popCameraBucketMask(camera);
+
+            waterStage = 'renderFar';
+            waterPipeline.renderFar(renderer, camera, null);
 
             waterStage = 'renderNear';
             waterPipeline.renderNear(renderer, camera);

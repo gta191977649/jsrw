@@ -57,7 +57,11 @@ export const TIMECYCLE_FIELD_GROUPS = Object.freeze([
   { key: 'blurAlpha', label: 'Blur Alpha', type: 'scalar' },
   { key: 'blurOffset', label: 'Blur Offset', type: 'scalar' },
   { key: 'fogColor', label: 'Fog Color', type: 'rgb' },
+  { key: 'belowHorizonColor', label: 'Below Horizon', type: 'rgb' },
 ]);
+
+const BELOW_HORIZON_HOURS = Object.freeze([0, 5, 6, 7, 12, 19, 20, 22, 24]);
+const BELOW_HORIZON_VALUES = Object.freeze([30, 30, 30, 50, 60, 60, 50, 35]);
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -97,10 +101,11 @@ function lerpRgba(a, b, t) {
 }
 
 function toThreeColor(rgb) {
-  return new THREE.Color(
+  return new THREE.Color().setRGB(
     clampByte(rgb.r) / 255,
     clampByte(rgb.g) / 255,
     clampByte(rgb.b) / 255,
+    THREE.SRGBColorSpace,
   );
 }
 
@@ -180,6 +185,20 @@ function buildFogColor(entry) {
     (entry.skyTop.g + (2 * entry.skyBottom.g)) / 3,
     (entry.skyTop.b + (2 * entry.skyBottom.b)) / 3,
   );
+}
+
+function buildBelowHorizonColor(hour, minute) {
+  const time = clamp(hour, 0, 23) + (clamp(minute, 0, 59) / 60);
+  let idx = 0;
+  while (idx + 1 < BELOW_HORIZON_HOURS.length - 1 && time >= BELOW_HORIZON_HOURS[idx + 1]) idx += 1;
+  const currentHour = BELOW_HORIZON_HOURS[idx];
+  const nextHour = BELOW_HORIZON_HOURS[idx + 1];
+  const currentValue = BELOW_HORIZON_VALUES[idx];
+  const nextValue = BELOW_HORIZON_VALUES[(idx + 1) % BELOW_HORIZON_VALUES.length];
+  const span = Math.max(1, nextHour - currentHour);
+  const alpha = clamp((time - currentHour) / span, 0, 1);
+  const value = lerp(currentValue, nextValue, alpha);
+  return makeRgb(value, value, value);
 }
 
 function sanitizeLines(text) {
@@ -280,6 +299,7 @@ export function sampleTimecyc(data, options = {}) {
     }
   }
   const fogColor = buildFogColor(current);
+  const belowHorizonColor = buildBelowHorizonColor(hour, minute);
   const flagsA = data.weatherFlags?.[weatherA] || 0;
   const flagsB = data.weatherFlags?.[weatherB] || 0;
   let cloudCoverage = (flagsA & WEATHER_FLAG.SUNNY) ? 0 : (1 - weatherBlend);
@@ -312,9 +332,11 @@ export function sampleTimecyc(data, options = {}) {
     values: {
       ...current,
       fogColor,
+      belowHorizonColor,
     },
     three: {
       fogColor: toThreeColor(fogColor),
+      belowHorizonColor: toThreeColor(belowHorizonColor),
       skyTop: toThreeColor(current.skyTop),
       skyBottom: toThreeColor(current.skyBottom),
       waterColor: toThreeColor(current.water),

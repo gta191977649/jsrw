@@ -1,13 +1,23 @@
 import * as THREE from 'three';
 import { buildWaterBlockGeometry, buildWaterFineGeometry } from './waterpro';
+import waterWaveVertexShader from '../shaders/water-wave.vertex.glsl.js';
+import waterWaveFragmentShader from '../shaders/water-wave.fragment.glsl.js';
 
 const DEFAULT_WATER_COLOR = new THREE.Color(0x6f93ab);
+
+function markTextureAsData(texture) {
+  if (!texture?.isTexture) return texture;
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
 
 function createFallbackTexture() {
   const data = new Uint8Array([255, 255, 255, 255]);
   const fallback = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
   fallback.wrapS = THREE.RepeatWrapping;
   fallback.wrapT = THREE.RepeatWrapping;
+  fallback.colorSpace = THREE.SRGBColorSpace;
   fallback.needsUpdate = true;
   fallback.userData = {
     ...(fallback.userData || {}),
@@ -160,98 +170,15 @@ function createWaterWaveMaterial(texture, options = {}) {
       uWaveRadiusInner: { value: options.waveRadiusInner ?? 140.0 },
       uWaveRadiusOuter: { value: options.waveRadiusOuter ?? 260.0 },
     },
-    vertexShader: `
-      uniform float uTime;
-      uniform int uWaveEnabled;
-      uniform float uWaveHeight;
-      uniform vec3 uCameraWorldPos;
-      uniform float uWaveRadiusInner;
-      uniform float uWaveRadiusOuter;
-      varying vec2 vUv;
-      varying float vNearWeight;
-      varying vec3 vNormalWS;
-      varying vec3 vViewDirWS;
-      varying float vViewDistance;
-      void main() {
-        vUv = uv;
-        vec3 transformed = position;
-        vec4 baseWorldPos = modelMatrix * vec4(position, 1.0);
-        vec3 localNormal = normal;
-        vec2 worldXZ = baseWorldPos.xz;
-        vec2 camXZ = uCameraWorldPos.xz;
-        float distToCam = distance(worldXZ, camXZ);
-        float waveWeight = 1.0 - smoothstep(uWaveRadiusInner, uWaveRadiusOuter, distToCam);
-        vNearWeight = waveWeight;
-
-        if (uWaveEnabled == 1) {
-          if (waveWeight > 0.0) {
-            float phaseA = ((worldXZ.x + worldXZ.y) * 0.085) + (uTime * 2.1);
-            float phaseB = ((worldXZ.y - worldXZ.x) * 0.14) + (uTime * 3.35);
-            float waveA = sin(phaseA);
-            float waveB = sin(phaseB);
-            float height = (waveA + (0.35 * waveB)) * uWaveHeight * waveWeight;
-            transformed.y += height;
-
-            float dAdx = 0.085;
-            float dAdz = 0.085;
-            float dBdx = -0.14;
-            float dBdz = 0.14;
-            float dhdx = (cos(phaseA) * dAdx + 0.35 * cos(phaseB) * dBdx) * uWaveHeight * waveWeight;
-            float dhdz = (cos(phaseA) * dAdz + 0.35 * cos(phaseB) * dBdz) * uWaveHeight * waveWeight;
-            localNormal = normalize(vec3(-dhdx, 1.0, -dhdz));
-          }
-        }
-
-        vec4 worldPos = modelMatrix * vec4(transformed, 1.0);
-        vNormalWS = normalize(normalMatrix * localNormal);
-        vViewDirWS = normalize(cameraPosition - worldPos.xyz);
-        vViewDistance = distance(cameraPosition, worldPos.xyz);
-        gl_Position = projectionMatrix * viewMatrix * worldPos;
-      }
-    `,
-    fragmentShader: `
-      uniform sampler2D uMap;
-      uniform vec2 uUvOffset;
-      uniform vec3 uColor;
-      uniform vec3 uFogColor;
-      uniform float uFogNear;
-      uniform float uFogFar;
-      uniform float uAlpha;
-      uniform float uAlphaScale;
-      uniform float uDistanceAlphaStrength;
-      varying vec2 vUv;
-      varying float vNearWeight;
-      varying vec3 vNormalWS;
-      varying vec3 vViewDirWS;
-      varying float vViewDistance;
-      void main() {
-        vec2 uvPrimary = vUv + uUvOffset;
-        vec2 uvSecondary = (vUv * 1.75) + (uUvOffset * vec2(1.9, 0.65));
-        vec4 texel = texture2D(uMap, uvPrimary);
-        vec4 flowTexel = texture2D(uMap, uvSecondary);
-        vec3 normal = normalize(vNormalWS);
-        vec3 viewDir = normalize(vViewDirWS);
-        float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.4);
-        float facing = 0.45 + (0.55 * max(normal.y, 0.0));
-        float streak = smoothstep(0.3, 0.95, flowTexel.r);
-        vec3 litColor = texel.rgb * uColor * facing;
-        litColor += vec3(0.10, 0.22, 0.24) * streak * (0.25 + 0.75 * fresnel);
-        litColor += vec3(0.06, 0.12, 0.13) * vNearWeight;
-        litColor += fresnel * 0.34;
-        float fogFactor = smoothstep(uFogNear, uFogFar, vViewDistance);
-        litColor = mix(litColor, uFogColor, fogFactor);
-        float coverage = 0.45 + (0.55 * vNearWeight);
-        float alphaCoverage = mix(1.0, coverage, uDistanceAlphaStrength);
-        float alpha = texel.a * uAlpha * uAlphaScale * alphaCoverage * (0.96 + (0.12 * vNearWeight));
-        gl_FragColor = vec4(litColor, alpha);
-      }
-    `,
+    vertexShader: waterWaveVertexShader,
+    fragmentShader: waterWaveFragmentShader,
     transparent: true,
     depthTest: true,
     depthWrite: false,
     side: THREE.DoubleSide,
-      fog: false,
-      toneMapped: false,
+    forceSinglePass: true,
+    fog: false,
+    toneMapped: false,
   });
 }
 
@@ -276,6 +203,7 @@ export class RWWaterPipeline {
 
     this.waterState = {
       color: DEFAULT_WATER_COLOR.clone(),
+      farAlpha: 0.72,
       nearAlpha: 0.72,
       wavyAlpha: 0.82,
       wakeAlpha: 0.55,
@@ -284,6 +212,7 @@ export class RWWaterPipeline {
     this.settings = {
       uvSpeed: 1,
       waveHeight: 35,
+      farAlpha: 0.72,
       nearAlpha: 0.72,
       wavyAlpha: 0.82,
       wakeAlpha: 0.55,
@@ -292,17 +221,17 @@ export class RWWaterPipeline {
     };
 
     this.farTexture = cloneTexture(options.texture);
-    this.nearTexture = cloneTexture(options.texture);
+    this.nearTexture = markTextureAsData(cloneTexture(options.texture));
     this.wakeTexture = cloneTexture(options.texture);
 
     this.farMaterial = new THREE.MeshBasicMaterial({
       name: 'rw-water-far',
       map: this.farTexture,
       color: this.waterState.color.clone(),
-      transparent: false,
-      opacity: 1,
+      transparent: true,
+      opacity: this.waterState.farAlpha,
       depthTest: true,
-      depthWrite: true,
+      depthWrite: false,
       side: THREE.DoubleSide,
       wireframe: Boolean(options.wireframe),
       fog: true,
@@ -370,7 +299,7 @@ export class RWWaterPipeline {
 
   setTexture(sourceTexture) {
     const nextFar = cloneTexture(sourceTexture);
-    const nextNear = cloneTexture(sourceTexture);
+    const nextNear = markTextureAsData(cloneTexture(sourceTexture));
     const nextWake = cloneTexture(sourceTexture);
 
     disposeTexture(this.farTexture);
@@ -471,6 +400,7 @@ export class RWWaterPipeline {
       this.settings = { ...this.settings, ...settings };
     }
     const normalizedWaveHeight = Math.max(0, Math.min(100, this.settings.waveHeight)) / 100;
+    this.farMaterial.opacity = this.settings.farAlpha;
     this.nearMaterial.uniforms.uAlpha.value = this.settings.nearAlpha;
     this.nearMaterial.uniforms.uAlphaScale.value = 1.0;
     this.nearMaterial.uniforms.uDistanceAlphaStrength.value = 1.0;
@@ -521,14 +451,17 @@ export class RWWaterPipeline {
     const fogColor = timecycleState?.fogColor?.isColor ? timecycleState.fogColor : null;
     const fogNear = Number.isFinite(timecycleState?.fogNear) ? timecycleState.fogNear : null;
     const fogFar = Number.isFinite(timecycleState?.fogFar) ? timecycleState.fogFar : null;
+    this.waterState.farAlpha = this.settings.farAlpha;
     this.waterState.nearAlpha = this.settings.nearAlpha;
     this.waterState.wavyAlpha = this.settings.wavyAlpha;
     this.waterState.wakeAlpha = this.settings.wakeAlpha;
+    if (Number.isFinite(timecycleState?.farAlpha)) this.waterState.farAlpha = timecycleState.farAlpha;
     if (Number.isFinite(timecycleState?.nearAlpha)) this.waterState.nearAlpha = timecycleState.nearAlpha;
     if (Number.isFinite(timecycleState?.wavyAlpha)) this.waterState.wavyAlpha = timecycleState.wavyAlpha;
     if (Number.isFinite(timecycleState?.wakeAlpha)) this.waterState.wakeAlpha = timecycleState.wakeAlpha;
 
     this.farMaterial.color.copy(this.waterState.color);
+    this.farMaterial.opacity = this.waterState.farAlpha;
     this.nearMaterial.uniforms.uColor.value.copy(this.waterState.color);
     this.nearMaterial.uniforms.uAlpha.value = this.waterState.nearAlpha;
     this.wakeMaterial.color.copy(this.waterState.color);
