@@ -429,11 +429,7 @@ function App() {
     renderWater: true,
     waterUvSpeed: 1,
     waterWaveHeight: 35,
-    waterNearAlpha: 0.72,
-    waterWavyAlpha: 0.82,
-    waterWakeAlpha: 0.55,
-    waterShowWavy: true,
-    waterShowWake: false,
+    waterAlpha: 0.72,
     appMode: APP_MODE_EDITOR,
     backendSelection: 'WebGL',
     windows: Object.fromEntries(WINDOW_DEFS.map((item) => [item.key, item.defaultVisible])),
@@ -1031,11 +1027,7 @@ function App() {
           settings: {
             uvSpeed: uiStateRef.current.waterUvSpeed,
             waveHeight: uiStateRef.current.waterWaveHeight,
-            nearAlpha: uiStateRef.current.waterNearAlpha,
-            wavyAlpha: uiStateRef.current.waterWavyAlpha,
-            wakeAlpha: uiStateRef.current.waterWakeAlpha,
-            showWavy: uiStateRef.current.waterShowWavy,
-            showWake: uiStateRef.current.waterShowWake,
+            farAlpha: uiStateRef.current.waterAlpha,
           },
         });
         pendingWaterPipeline?.dispose();
@@ -1056,16 +1048,12 @@ function App() {
           return {
             color: current.three?.waterColor || null,
             farAlpha: waterAlpha,
-            nearAlpha: waterAlpha,
-            wavyAlpha: waterAlpha,
-            wakeAlpha: waterAlpha,
             fogColor: current.three?.fogColor || null,
             fogNear,
             fogFar,
           };
         });
-        const nearPosition = pipeline.nearMesh.geometry.getAttribute('position');
-        const waterCells = nearPosition ? Math.floor(nearPosition.count / 6) : 0;
+        const waterCells = pipeline.getWaterCellCount();
         pipeline.nearMesh.userData.water = {
           kind: 'waterpro',
           levelCount: parsed.levelCount,
@@ -2639,11 +2627,7 @@ function App() {
       waterPipeline?.applySettings({
         uvSpeed: uiStateRef.current.waterUvSpeed,
         waveHeight: uiStateRef.current.waterWaveHeight,
-        nearAlpha: uiStateRef.current.waterNearAlpha,
-        wavyAlpha: uiStateRef.current.waterWavyAlpha,
-        wakeAlpha: uiStateRef.current.waterWakeAlpha ?? 0.55,
-        showWavy: uiStateRef.current.waterShowWavy,
-        showWake: uiStateRef.current.waterShowWake ?? false,
+        farAlpha: uiStateRef.current.waterAlpha,
       });
       const skyScene = skySceneRef.current;
       const skyCamera = skyCameraRef.current;
@@ -3422,18 +3406,10 @@ function App() {
               );
               const defaultOpen = ImGui.TreeNodeFlags?.DefaultOpen ?? 0;
               if (ImGui.CollapsingHeader('Water', defaultOpen)) {
-                ImGui.TextWrapped('Wave Height is the RW-style master control for visible water motion. Far water stays flat; near water and the local wavy sector use this value.');
+                ImGui.TextWrapped('Single-layer RW water. The mesh is drawn as instanced 8x8 sector patches, with RW-style vertex waves on every patch.');
                 ImGui.Checkbox(
                   'Render Water',
                   (value = uiStateRef.current.renderWater) => (uiStateRef.current.renderWater = value),
-                );
-                ImGui.Checkbox(
-                  'Show Wavy Sector',
-                  (value = uiStateRef.current.waterShowWavy) => (uiStateRef.current.waterShowWavy = value),
-                );
-                ImGui.Checkbox(
-                  'Show Wake Layer',
-                  (value = uiStateRef.current.waterShowWake) => (uiStateRef.current.waterShowWake = value),
                 );
                 const renderWaterSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
                   ImGui.PushID(id);
@@ -3459,7 +3435,7 @@ function App() {
                 };
                 renderWaterSliderRow(
                   'uv-speed',
-                  'Main Scroll Speed',
+                  'Texture Scroll Speed',
                   () => uiStateRef.current.waterUvSpeed,
                   (value) => { uiStateRef.current.waterUvSpeed = value; },
                   0,
@@ -3467,7 +3443,7 @@ function App() {
                 );
                 renderWaterSliderRow(
                   'wave-height',
-                  'Wave Height',
+                  'Wave Height Scale',
                   () => uiStateRef.current.waterWaveHeight,
                   (value) => { uiStateRef.current.waterWaveHeight = value; },
                   0,
@@ -3475,29 +3451,14 @@ function App() {
                   '%.0f',
                 );
                 renderWaterSliderRow(
-                  'near-alpha',
-                  'Near Layer Alpha',
-                  () => uiStateRef.current.waterNearAlpha,
-                  (value) => { uiStateRef.current.waterNearAlpha = value; },
+                  'water-alpha',
+                  'Fallback Alpha',
+                  () => uiStateRef.current.waterAlpha,
+                  (value) => { uiStateRef.current.waterAlpha = value; },
                   0,
                   1,
                 );
-                renderWaterSliderRow(
-                  'wavy-alpha',
-                  'Wavy Sector Alpha',
-                  () => uiStateRef.current.waterWavyAlpha,
-                  (value) => { uiStateRef.current.waterWavyAlpha = value; },
-                  0,
-                  1,
-                );
-                renderWaterSliderRow(
-                  'wake-alpha',
-                  'Wake Layer Alpha',
-                  () => uiStateRef.current.waterWakeAlpha,
-                  (value) => { uiStateRef.current.waterWakeAlpha = value; },
-                  0,
-                  1,
-                );
+                ImGui.TextWrapped('RW alignment: wind is pinned to 0, so the default wave profile uses the original 0.3 baseline swell with no weather-driven boost.');
               }
               if (ImGui.CollapsingHeader('Sky', defaultOpen)) {
                 const renderSkySliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {

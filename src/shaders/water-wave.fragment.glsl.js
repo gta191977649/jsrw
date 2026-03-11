@@ -15,6 +15,7 @@ varying float vNearWeight;
 varying vec3 vNormalWS;
 varying vec3 vViewDirWS;
 varying float vViewDistance;
+varying float vPatchFade;
 
 void main() {
   vec2 uvPrimary = vUv + uUvOffset;
@@ -37,7 +38,7 @@ void main() {
   litColor = mix(litColor, uFogColor, fogFactor);
   float coverage = 0.45 + (0.55 * vNearWeight);
   float alphaCoverage = mix(1.0, coverage, uDistanceAlphaStrength);
-  float alpha = uAlpha * uAlphaScale * alphaCoverage * (0.96 + (0.12 * vNearWeight));
+  float alpha = uAlpha * uAlphaScale * alphaCoverage * (0.96 + (0.12 * vNearWeight)) * vPatchFade;
   gl_FragColor = vec4(litColor, alpha);
   #include <colorspace_fragment>
 }
