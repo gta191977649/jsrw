@@ -173,6 +173,7 @@ function createLeedsVcsBuildingMaterial(profile, input) {
       uEmiss: { value: new THREE.Vector3(0, 0, 0) },
       uSurfaceEmissiveScale: { value: Number(profile.config?.surfaceEmissiveScale) || 0 },
       uUseVertexColor: { value: !descriptor.rwFlags?.forceIgnoreVertexColor && descriptor.useVertexColors !== false },
+      uPlatformVariant: { value: profile.platform === RW_PIPELINE_PLATFORM.PSP ? 1 : 0 },
     },
   };
   material.onBeforeCompile = (shader) => {
@@ -182,6 +183,7 @@ function createLeedsVcsBuildingMaterial(profile, input) {
     shader.uniforms.uEmiss = pipelineUniforms.uEmiss;
     shader.uniforms.uSurfaceEmissiveScale = pipelineUniforms.uSurfaceEmissiveScale;
     shader.uniforms.uUseVertexColor = pipelineUniforms.uUseVertexColor;
+    shader.uniforms.uPlatformVariant = pipelineUniforms.uPlatformVariant;
 
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -191,6 +193,7 @@ uniform vec3 uAmb;
 uniform vec3 uEmiss;
 uniform float uSurfaceEmissiveScale;
 uniform bool uUseVertexColor;
+uniform int uPlatformVariant;
 varying vec4 rwPipelineColor;
 vec4 rwPipelineReadVertexColor(void) {
   if (!uUseVertexColor) return vec4(1.0);
@@ -203,6 +206,21 @@ vec4 rwPipelineReadVertexColor(void) {
   #endif
 }
 vec4 rwPipelineApplyLeedsProfile(vec4 vertexColor) {
+  if (uPlatformVariant == 1) {
+    vec3 vertexRgb = vertexColor.rgb;
+    vec3 ambientRgb = uAmb;
+    vec3 emissiveRgb = uEmiss;
+    vertexRgb = ((vertexRgb - 0.5) * max(1.5, 0.0)) + 0.5;
+    vertexRgb += 0.25;
+    vertexRgb = max(vertexRgb, vec3(0.0));
+    ambientRgb = ((ambientRgb - 0.5) * max(1.2, 0.0)) + 0.5;
+    ambientRgb += 0.1;
+    ambientRgb = max(ambientRgb, vec3(0.0));
+    emissiveRgb = ((emissiveRgb - 0.5) * max(1.25, 0.0)) + 0.5;
+    emissiveRgb += 0.05;
+    emissiveRgb = max(emissiveRgb, vec3(0.0));
+    return clamp(vec4(emissiveRgb + (vertexRgb * ambientRgb), vertexColor.a), 0.0, 1.0);
+  }
   vec4 outputColor = vertexColor;
   outputColor.rgb *= uAmb;
   outputColor.rgb += uEmiss * uSurfaceEmissiveScale;
@@ -288,6 +306,7 @@ function updateLeedsVcsBuildingMaterial(profile, material, runtimeContext = {}) 
   updateMaterialColorVector(uniforms.uEmiss?.value, emissiveValue);
   uniforms.uSurfaceEmissiveScale.value = Number(profile.config?.surfaceEmissiveScale) || 0;
   uniforms.uUseVertexColor.value = !descriptor?.rwFlags?.forceIgnoreVertexColor && descriptor?.useVertexColors !== false;
+  uniforms.uPlatformVariant.value = profile.platform === RW_PIPELINE_PLATFORM.PSP ? 1 : 0;
   uniforms.uColorScale.value = descriptor?.map ? (255 / 128) : 1;
   material.map = descriptor?.map || getSharedWhiteTexture();
 
