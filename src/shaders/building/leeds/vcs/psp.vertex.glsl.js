@@ -3,13 +3,9 @@ uniform vec3 uAmb;
 uniform vec3 uEmiss;
 uniform float uSurfaceEmissiveScale;
 uniform bool uUseVertexColor;
-uniform bool uFogEnabled;
-uniform float uFogFar;
-uniform float uFogRange;
 
 varying vec4 rwPipelineColor;
 varying vec2 rwPipelineUv;
-varying float rwPipelineFogFactor;
 
 vec4 getLocalPosition() {
   vec4 localPosition = vec4(position, 1.0);
@@ -61,8 +57,6 @@ void main() {
   rwPipelineColor.rgb = emissiveRgb + (vertexRgb * ambientRgb);
   rwPipelineColor.a = vertexColor.a;
   rwPipelineColor = clamp(rwPipelineColor, 0.0, 1.0);
-
-  rwPipelineFogFactor = uFogEnabled ? clamp((clipPosition.w - uFogFar) * uFogRange, 0.0, 1.0) : 1.0;
 }
 `;
 

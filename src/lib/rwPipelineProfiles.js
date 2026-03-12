@@ -5,9 +5,6 @@ import {
   getRWMaterialDescriptor,
   setRWMaterialDescriptor,
 } from './RWRender';
-import sharedLeedsBuildingFragmentShader from '../shaders/building/leeds/vcs/shared.fragment.glsl.js';
-import leedsVcsPs2BuildingVertexShader from '../shaders/building/leeds/vcs/ps2.vertex.glsl.js';
-import leedsVcsPspBuildingVertexShader from '../shaders/building/leeds/vcs/psp.vertex.glsl.js';
 
 export const RW_PIPELINE_GAME = Object.freeze({
   DEFAULT: 'DEFAULT',
@@ -107,37 +104,6 @@ function getSharedWhiteTexture() {
   return sharedWhiteTexture;
 }
 
-function ensureUniform(uniforms, key, fallbackFactory) {
-  const current = uniforms[key];
-  if (current && typeof current === 'object' && 'value' in current) {
-    return current;
-  }
-  const fallbackValue = typeof fallbackFactory === 'function' ? fallbackFactory() : fallbackFactory;
-  const next = { value: fallbackValue };
-  uniforms[key] = next;
-  return next;
-}
-
-function ensureLeedsUniforms(uniforms) {
-  ensureUniform(uniforms, 'diffuse', () => new THREE.Color(0xffffff));
-  ensureUniform(uniforms, 'opacity', 1);
-  ensureUniform(uniforms, 'map', () => getSharedWhiteTexture());
-  ensureUniform(uniforms, 'mapTransform', () => new THREE.Matrix3());
-  ensureUniform(uniforms, 'alphaMap', null);
-  ensureUniform(uniforms, 'alphaMapTransform', () => new THREE.Matrix3());
-  ensureUniform(uniforms, 'alphaTest', 0);
-  ensureUniform(uniforms, 'uColorScale', 1);
-  ensureUniform(uniforms, 'uAmb', () => new THREE.Vector3(1, 1, 1));
-  ensureUniform(uniforms, 'uEmiss', () => new THREE.Vector3(0, 0, 0));
-  ensureUniform(uniforms, 'uSurfaceEmissiveScale', 0);
-  ensureUniform(uniforms, 'uUseVertexColor', false);
-  ensureUniform(uniforms, 'uFogEnabled', false);
-  ensureUniform(uniforms, 'uFogColor', () => new THREE.Color(0, 0, 0));
-  ensureUniform(uniforms, 'uFogFar', 1);
-  ensureUniform(uniforms, 'uFogRange', 0);
-  return uniforms;
-}
-
 function ensureVertexColors(geometry) {
   if (!geometry?.isBufferGeometry) return false;
   const existing = geometry.getAttribute('color');
@@ -181,45 +147,97 @@ function createLeedsVcsBuildingMaterial(profile, input) {
   ensureVertexColors(input.geometry);
   ensureUvs(input.geometry);
 
-  const hasTexture = Boolean(descriptor.map?.isTexture);
-  const uniforms = THREE.UniformsUtils.merge([
-    THREE.UniformsLib.common,
-    {
-      uColorScale: { value: hasTexture ? (255 / 128) : 1 },
-      uAmb: { value: new THREE.Vector3(1, 1, 1) },
-      uEmiss: { value: new THREE.Vector3(0, 0, 0) },
-      uSurfaceEmissiveScale: { value: Number(profile.config?.surfaceEmissiveScale) || 0 },
-      uUseVertexColor: { value: !descriptor.rwFlags?.forceIgnoreVertexColor && descriptor.useVertexColors !== false },
-      uFogEnabled: { value: false },
-      uFogColor: { value: new THREE.Color(0, 0, 0) },
-      uFogFar: { value: 1 },
-      uFogRange: { value: 0 },
-    },
-  ]);
-  ensureLeedsUniforms(uniforms);
-  uniforms.map.value = descriptor.map || getSharedWhiteTexture();
-  uniforms.opacity.value = descriptor.opacity ?? 1;
-  uniforms.alphaTest.value = descriptor.alphaRef ?? 0;
-  const material = new THREE.ShaderMaterial({
+  const material = new THREE.MeshBasicMaterial({
     name: descriptor.name || '',
-    uniforms,
-    vertexShader: profile.shaders.vertex,
-    fragmentShader: profile.shaders.fragment,
-    side: descriptor.side,
+    map: descriptor.map || getSharedWhiteTexture(),
+    alphaMap: null,
+    color: new THREE.Color(1, 1, 1),
     transparent: descriptor.transparent,
+    opacity: descriptor.opacity ?? 1,
+    alphaTest: descriptor.alphaRef ?? 0,
+    side: descriptor.side,
     depthTest: descriptor.depthTest !== false,
     depthWrite: descriptor.depthWrite !== false,
     blending: descriptor.blending ?? THREE.NormalBlending,
     vertexColors: true,
-    fog: false,
+    fog: true,
     toneMapped: false,
     wireframe: Boolean(descriptor.wireframe),
   });
+  material.color.setRGB(1, 1, 1);
+  material.userData = {
+    ...(material.userData || {}),
+    rwPipelineUniforms: {
+      uColorScale: { value: descriptor.map ? (255 / 128) : 1 },
+      uAmb: { value: new THREE.Vector3(1, 1, 1) },
+      uEmiss: { value: new THREE.Vector3(0, 0, 0) },
+      uSurfaceEmissiveScale: { value: Number(profile.config?.surfaceEmissiveScale) || 0 },
+      uUseVertexColor: { value: !descriptor.rwFlags?.forceIgnoreVertexColor && descriptor.useVertexColors !== false },
+    },
+  };
+  material.onBeforeCompile = (shader) => {
+    const pipelineUniforms = material.userData?.rwPipelineUniforms || {};
+    shader.uniforms.uColorScale = pipelineUniforms.uColorScale;
+    shader.uniforms.uAmb = pipelineUniforms.uAmb;
+    shader.uniforms.uEmiss = pipelineUniforms.uEmiss;
+    shader.uniforms.uSurfaceEmissiveScale = pipelineUniforms.uSurfaceEmissiveScale;
+    shader.uniforms.uUseVertexColor = pipelineUniforms.uUseVertexColor;
 
-  material.opacity = descriptor.opacity ?? 1;
-  material.alphaTest = descriptor.alphaRef ?? 0;
-  material.extensions = { derivatives: false };
-  material.customProgramCacheKey = () => profile.id;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+uniform vec3 uAmb;
+uniform vec3 uEmiss;
+uniform float uSurfaceEmissiveScale;
+uniform bool uUseVertexColor;
+varying vec4 rwPipelineColor;
+vec4 rwPipelineReadVertexColor(void) {
+  if (!uUseVertexColor) return vec4(1.0);
+  #if defined( USE_COLOR_ALPHA )
+    return color;
+  #elif defined( USE_COLOR )
+    return vec4(color.rgb, 1.0);
+  #else
+    return vec4(1.0);
+  #endif
+}
+vec4 rwPipelineApplyLeedsProfile(vec4 vertexColor) {
+  vec4 outputColor = vertexColor;
+  outputColor.rgb *= uAmb;
+  outputColor.rgb += uEmiss * uSurfaceEmissiveScale;
+  return clamp(outputColor, 0.0, 1.0);
+}`,
+      )
+      .replace(
+        '#include <color_vertex>',
+        `#include <color_vertex>
+rwPipelineColor = rwPipelineApplyLeedsProfile(rwPipelineReadVertexColor());`,
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+uniform float uColorScale;
+varying vec4 rwPipelineColor;`,
+      )
+      .replace(
+        '#include <map_fragment>',
+        `#ifdef USE_MAP
+  vec4 sampledDiffuseColor = texture2D( map, vMapUv );
+  sampledDiffuseColor.rgb *= uColorScale;
+  diffuseColor *= sampledDiffuseColor;
+#endif`,
+      )
+      .replace(
+        '#include <color_fragment>',
+        'diffuseColor *= rwPipelineColor;',
+      );
+
+    material.userData.rwPipelineCompiledShader = shader;
+  };
+  material.customProgramCacheKey = () => `${profile.id}:${profile.platform}`;
 
   const pipelineDescriptor = cloneRWMaterialDescriptor(descriptor);
   pipelineDescriptor.pipeline = profile.id;
@@ -244,13 +262,25 @@ function updateMaterialColorVector(target, source) {
   const r = Number(source?.r ?? source?.x ?? 1);
   const g = Number(source?.g ?? source?.y ?? 1);
   const b = Number(source?.b ?? source?.z ?? 1);
-  target.set(r, g, b);
+  if (typeof target.set === 'function') {
+    target.set(r, g, b);
+    return;
+  }
+  if ('r' in target || 'g' in target || 'b' in target) {
+    target.r = r;
+    target.g = g;
+    target.b = b;
+    return;
+  }
+  target.x = r;
+  target.y = g;
+  target.z = b;
 }
 
 function updateLeedsVcsBuildingMaterial(profile, material, runtimeContext = {}) {
-  if (!material?.uniforms) return;
   const descriptor = getRWMaterialDescriptor(material);
-  const uniforms = ensureLeedsUniforms(material.uniforms);
+  const uniforms = material.userData?.rwPipelineUniforms;
+  if (!material || !uniforms) return;
   const ambientValue = runtimeContext.ambientColor || runtimeContext.fallbackAmbient || new THREE.Color(1, 1, 1);
   const emissiveValue = runtimeContext.emissiveColor || runtimeContext.fallbackEmissive || new THREE.Color(0, 0, 0);
 
@@ -258,16 +288,8 @@ function updateLeedsVcsBuildingMaterial(profile, material, runtimeContext = {}) 
   updateMaterialColorVector(uniforms.uEmiss?.value, emissiveValue);
   uniforms.uSurfaceEmissiveScale.value = Number(profile.config?.surfaceEmissiveScale) || 0;
   uniforms.uUseVertexColor.value = !descriptor?.rwFlags?.forceIgnoreVertexColor && descriptor?.useVertexColors !== false;
-  uniforms.opacity.value = descriptor?.opacity ?? material.opacity ?? 1;
-  uniforms.alphaTest.value = descriptor?.alphaRef ?? material.alphaTest ?? 0;
   uniforms.uColorScale.value = descriptor?.map ? (255 / 128) : 1;
-  uniforms.map.value = descriptor?.map || getSharedWhiteTexture();
-  uniforms.uFogEnabled.value = false;
-  uniforms.uFogRange.value = 0;
-  uniforms.uFogFar.value = 1;
-  if (uniforms.uFogColor?.value?.setRGB) {
-    uniforms.uFogColor.value.setRGB(0, 0, 0);
-  }
+  material.map = descriptor?.map || getSharedWhiteTexture();
 
   material.transparent = descriptor?.transparent === true;
   material.depthTest = descriptor?.depthTest !== false;
@@ -276,7 +298,9 @@ function updateLeedsVcsBuildingMaterial(profile, material, runtimeContext = {}) 
   material.side = descriptor?.side ?? THREE.DoubleSide;
   material.wireframe = Boolean(descriptor?.wireframe);
   material.opacity = descriptor?.opacity ?? 1;
-  material.uniformsNeedUpdate = true;
+  material.alphaTest = descriptor?.alphaRef ?? 0;
+  material.fog = true;
+  material.needsUpdate = true;
 }
 
 function createLeedsVcsBuildingProfile(options) {
@@ -289,10 +313,6 @@ function createLeedsVcsBuildingProfile(options) {
     backend: 'WebGL',
     config: {
       surfaceEmissiveScale: options.surfaceEmissiveScale,
-    },
-    shaders: {
-      vertex: options.vertexShader,
-      fragment: sharedLeedsBuildingFragmentShader,
     },
     isApplicable(targetMeta) {
       return Boolean(
@@ -351,14 +371,12 @@ export function createDefaultRWPipelineRegistry() {
     label: 'Leeds / VCS / Building / PS2',
     platform: RW_PIPELINE_PLATFORM.PS2,
     surfaceEmissiveScale: 0.5,
-    vertexShader: leedsVcsPs2BuildingVertexShader,
   }));
   registry.register(createLeedsVcsBuildingProfile({
     id: 'leeds-vcs-building-psp',
     label: 'Leeds / VCS / Building / PSP',
     platform: RW_PIPELINE_PLATFORM.PSP,
     surfaceEmissiveScale: 1.0,
-    vertexShader: leedsVcsPspBuildingVertexShader,
   }));
   return registry;
 }

@@ -3281,9 +3281,9 @@ function App() {
           : RW_PIPELINE_FALLBACK_EMISSIVE,
         fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
         fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
-        fogColor: scene.fog?.isFog ? scene.fog.color : null,
-        fogNear: scene.fog?.isFog ? scene.fog.near : null,
-        fogFar: scene.fog?.isFog ? scene.fog.far : null,
+        fogColor: timecycleCurrent?.three?.fogColor?.isColor ? timecycleCurrent.three.fogColor : null,
+        fogStart: Number.isFinite(timecycleCurrent?.values?.fogStart) ? timecycleCurrent.values.fogStart : null,
+        fogEnd: Number.isFinite(timecycleCurrent?.values?.farClip) ? timecycleCurrent.values.farClip : null,
       };
       rwPipelineControllerRef.current.setSelection(uiStateRef.current.pipelineDebug);
       const pipelineSelectionSignature = getPipelineSelectionSignature(
