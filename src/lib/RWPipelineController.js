@@ -27,8 +27,65 @@ function setNodeMaterials(node, materials) {
 function disposeOwnedMaterials(materials) {
   for (const material of materials) {
     if (!material?.userData?.rwPipelineOwnedMaterial) continue;
+    if (material.userData?.rwPipelineSharedMaterial) continue;
     material.dispose?.();
   }
+}
+
+const rwPipelineObjectIds = new WeakMap();
+let rwPipelineNextObjectId = 1;
+
+function getRWPipelineObjectId(value) {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return 'null';
+  let objectId = rwPipelineObjectIds.get(value);
+  if (!objectId) {
+    objectId = `obj_${rwPipelineNextObjectId}`;
+    rwPipelineNextObjectId += 1;
+    rwPipelineObjectIds.set(value, objectId);
+  }
+  return objectId;
+}
+
+function getDescriptorColorKey(color) {
+  if (!color) return '1,1,1';
+  const r = Number(color.r ?? color.x ?? 1);
+  const g = Number(color.g ?? color.y ?? 1);
+  const b = Number(color.b ?? color.z ?? 1);
+  return `${r},${g},${b}`;
+}
+
+function getDescriptorCacheKey(profile, descriptor, geometry) {
+  const surfaceProps = descriptor?.surfaceProps || {};
+  const rwFlags = descriptor?.rwFlags || {};
+  return JSON.stringify([
+    profile?.id || 'none',
+    descriptor?.pipeline || 'default',
+    getRWPipelineObjectId(descriptor?.map),
+    getRWPipelineObjectId(descriptor?.alphaMap),
+    descriptor?.textureName || '',
+    descriptor?.maskName || '',
+    descriptor?.alphaMode || 'opaque',
+    descriptor?.alphaMapMode || 'ignore',
+    descriptor?.opacity ?? 1,
+    descriptor?.alphaRef ?? 0,
+    descriptor?.transparent === true ? 1 : 0,
+    descriptor?.depthTest === false ? 0 : 1,
+    descriptor?.depthWrite === false ? 0 : 1,
+    descriptor?.blending ?? 1,
+    descriptor?.side ?? 2,
+    descriptor?.wireframe ? 1 : 0,
+    descriptor?.useVertexColors === false ? 0 : 1,
+    rwFlags.forceIgnoreVertexColor ? 1 : 0,
+    rwFlags.additive ? 1 : 0,
+    rwFlags.noZWrite ? 1 : 0,
+    descriptor?.fog === false ? 0 : 1,
+    getDescriptorColorKey(descriptor?.color),
+    surfaceProps.ambient ?? 1,
+    surfaceProps.specular ?? 0,
+    surfaceProps.diffuse ?? 1,
+    geometry?.getAttribute?.('color') ? 1 : 0,
+    geometry?.getAttribute?.('uv') ? 1 : 0,
+  ]);
 }
 
 function resolveTargetMeta(node) {
@@ -61,6 +118,7 @@ export class RWPipelineController {
     this.root = null;
     this.activeProfile = null;
     this.activeMaterials = new Set();
+    this.materialCache = new Map();
     this.status = {
       enabled: false,
       selection: cloneRWPipelineSelection(RW_PIPELINE_SELECTION_DEFAULT),
@@ -182,13 +240,12 @@ export class RWPipelineController {
     }
 
     const nextMaterials = baseDescriptors.map((descriptor) => {
-      const material = activeProfile.createMaterial({
+      const material = this.getCachedPipelineMaterial(activeProfile, {
         descriptor,
         geometry: node.geometry,
         targetMeta,
         runtimeContext,
       });
-      activeProfile.updateMaterial(material, runtimeContext);
       this.activeMaterials.add(material);
       return material;
     });
@@ -197,6 +254,25 @@ export class RWPipelineController {
       this.activeMaterials.delete(material);
     }
     disposeOwnedMaterials(currentMaterials);
+  }
+
+  getCachedPipelineMaterial(profile, input) {
+    const cacheKey = getDescriptorCacheKey(profile, input?.descriptor, input?.geometry);
+    let material = this.materialCache.get(cacheKey);
+    if (!material) {
+      material = profile.createMaterial(input);
+      profile.updateMaterial(material, input?.runtimeContext);
+      material.userData = {
+        ...(material.userData || {}),
+        rwPipelineOwnedMaterial: true,
+        rwPipelineSharedMaterial: true,
+        rwPipelineCacheKey: cacheKey,
+      };
+      this.materialCache.set(cacheKey, material);
+      return material;
+    }
+    profile.updateMaterial(material, input?.runtimeContext);
+    return material;
   }
 
   updateRuntime(runtimeContext = {}) {
