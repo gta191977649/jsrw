@@ -319,15 +319,10 @@ function updateMaterialColorVector(target, source) {
   target.z = b;
 }
 
-function updateLeedsVcsBuildingMaterial(profile, material, runtimeContext = {}) {
+function updateLeedsVcsBuildingMaterial(profile, material) {
   const descriptor = getRWMaterialDescriptor(material);
   const uniforms = material.userData?.rwPipelineUniforms;
   if (!material || !uniforms) return;
-  const ambientValue = runtimeContext.ambientColor || runtimeContext.fallbackAmbient || new THREE.Color(1, 1, 1);
-  const emissiveValue = runtimeContext.emissiveColor || runtimeContext.fallbackEmissive || new THREE.Color(0, 0, 0);
-
-  updateMaterialColorVector(profile.sharedUniforms.uAmb?.value, ambientValue);
-  updateMaterialColorVector(profile.sharedUniforms.uEmiss?.value, emissiveValue);
   uniforms.uSurfaceEmissiveScale.value = Number(profile.config?.surfaceEmissiveScale) || 0;
   uniforms.uUseVertexColor.value = !descriptor?.rwFlags?.forceIgnoreVertexColor && descriptor?.useVertexColors !== false;
   uniforms.uPlatformVariant.value = profile.platform === RW_PIPELINE_PLATFORM.PSP ? 1 : 0;
@@ -343,6 +338,13 @@ function updateLeedsVcsBuildingMaterial(profile, material, runtimeContext = {}) 
   material.opacity = descriptor?.opacity ?? 1;
   material.alphaTest = descriptor?.alphaRef ?? 0;
   material.fog = true;
+}
+
+function updateLeedsVcsBuildingRuntime(profile, runtimeContext = {}) {
+  const ambientValue = runtimeContext.ambientColor || runtimeContext.fallbackAmbient || new THREE.Color(1, 1, 1);
+  const emissiveValue = runtimeContext.emissiveColor || runtimeContext.fallbackEmissive || new THREE.Color(0, 0, 0);
+  updateMaterialColorVector(profile.sharedUniforms.uAmb?.value, ambientValue);
+  updateMaterialColorVector(profile.sharedUniforms.uEmiss?.value, emissiveValue);
 }
 
 function createLeedsVcsBuildingProfile(options) {
@@ -374,6 +376,9 @@ function createLeedsVcsBuildingProfile(options) {
     updateMaterial(material, runtimeContext) {
       updateLeedsVcsBuildingMaterial(this, material, runtimeContext);
     },
+    updateRuntime(runtimeContext) {
+      updateLeedsVcsBuildingRuntime(this, runtimeContext);
+    },
   };
 }
 
@@ -392,6 +397,10 @@ export class RWPipelineRegistry {
 
   list() {
     return [...this.profiles.values()];
+  }
+
+  get(profileId) {
+    return this.profiles.get(profileId) || null;
   }
 
   resolve(selection) {
@@ -425,6 +434,23 @@ export function createDefaultRWPipelineRegistry() {
     surfaceEmissiveScale: 1.0,
   }));
   return registry;
+}
+
+let defaultRWPipelineRegistry = null;
+
+export function getDefaultRWPipelineRegistry() {
+  if (!defaultRWPipelineRegistry) {
+    defaultRWPipelineRegistry = createDefaultRWPipelineRegistry();
+  }
+  return defaultRWPipelineRegistry;
+}
+
+export function createRWPipelineMaterialForProfile(profileId, input) {
+  const profile = getDefaultRWPipelineRegistry().get(profileId);
+  if (!profile) return null;
+  const material = profile.createMaterial(input);
+  profile.updateMaterial(material, input?.runtimeContext);
+  return material;
 }
 
 export function createBasicMaterialFromDescriptor(descriptor, geometry) {

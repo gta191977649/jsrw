@@ -22,7 +22,6 @@ import {
   applyDisableVertexColor,
   normalizeTextureDictionary,
   prepareTobjInstanceMaterials,
-  setRWMaterialDescriptor,
   toRWMaterial,
   tuneTransparentMaterial,
 } from './lib/RWRender';
@@ -32,6 +31,7 @@ import {
   RW_PIPELINE_PLATFORM,
   RW_PIPELINE_SELECTION_DEFAULT,
   cloneRWPipelineSelection,
+  createRWPipelineMaterialForProfile,
   getRWPipelineCategoryOptions,
   getRWPipelineGameOptions,
   getRWPipelinePlatformOptions,
@@ -166,29 +166,30 @@ function createFadeMaterial(material, geometry) {
     fadeDescriptor.depthWrite = false;
     fadeDescriptor.alphaRef = 0;
     fadeDescriptor.opacity = 1;
-
-    const cloned = material.clone();
-    cloned.userData = {
-      ...(material.userData || {}),
-      ...(cloned.userData || {}),
-      rwPipelineOwnedMaterial: true,
-    };
-    setRWMaterialDescriptor(cloned, fadeDescriptor);
-    cloned.transparent = true;
-    cloned.opacity = 1;
-    cloned.depthTest = true;
-    cloned.depthWrite = false;
-    cloned.alphaTest = 0;
-    cloned.blending = fadeDescriptor.blending;
-    cloned.fog = false;
-    if (cloned.uniforms?.opacity) {
-      cloned.uniforms.opacity.value = 1;
+    const pipelineMaterial = createRWPipelineMaterialForProfile(
+      material.userData?.rwPipelineProfileId,
+      {
+        descriptor: fadeDescriptor,
+        geometry,
+      },
+    );
+    if (pipelineMaterial) {
+      pipelineMaterial.userData = {
+        ...(pipelineMaterial.userData || {}),
+        ...(material.userData || {}),
+        ...(pipelineMaterial.userData || {}),
+        rwPipelineOwnedMaterial: true,
+      };
+      pipelineMaterial.transparent = true;
+      pipelineMaterial.opacity = 1;
+      pipelineMaterial.depthTest = true;
+      pipelineMaterial.depthWrite = false;
+      pipelineMaterial.alphaTest = 0;
+      pipelineMaterial.blending = fadeDescriptor.blending;
+      pipelineMaterial.fog = Boolean(pipelineMaterial.userData?.rwPipelineUsesThreeFog);
+      pipelineMaterial.needsUpdate = true;
+      return pipelineMaterial;
     }
-    if (cloned.uniforms?.alphaTest) {
-      cloned.uniforms.alphaTest.value = 0;
-    }
-    cloned.needsUpdate = true;
-    return cloned;
   }
   if (descriptor) {
     const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);

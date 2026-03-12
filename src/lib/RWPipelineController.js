@@ -6,7 +6,7 @@ import {
 import {
   RW_PIPELINE_SELECTION_DEFAULT,
   cloneRWPipelineSelection,
-  createDefaultRWPipelineRegistry,
+  getDefaultRWPipelineRegistry,
   resolveRWPipelineSelection,
 } from './rwPipelineProfiles';
 
@@ -55,7 +55,7 @@ function captureBaseDescriptors(node) {
 }
 
 export class RWPipelineController {
-  constructor(registry = createDefaultRWPipelineRegistry()) {
+  constructor(registry = getDefaultRWPipelineRegistry()) {
     this.registry = registry;
     this.selection = cloneRWPipelineSelection(RW_PIPELINE_SELECTION_DEFAULT);
     this.root = null;
@@ -201,6 +201,10 @@ export class RWPipelineController {
 
   updateRuntime(runtimeContext = {}) {
     if (!this.activeProfile) return;
+    if (typeof this.activeProfile.updateRuntime === 'function') {
+      this.activeProfile.updateRuntime(runtimeContext);
+      return;
+    }
     for (const material of this.activeMaterials) {
       if (!material?.userData?.rwPipelineMaterial) continue;
       this.activeProfile.updateMaterial(material, runtimeContext);
