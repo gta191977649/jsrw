@@ -22,9 +22,21 @@ import {
   applyDisableVertexColor,
   normalizeTextureDictionary,
   prepareTobjInstanceMaterials,
+  setRWMaterialDescriptor,
   toRWMaterial,
   tuneTransparentMaterial,
 } from './lib/RWRender';
+import RWPipelineController from './lib/RWPipelineController';
+import {
+  RW_PIPELINE_CATEGORY,
+  RW_PIPELINE_GAME,
+  RW_PIPELINE_PLATFORM,
+  RW_PIPELINE_SELECTION_DEFAULT,
+  cloneRWPipelineSelection,
+  getRWPipelineCategoryOptions,
+  getRWPipelineGameOptions,
+  getRWPipelinePlatformOptions,
+} from './lib/rwPipelineProfiles';
 import { RWRenderQueue } from './lib/RWRenderQueue';
 import { RWWaterPipeline } from './lib/RWWaterPipeline';
 import { RW_MOON_DEBUG_DEFAULTS } from './lib/RWMoonConstants';
@@ -71,6 +83,8 @@ const SKY_HORIZON_STRIP_HEIGHT = 48 / 400;
 const SKY_DEFAULT_TOP = DEFAULT_SCENE_BACKGROUND.clone().offsetHSL(0, 0, -0.08);
 const SKY_DEFAULT_BOTTOM = DEFAULT_SCENE_BACKGROUND.clone();
 const SKY_DEFAULT_FOG = DEFAULT_SCENE_BACKGROUND.clone();
+const RW_PIPELINE_FALLBACK_AMBIENT = new THREE.Color(1, 1, 1);
+const RW_PIPELINE_FALLBACK_EMISSIVE = new THREE.Color(0, 0, 0);
 const TIMECYCLE_FIELD_MAP = new Map(TIMECYCLE_FIELD_GROUPS.map((field) => [field.key, field]));
 const LOW_CLOUD_OFFSETS_X = [1.0, 0.7, 0.0, -0.7, -1.0, -0.7, 0.0, 0.7, 0.8, -0.8, 0.4, -0.4];
 const LOW_CLOUD_OFFSETS_Z = [0.0, -0.7, -1.0, -0.7, 0.0, 0.7, 1.0, 0.7, 0.4, 0.4, -0.8, -0.8];
@@ -136,6 +150,46 @@ function disposeObjectMaterialsOnly(root) {
 function createFadeMaterial(material, geometry) {
   if (!material) return material;
   const descriptor = getRWMaterialDescriptor(material);
+  if (material.userData?.rwPipelineMaterial && descriptor) {
+    const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);
+    if (fadeDescriptor.rwFlags?.additive) {
+      fadeDescriptor.alphaMode = 'additive';
+      fadeDescriptor.blending = THREE.AdditiveBlending;
+      fadeDescriptor.renderBucket = 'additive';
+    } else {
+      fadeDescriptor.alphaMode = 'blend';
+      fadeDescriptor.blending = THREE.NormalBlending;
+      fadeDescriptor.renderBucket = 'transparent';
+    }
+    fadeDescriptor.transparent = true;
+    fadeDescriptor.depthTest = true;
+    fadeDescriptor.depthWrite = false;
+    fadeDescriptor.alphaRef = 0;
+    fadeDescriptor.opacity = 1;
+
+    const cloned = material.clone();
+    cloned.userData = {
+      ...(material.userData || {}),
+      ...(cloned.userData || {}),
+      rwPipelineOwnedMaterial: true,
+    };
+    setRWMaterialDescriptor(cloned, fadeDescriptor);
+    cloned.transparent = true;
+    cloned.opacity = 1;
+    cloned.depthTest = true;
+    cloned.depthWrite = false;
+    cloned.alphaTest = 0;
+    cloned.blending = fadeDescriptor.blending;
+    cloned.fog = false;
+    if (cloned.uniforms?.opacity) {
+      cloned.uniforms.opacity.value = 1;
+    }
+    if (cloned.uniforms?.alphaTest) {
+      cloned.uniforms.alphaTest.value = 0;
+    }
+    cloned.needsUpdate = true;
+    return cloned;
+  }
   if (descriptor) {
     const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);
     if (fadeDescriptor.rwFlags?.additive) {
@@ -176,6 +230,9 @@ function setFadeProxyOpacity(proxyRoot, opacity) {
     const descriptor = getRWMaterialDescriptor(material);
     if (descriptor) descriptor.opacity = clampedOpacity;
     material.opacity = clampedOpacity;
+    if (material.uniforms?.opacity) {
+      material.uniforms.opacity.value = clampedOpacity;
+    }
   }
 }
 
@@ -246,6 +303,26 @@ function computeProjectedHorizonUvY(camera, scratch = {}) {
   horizonPoint.y = 0;
   horizonPoint.project(camera);
   return (horizonPoint.y * 0.5) + 0.5;
+}
+
+function getPipelineSelectionSignature(selection, backend, worldGameVersion) {
+  const normalized = cloneRWPipelineSelection(selection);
+  return [
+    normalized.enabled ? '1' : '0',
+    normalized.game,
+    normalized.category,
+    normalized.platform,
+    String(backend || 'WebGL'),
+    String(worldGameVersion || ''),
+  ].join('|');
+}
+
+function createRwPipelineTarget(gameVersion, isTobj) {
+  return {
+    category: RW_PIPELINE_CATEGORY.BUILDING,
+    game: String(gameVersion || '').toUpperCase(),
+    isTobj: Boolean(isTobj),
+  };
 }
 
 function createLowCloudTexture(seed = 0) {
@@ -485,8 +562,11 @@ function App() {
   });
 
   const fileIndexRef = useRef(null);
+  const worldGameVersionRef = useRef('VCS');
   const buildTokenRef = useRef(0);
   const buildActiveRef = useRef(false);
+  const rwPipelineControllerRef = useRef(new RWPipelineController());
+  const lastPipelineSelectionSignatureRef = useRef('');
 
   const imguiRef = useRef({ ImGui: null, ImGui_Impl: null, ready: false });
   const imguiCaptureRef = useRef({ mouse: false, keyboard: false });
@@ -528,6 +608,10 @@ function App() {
     moon: { ...RW_MOON_DEBUG_DEFAULTS },
     stars: { ...RW_STARS_DEBUG_DEFAULTS },
     sun: { ...RW_SUN_DEBUG_DEFAULTS },
+    pipelineDebug: cloneRWPipelineSelection({
+      ...RW_PIPELINE_SELECTION_DEFAULT,
+      game: RW_PIPELINE_GAME.VCS,
+    }),
     appMode: APP_MODE_EDITOR,
     backendSelection: 'WebGL',
     windows: Object.fromEntries(WINDOW_DEFS.map((item) => [item.key, item.defaultVisible])),
@@ -743,6 +827,14 @@ function App() {
     };
     renderItemsRef.current = [];
     renderChunksRef.current = [];
+    worldGameVersionRef.current = String(uiStateRef.current.gameVersion || 'VCS').toUpperCase();
+    rwPipelineControllerRef.current.setRoot(worldRoot);
+    rwPipelineControllerRef.current.applyToRoot(worldRoot, {
+      activeBackend: activeBackend || 'WebGL',
+      fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
+      fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
+    });
+    lastPipelineSelectionSignatureRef.current = '';
     activeFadeCountRef.current = 0;
     renderMetricsRef.current = {
       activeChunks: 0,
@@ -775,7 +867,7 @@ function App() {
     }));
     setFailedModels([]);
     pushConsoleLine('info', 'World cleared');
-  }, [pushConsoleLine, resetImguiTextureCache]);
+  }, [activeBackend, pushConsoleLine, resetImguiTextureCache]);
 
   const rebuildWorld = useCallback(async () => {
     const fileIndex = fileIndexRef.current;
@@ -787,10 +879,12 @@ function App() {
 
     const worldRoot = worldRootRef.current;
     const token = ++buildTokenRef.current;
+    const buildGameVersion = String(uiStateRef.current.gameVersion || 'VCS').toUpperCase();
     buildActiveRef.current = true;
 
     try {
       clearWorld();
+      worldGameVersionRef.current = buildGameVersion;
       setLoadedFiles([]);
       setFailedModels([]);
       setShowGameIcon(false);
@@ -1549,6 +1643,11 @@ function App() {
       mesh.matrixAutoUpdate = false;
       mesh.matrixWorldAutoUpdate = false;
       mesh.visible = true;
+      mesh.userData = {
+        ...(mesh.userData || {}),
+        rwPipelineTarget: createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs'),
+        isTobj: ide.section === 'tobjs',
+      };
       applyRwIdeFlagsToInstance(mesh, ide.flags);
       worldRoot.add(mesh);
       const batch = {
@@ -1647,6 +1746,7 @@ function App() {
         instance.userData.placementMatrix = worldMatrix.clone();
         instance.userData.rwIdeFlags = ide.flags | 0;
         instance.userData.isTobj = ide.section === 'tobjs';
+        instance.userData.rwPipelineTarget = createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs');
         worldRoot.add(instance);
         loaded += 1;
         return instance;
@@ -1828,6 +1928,27 @@ function App() {
       rwWaterPipelineRef.current = pendingWaterPipeline;
       renderItemsRef.current = renderItems;
       renderChunksRef.current = Array.from(renderChunkMap.values());
+      rwPipelineControllerRef.current.setRoot(worldRoot);
+      rwPipelineControllerRef.current.applyToRoot(worldRoot, {
+        activeBackend,
+        timecycleCurrent: timecycleStateRef.current?.current,
+        ambientColor: timecycleStateRef.current?.current?.values?.ambient
+          ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
+          : RW_PIPELINE_FALLBACK_AMBIENT,
+        emissiveColor: timecycleStateRef.current?.current?.values?.ambientBl
+          ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambientBl)
+          : RW_PIPELINE_FALLBACK_EMISSIVE,
+        fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
+        fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
+      });
+      applyWireframe(worldRoot, uiStateRef.current.wireframe);
+      applyDisableVertexColor(worldRoot, uiStateRef.current.disableVertexColor);
+      applyGlobalBackfaceCulling(worldRoot, uiStateRef.current.disableBackfaceCulling);
+      lastPipelineSelectionSignatureRef.current = getPipelineSelectionSignature(
+        uiStateRef.current.pipelineDebug,
+        activeBackend,
+        buildGameVersion,
+      );
       rwRenderQueueRef.current?.markDirty();
       lodUpdateStateRef.current.needsRefresh = true;
       lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
@@ -1855,7 +1976,7 @@ function App() {
     } finally {
       buildActiveRef.current = false;
     }
-  }, [clearWorld, pushConsoleLine, pushFailedModel, pushLoadedFile]);
+  }, [activeBackend, clearWorld, pushConsoleLine, pushFailedModel, pushLoadedFile]);
 
   const onPickFolder = useCallback((event) => {
     const files = Array.from(event.target.files || []);
@@ -1921,6 +2042,9 @@ function App() {
         const descriptor = getRWMaterialDescriptor(material);
         if (descriptor) descriptor.opacity = clampedOpacity;
         material.opacity = clampedOpacity;
+        if (material.uniforms?.opacity) {
+          material.uniforms.opacity.value = clampedOpacity;
+        }
       }
     }
   }, []);
@@ -1958,6 +2082,8 @@ function App() {
       rwFadeProxy: true,
       selectableRoot: false,
       objectDetail: sideState.objectDetail || null,
+      isTobj: Boolean(sideState.isTobj),
+      rwPipelineTarget: createRwPipelineTarget(worldGameVersionRef.current, sideState.isTobj),
     };
 
     const fadeMaterials = [];
@@ -1999,9 +2125,24 @@ function App() {
     if (!proxy) return null;
     worldRootRef.current.add(proxy);
     sideState.proxyRoot = proxy;
+    rwPipelineControllerRef.current.applyToObject(proxy, {
+      activeBackend,
+      timecycleCurrent: timecycleStateRef.current?.current,
+      ambientColor: timecycleStateRef.current?.current?.values?.ambient
+        ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
+        : RW_PIPELINE_FALLBACK_AMBIENT,
+      emissiveColor: timecycleStateRef.current?.current?.values?.ambientBl
+        ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambientBl)
+        : RW_PIPELINE_FALLBACK_EMISSIVE,
+      fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
+      fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
+    });
+    applyWireframe(proxy, uiStateRef.current.wireframe);
+    applyDisableVertexColor(proxy, uiStateRef.current.disableVertexColor);
+    applyGlobalBackfaceCulling(proxy, uiStateRef.current.disableBackfaceCulling);
     rwRenderQueueRef.current?.markDirty();
     return proxy;
-  }, [buildRenderSideFadeProxy]);
+  }, [activeBackend, buildRenderSideFadeProxy]);
 
   const applyRenderSideOpacity = useCallback((item, side, opacity, dirtyBatches) => {
     const sideState = side === 'near' ? item?.nearState : item?.lodState;
@@ -2322,6 +2463,7 @@ function App() {
     starsPipelineRef.current = starsPipeline;
     sunPipelineRef.current = sunPipeline;
     rwRenderQueueRef.current = new RWRenderQueue(worldRootRef.current);
+    rwPipelineControllerRef.current.setRoot(worldRootRef.current);
     gridRef.current = grid;
     axesRef.current = axes;
     sunLightRef.current = sun;
@@ -3126,6 +3268,38 @@ function App() {
       if (lastRenderWaterRef.current !== uiStateRef.current.renderWater) {
         rwWaterPipelineRef.current?.setEnabled(uiStateRef.current.renderWater);
         lastRenderWaterRef.current = uiStateRef.current.renderWater;
+      }
+
+      const pipelineRuntimeContext = {
+        activeBackend,
+        timecycleCurrent,
+        ambientColor: timecycleCurrent?.values?.ambient
+          ? toThreeColorFromTimecycleValue(timecycleCurrent.values.ambient)
+          : RW_PIPELINE_FALLBACK_AMBIENT,
+        emissiveColor: timecycleCurrent?.values?.ambientBl
+          ? toThreeColorFromTimecycleValue(timecycleCurrent.values.ambientBl)
+          : RW_PIPELINE_FALLBACK_EMISSIVE,
+        fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
+        fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
+        fogColor: scene.fog?.isFog ? scene.fog.color : null,
+        fogNear: scene.fog?.isFog ? scene.fog.near : null,
+        fogFar: scene.fog?.isFog ? scene.fog.far : null,
+      };
+      rwPipelineControllerRef.current.setSelection(uiStateRef.current.pipelineDebug);
+      const pipelineSelectionSignature = getPipelineSelectionSignature(
+        uiStateRef.current.pipelineDebug,
+        activeBackend,
+        worldGameVersionRef.current,
+      );
+      if (pipelineSelectionSignature !== lastPipelineSelectionSignatureRef.current) {
+        rwPipelineControllerRef.current.applyToRoot(worldRootRef.current, pipelineRuntimeContext);
+        applyWireframe(worldRootRef.current, uiStateRef.current.wireframe);
+        applyDisableVertexColor(worldRootRef.current, uiStateRef.current.disableVertexColor);
+        applyGlobalBackfaceCulling(worldRootRef.current, uiStateRef.current.disableBackfaceCulling);
+        lastPipelineSelectionSignatureRef.current = pipelineSelectionSignature;
+        rwRenderQueueRef.current?.markDirty();
+      } else {
+        rwPipelineControllerRef.current.updateRuntime(pipelineRuntimeContext);
       }
 
       const waterPipeline = rwWaterPipelineRef.current;
@@ -3997,6 +4171,56 @@ function App() {
                   0,
                   4,
                 );
+              }
+              if (ImGui.CollapsingHeader('RW Pipeline Debug', defaultOpen)) {
+                const pipelineDebug = uiStateRef.current.pipelineDebug;
+                const pipelineStatus = rwPipelineControllerRef.current.describeSelection({ activeBackend });
+                const categoryOptions = getRWPipelineCategoryOptions();
+                const gameOptions = getRWPipelineGameOptions();
+                const platformOptions = getRWPipelinePlatformOptions(pipelineDebug.game, pipelineDebug.category);
+                if (!platformOptions.includes(pipelineDebug.platform)) {
+                  pipelineDebug.platform = platformOptions[0] || RW_PIPELINE_PLATFORM.DEFAULT;
+                }
+
+                ImGui.TextWrapped('Hot-switch profile-backed RW building materials without rebuilding the world. V1 implements Leeds VCS PS2/PSP on WebGL.');
+                ImGui.Checkbox(
+                  'Enable Custom Pipeline Debug',
+                  (value = pipelineDebug.enabled) => (pipelineDebug.enabled = value),
+                );
+                if (ImGui.BeginCombo('Category', pipelineDebug.category)) {
+                  for (const option of categoryOptions) {
+                    const selected = pipelineDebug.category === option;
+                    if (ImGui.Selectable(option, selected)) pipelineDebug.category = option;
+                    if (selected) ImGui.SetItemDefaultFocus();
+                  }
+                  ImGui.EndCombo();
+                }
+                if (ImGui.BeginCombo('Game', pipelineDebug.game)) {
+                  for (const option of gameOptions) {
+                    const selected = pipelineDebug.game === option;
+                    if (ImGui.Selectable(option, selected)) {
+                      pipelineDebug.game = option;
+                      const nextPlatforms = getRWPipelinePlatformOptions(option, pipelineDebug.category);
+                      pipelineDebug.platform = nextPlatforms[0] || RW_PIPELINE_PLATFORM.DEFAULT;
+                    }
+                    if (selected) ImGui.SetItemDefaultFocus();
+                  }
+                  ImGui.EndCombo();
+                }
+                if (ImGui.BeginCombo('Platform', pipelineDebug.platform)) {
+                  for (const option of platformOptions) {
+                    const selected = pipelineDebug.platform === option;
+                    if (ImGui.Selectable(option, selected)) pipelineDebug.platform = option;
+                    if (selected) ImGui.SetItemDefaultFocus();
+                  }
+                  ImGui.EndCombo();
+                }
+                ImGui.Separator();
+                ImGui.Text(`Resolved Profile: ${pipelineStatus.profile?.label || 'None'}`);
+                ImGui.Text(`Backend Support: ${pipelineStatus.supported ? 'Supported' : 'Unsupported'}`);
+                if (pipelineStatus.warning) {
+                  ImGui.TextWrapped(`Warning: ${pipelineStatus.warning}`);
+                }
               }
               ImGui.EndTabItem();
             }

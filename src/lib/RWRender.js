@@ -70,6 +70,7 @@ function buildRWDescriptor(material, geometry, overrides = {}) {
   const alphaMode = String(material.map?.userData?.rwAlphaMode || 'opaque');
   const baseTransparent = alphaMode === 'blend'
     || (alphaMode === 'opaque' && Boolean(material.transparent || ((typeof material.opacity === 'number') && material.opacity < 1)));
+  const sourceSurfaceProps = overrides.surfaceProps || material.userData?.rwSurfaceProps || {};
   const descriptor = {
     kind: 'RWMaterial',
     version: 1,
@@ -95,6 +96,11 @@ function buildRWDescriptor(material, geometry, overrides = {}) {
     filterMode: material.map?.minFilter === THREE.LinearFilter ? 'linear' : 'mipmap-linear',
     textureName: material.map?.name || material.userData?.textureName || '',
     maskName: material.alphaMap?.name || '',
+    surfaceProps: {
+      ambient: Number.isFinite(sourceSurfaceProps.ambient) ? sourceSurfaceProps.ambient : 1,
+      specular: Number.isFinite(sourceSurfaceProps.specular) ? sourceSurfaceProps.specular : 0,
+      diffuse: Number.isFinite(sourceSurfaceProps.diffuse) ? sourceSurfaceProps.diffuse : 1,
+    },
     rwFlags: {
       drawLast: false,
       additive: false,
@@ -121,6 +127,7 @@ export function cloneRWMaterialDescriptor(descriptor) {
   return {
     ...descriptor,
     color: cloneColor(descriptor.color),
+    surfaceProps: { ...(descriptor.surfaceProps || {}) },
     rwFlags: { ...(descriptor.rwFlags || {}) },
   };
 }
@@ -142,14 +149,15 @@ export function setRWMaterialDescriptor(material, descriptor) {
 export function syncThreeMaterialFromRW(material, geometry) {
   const descriptor = getRWMaterialDescriptor(material);
   if (!material || !descriptor) return material;
+  const isPipelineMaterial = Boolean(material.userData?.rwPipelineMaterial);
 
   const hasVertexColor = Boolean(geometry?.getAttribute?.('color'));
   const allowVertexColors = descriptor.vertexColorMode !== 'none' && hasVertexColor && !descriptor.rwFlags?.forceIgnoreVertexColor;
 
   material.name = descriptor.name || '';
-  material.map = descriptor.map || null;
-  material.alphaMap = descriptor.alphaMapMode === 'separate' ? (descriptor.alphaMap || null) : null;
-  material.color.copy(descriptor.color || new THREE.Color(1, 1, 1));
+  if ('map' in material) material.map = descriptor.map || null;
+  if ('alphaMap' in material) material.alphaMap = descriptor.alphaMapMode === 'separate' ? (descriptor.alphaMap || null) : null;
+  if (material.color?.copy) material.color.copy(descriptor.color || new THREE.Color(1, 1, 1));
   material.opacity = descriptor.opacity ?? 1;
   material.transparent = Boolean(descriptor.transparent);
   material.alphaTest = descriptor.alphaRef ?? 0;
@@ -158,7 +166,7 @@ export function syncThreeMaterialFromRW(material, geometry) {
   material.side = getDescriptorSide(descriptor.side);
   material.blending = blendingFromMode(descriptor.alphaMode, descriptor.blending);
   material.wireframe = Boolean(descriptor.wireframe);
-  material.fog = Boolean(descriptor.fog);
+  material.fog = isPipelineMaterial ? false : Boolean(descriptor.fog);
   material.toneMapped = Boolean(descriptor.toneMapped);
   material.vertexColors = allowVertexColors;
   material.needsUpdate = true;
@@ -168,6 +176,22 @@ export function syncThreeMaterialFromRW(material, geometry) {
     rwMaterial: descriptor,
     rwForceIgnoreVertexColor: Boolean(descriptor.rwFlags?.forceIgnoreVertexColor),
   };
+
+  if (isPipelineMaterial) {
+    const uniforms = material.uniforms || {};
+    if (uniforms.uUseVertexColor) {
+      uniforms.uUseVertexColor.value = allowVertexColors;
+    }
+    if (uniforms.opacity) {
+      uniforms.opacity.value = descriptor.opacity ?? 1;
+    }
+    if (uniforms.alphaTest) {
+      uniforms.alphaTest.value = descriptor.alphaRef ?? 0;
+    }
+    if (uniforms.map) {
+      uniforms.map.value = descriptor.map || uniforms.map.value;
+    }
+  }
 
   if (descriptor.pipeline === 'tobj') {
     material.transparent = true;
@@ -209,6 +233,10 @@ export function createRWMaterial(material, geometry, overrides = {}) {
   }
   const descriptor = buildRWDescriptor(material, geometry, overrides);
   return createThreeMaterialFromRW(descriptor, geometry);
+}
+
+export function buildRWMaterialDescriptor(material, geometry, overrides = {}) {
+  return buildRWDescriptor(material, geometry, overrides);
 }
 
 export function applyDisableVertexColor(root, disableVertexColor) {

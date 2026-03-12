@@ -107,6 +107,20 @@ class DFFLoader extends THREE.Loader {
           transparent: matData.color.a < 255,
           opacity: matData.color.a / 255,
         });
+        result.userData = {
+          ...(result.userData || {}),
+          textureName: matData.RWTexture?.name || '',
+          maskName: matData.RWTexture?.maskName || '',
+          rwSurfaceProps: {
+            ambient: Number.isFinite(matData.ambient) ? matData.ambient : 1,
+            specular: Number.isFinite(matData.specular) ? matData.specular : 0,
+            diffuse: Number.isFinite(matData.diffuse) ? matData.diffuse : 1,
+          },
+          rwSourceMaterial: {
+            color: { ...matData.color },
+            isTextured: Boolean(matData.isTextured),
+          },
+        };
 
         const applyAlphaMode = (alphaMode, alphaRef = 0.5) => {
           if (alphaMode === 'cutout') {
