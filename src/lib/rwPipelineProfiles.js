@@ -27,7 +27,7 @@ export const RW_PIPELINE_SELECTION_DEFAULT = Object.freeze({
   enabled: false,
   game: RW_PIPELINE_GAME.DEFAULT,
   category: RW_PIPELINE_CATEGORY.BUILDING,
-  platform: RW_PIPELINE_PLATFORM.DEFAULT,
+  platform: RW_PIPELINE_PLATFORM.PS2,
 });
 
 const RW_PIPELINE_GAME_OPTIONS = Object.freeze([
@@ -41,7 +41,7 @@ const RW_PIPELINE_CATEGORY_OPTIONS = Object.freeze([
 ]);
 
 const RW_PIPELINE_PLATFORM_OPTIONS = Object.freeze({
-  [RW_PIPELINE_GAME.DEFAULT]: [RW_PIPELINE_PLATFORM.DEFAULT],
+  [RW_PIPELINE_GAME.DEFAULT]: [RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PSP, RW_PIPELINE_PLATFORM.PC, RW_PIPELINE_PLATFORM.DEFAULT],
   [RW_PIPELINE_GAME.VCS]: [RW_PIPELINE_PLATFORM.DEFAULT, RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PSP],
   [RW_PIPELINE_GAME.SA]: [RW_PIPELINE_PLATFORM.DEFAULT, RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PC],
 });
@@ -85,6 +85,28 @@ export function getRWPipelineCategoryOptions() {
 export function getRWPipelinePlatformOptions(game, category = RW_PIPELINE_CATEGORY.BUILDING) {
   if (category !== RW_PIPELINE_CATEGORY.BUILDING) return [RW_PIPELINE_PLATFORM.DEFAULT];
   return [...(RW_PIPELINE_PLATFORM_OPTIONS[String(game || '').toUpperCase()] || [RW_PIPELINE_PLATFORM.DEFAULT])];
+}
+
+export function resolveRWPipelineSelection(selection, worldGameVersion) {
+  const normalized = cloneRWPipelineSelection(selection);
+  const resolvedGame = normalized.game === RW_PIPELINE_GAME.DEFAULT
+    ? clampPipelineValue(
+      String(worldGameVersion || '').toUpperCase(),
+      RW_PIPELINE_GAME_OPTIONS.filter((option) => option !== RW_PIPELINE_GAME.DEFAULT),
+      RW_PIPELINE_GAME.VCS,
+    )
+    : normalized.game;
+
+  const validPlatforms = RW_PIPELINE_PLATFORM_OPTIONS[resolvedGame] || [RW_PIPELINE_PLATFORM.DEFAULT];
+  const resolvedPlatform = validPlatforms.includes(normalized.platform)
+    ? normalized.platform
+    : (validPlatforms[0] || RW_PIPELINE_PLATFORM.DEFAULT);
+
+  return {
+    ...normalized,
+    game: resolvedGame,
+    platform: resolvedPlatform,
+  };
 }
 
 let sharedWhiteTexture = null;
@@ -146,6 +168,7 @@ function createLeedsVcsBuildingMaterial(profile, input) {
   const descriptor = cloneRWMaterialDescriptor(input.descriptor);
   ensureVertexColors(input.geometry);
   ensureUvs(input.geometry);
+  const sharedUniforms = profile.sharedUniforms;
 
   const material = new THREE.MeshBasicMaterial({
     name: descriptor.name || '',
@@ -169,8 +192,8 @@ function createLeedsVcsBuildingMaterial(profile, input) {
     ...(material.userData || {}),
     rwPipelineUniforms: {
       uColorScale: { value: descriptor.map ? (255 / 128) : 1 },
-      uAmb: { value: new THREE.Vector3(1, 1, 1) },
-      uEmiss: { value: new THREE.Vector3(0, 0, 0) },
+      uAmb: sharedUniforms.uAmb,
+      uEmiss: sharedUniforms.uEmiss,
       uSurfaceEmissiveScale: { value: Number(profile.config?.surfaceEmissiveScale) || 0 },
       uUseVertexColor: { value: !descriptor.rwFlags?.forceIgnoreVertexColor && descriptor.useVertexColors !== false },
       uPlatformVariant: { value: profile.platform === RW_PIPELINE_PLATFORM.PSP ? 1 : 0 },
@@ -270,6 +293,7 @@ varying vec4 rwPipelineColor;`,
     rwPipelineGame: profile.game,
     rwPipelinePlatform: profile.platform,
     rwPipelineBackend: profile.backend,
+    rwPipelineUsesThreeFog: true,
   };
 
   return material;
@@ -302,8 +326,8 @@ function updateLeedsVcsBuildingMaterial(profile, material, runtimeContext = {}) 
   const ambientValue = runtimeContext.ambientColor || runtimeContext.fallbackAmbient || new THREE.Color(1, 1, 1);
   const emissiveValue = runtimeContext.emissiveColor || runtimeContext.fallbackEmissive || new THREE.Color(0, 0, 0);
 
-  updateMaterialColorVector(uniforms.uAmb?.value, ambientValue);
-  updateMaterialColorVector(uniforms.uEmiss?.value, emissiveValue);
+  updateMaterialColorVector(profile.sharedUniforms.uAmb?.value, ambientValue);
+  updateMaterialColorVector(profile.sharedUniforms.uEmiss?.value, emissiveValue);
   uniforms.uSurfaceEmissiveScale.value = Number(profile.config?.surfaceEmissiveScale) || 0;
   uniforms.uUseVertexColor.value = !descriptor?.rwFlags?.forceIgnoreVertexColor && descriptor?.useVertexColors !== false;
   uniforms.uPlatformVariant.value = profile.platform === RW_PIPELINE_PLATFORM.PSP ? 1 : 0;
@@ -319,7 +343,6 @@ function updateLeedsVcsBuildingMaterial(profile, material, runtimeContext = {}) 
   material.opacity = descriptor?.opacity ?? 1;
   material.alphaTest = descriptor?.alphaRef ?? 0;
   material.fog = true;
-  material.needsUpdate = true;
 }
 
 function createLeedsVcsBuildingProfile(options) {
@@ -332,6 +355,10 @@ function createLeedsVcsBuildingProfile(options) {
     backend: 'WebGL',
     config: {
       surfaceEmissiveScale: options.surfaceEmissiveScale,
+    },
+    sharedUniforms: {
+      uAmb: { value: new THREE.Vector3(1, 1, 1) },
+      uEmiss: { value: new THREE.Vector3(0, 0, 0) },
     },
     isApplicable(targetMeta) {
       return Boolean(
@@ -368,7 +395,7 @@ export class RWPipelineRegistry {
   }
 
   resolve(selection) {
-    const normalized = cloneRWPipelineSelection(selection);
+    const normalized = resolveRWPipelineSelection(selection, selection?.worldGameVersion);
     if (!normalized.enabled) return null;
     for (const profile of this.profiles.values()) {
       if (

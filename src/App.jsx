@@ -29,13 +29,13 @@ import {
 import RWPipelineController from './lib/RWPipelineController';
 import {
   RW_PIPELINE_CATEGORY,
-  RW_PIPELINE_GAME,
   RW_PIPELINE_PLATFORM,
   RW_PIPELINE_SELECTION_DEFAULT,
   cloneRWPipelineSelection,
   getRWPipelineCategoryOptions,
   getRWPipelineGameOptions,
   getRWPipelinePlatformOptions,
+  resolveRWPipelineSelection,
 } from './lib/rwPipelineProfiles';
 import { RWRenderQueue } from './lib/RWRenderQueue';
 import { RWWaterPipeline } from './lib/RWWaterPipeline';
@@ -306,7 +306,7 @@ function computeProjectedHorizonUvY(camera, scratch = {}) {
 }
 
 function getPipelineSelectionSignature(selection, backend, worldGameVersion) {
-  const normalized = cloneRWPipelineSelection(selection);
+  const normalized = resolveRWPipelineSelection(selection, worldGameVersion);
   return [
     normalized.enabled ? '1' : '0',
     normalized.game,
@@ -610,7 +610,6 @@ function App() {
     sun: { ...RW_SUN_DEBUG_DEFAULTS },
     pipelineDebug: cloneRWPipelineSelection({
       ...RW_PIPELINE_SELECTION_DEFAULT,
-      game: RW_PIPELINE_GAME.VCS,
     }),
     appMode: APP_MODE_EDITOR,
     backendSelection: 'WebGL',
@@ -831,6 +830,7 @@ function App() {
     rwPipelineControllerRef.current.setRoot(worldRoot);
     rwPipelineControllerRef.current.applyToRoot(worldRoot, {
       activeBackend: activeBackend || 'WebGL',
+      worldGameVersion: worldGameVersionRef.current,
       fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
       fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
     });
@@ -1931,6 +1931,7 @@ function App() {
       rwPipelineControllerRef.current.setRoot(worldRoot);
       rwPipelineControllerRef.current.applyToRoot(worldRoot, {
         activeBackend,
+        worldGameVersion: buildGameVersion,
         timecycleCurrent: timecycleStateRef.current?.current,
         ambientColor: timecycleStateRef.current?.current?.values?.ambient
           ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
@@ -2127,6 +2128,7 @@ function App() {
     sideState.proxyRoot = proxy;
     rwPipelineControllerRef.current.applyToObject(proxy, {
       activeBackend,
+      worldGameVersion: worldGameVersionRef.current,
       timecycleCurrent: timecycleStateRef.current?.current,
       ambientColor: timecycleStateRef.current?.current?.values?.ambient
         ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
@@ -3272,6 +3274,7 @@ function App() {
 
       const pipelineRuntimeContext = {
         activeBackend,
+        worldGameVersion: worldGameVersionRef.current,
         timecycleCurrent,
         ambientColor: timecycleCurrent?.values?.ambient
           ? toThreeColorFromTimecycleValue(timecycleCurrent.values.ambient)
@@ -4174,7 +4177,10 @@ function App() {
               }
               if (ImGui.CollapsingHeader('RW Pipeline Debug', defaultOpen)) {
                 const pipelineDebug = uiStateRef.current.pipelineDebug;
-                const pipelineStatus = rwPipelineControllerRef.current.describeSelection({ activeBackend });
+                const pipelineStatus = rwPipelineControllerRef.current.describeSelection({
+                  activeBackend,
+                  worldGameVersion: worldGameVersionRef.current,
+                });
                 const categoryOptions = getRWPipelineCategoryOptions();
                 const gameOptions = getRWPipelineGameOptions();
                 const platformOptions = getRWPipelinePlatformOptions(pipelineDebug.game, pipelineDebug.category);

@@ -7,6 +7,7 @@ import {
   RW_PIPELINE_SELECTION_DEFAULT,
   cloneRWPipelineSelection,
   createDefaultRWPipelineRegistry,
+  resolveRWPipelineSelection,
 } from './rwPipelineProfiles';
 
 function cloneDescriptorList(list) {
@@ -59,6 +60,7 @@ export class RWPipelineController {
     this.selection = cloneRWPipelineSelection(RW_PIPELINE_SELECTION_DEFAULT);
     this.root = null;
     this.activeProfile = null;
+    this.activeMaterials = new Set();
     this.status = {
       enabled: false,
       selection: cloneRWPipelineSelection(RW_PIPELINE_SELECTION_DEFAULT),
@@ -87,12 +89,16 @@ export class RWPipelineController {
 
   describeSelection(runtimeContext = {}) {
     const selection = cloneRWPipelineSelection(this.selection);
-    const profile = this.registry.resolve(selection);
+    const resolvedSelection = resolveRWPipelineSelection(selection, runtimeContext.worldGameVersion);
+    const profile = this.registry.resolve({
+      ...selection,
+      worldGameVersion: runtimeContext.worldGameVersion,
+    });
     const backend = String(runtimeContext.activeBackend || 'WebGL');
     const supported = !profile || profile.backend === backend;
     return {
       enabled: selection.enabled,
-      selection,
+      selection: resolvedSelection,
       profile,
       supported,
       backend,
@@ -111,6 +117,7 @@ export class RWPipelineController {
     if (!root?.traverse) return;
     const description = this.describeSelection(runtimeContext);
     this.activeProfile = description.profile && description.supported ? description.profile : null;
+    this.activeMaterials.clear();
     root.traverse((node) => {
       this.applyToNode(node, this.activeProfile, runtimeContext);
     });
@@ -157,6 +164,9 @@ export class RWPipelineController {
 
     if (!shouldUseProfile) {
       if (currentMaterials.some((material) => material?.userData?.rwPipelineMaterial)) {
+        for (const material of currentMaterials) {
+          this.activeMaterials.delete(material);
+        }
         const restored = baseDescriptors.map((descriptor) => {
           const material = createThreeMaterialFromRW(cloneRWMaterialDescriptor(descriptor), node.geometry);
           material.userData = {
@@ -179,22 +189,22 @@ export class RWPipelineController {
         runtimeContext,
       });
       activeProfile.updateMaterial(material, runtimeContext);
+      this.activeMaterials.add(material);
       return material;
     });
     setNodeMaterials(node, nextMaterials);
+    for (const material of currentMaterials) {
+      this.activeMaterials.delete(material);
+    }
     disposeOwnedMaterials(currentMaterials);
   }
 
   updateRuntime(runtimeContext = {}) {
-    if (!this.root?.traverse || !this.activeProfile) return;
-    this.root.traverse((node) => {
-      if (!node?.isMesh || node.userData?.rwIsSelectionOverlay) return;
-      const materials = getNodeMaterials(node);
-      for (const material of materials) {
-        if (!material?.userData?.rwPipelineMaterial) continue;
-        this.activeProfile.updateMaterial(material, runtimeContext);
-      }
-    });
+    if (!this.activeProfile) return;
+    for (const material of this.activeMaterials) {
+      if (!material?.userData?.rwPipelineMaterial) continue;
+      this.activeProfile.updateMaterial(material, runtimeContext);
+    }
   }
 }
 

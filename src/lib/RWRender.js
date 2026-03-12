@@ -166,7 +166,9 @@ export function syncThreeMaterialFromRW(material, geometry) {
   material.side = getDescriptorSide(descriptor.side);
   material.blending = blendingFromMode(descriptor.alphaMode, descriptor.blending);
   material.wireframe = Boolean(descriptor.wireframe);
-  material.fog = isPipelineMaterial ? false : Boolean(descriptor.fog);
+  material.fog = isPipelineMaterial
+    ? Boolean(material.userData?.rwPipelineUsesThreeFog)
+    : Boolean(descriptor.fog);
   material.toneMapped = Boolean(descriptor.toneMapped);
   material.vertexColors = allowVertexColors;
   material.needsUpdate = true;
