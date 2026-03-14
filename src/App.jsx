@@ -403,7 +403,41 @@ function createFluffyCloudTexture(topColor, bottomColor) {
   return texture;
 }
 
+function createFluffyHighlightTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return new THREE.Texture();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const gradient = ctx.createRadialGradient(128, 128, 0, 128, 128, 96);
+  gradient.addColorStop(0, 'rgba(255,255,255,0.95)');
+  gradient.addColorStop(0.3, 'rgba(255,210,210,0.5)');
+  gradient.addColorStop(0.7, 'rgba(255,120,120,0.12)');
+  gradient.addColorStop(1, 'rgba(255,0,0,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.premultiplyAlpha = true;
+  texture.needsUpdate = true;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  return texture;
+}
+
 function configureFluffyCloudTexture(texture) {
+  if (!texture?.isTexture) return null;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.premultiplyAlpha = true;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function configureFluffyHighlightTexture(texture) {
   if (!texture?.isTexture) return null;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -496,6 +530,8 @@ function App() {
   const lowCloudSpritesRef = useRef([]);
   const fluffyCloudSpritesRef = useRef([]);
   const fluffyCloudTextureRef = useRef(null);
+  const fluffyHighlightSpritesRef = useRef([]);
+  const fluffyHighlightTextureRef = useRef(null);
   const moonPipelineRef = useRef(null);
   const starsPipelineRef = useRef(null);
   const sunPipelineRef = useRef(null);
@@ -1289,6 +1325,7 @@ function App() {
             .map((name) => particleTxd?.get?.(name)?.texture || particleTxd?.get?.(name) || null)
             .filter(Boolean);
           const fluffyCloudTexture = particleTxd?.get?.('cloudmasked')?.texture || particleTxd?.get?.('cloudmasked') || null;
+          const fluffyHighlightTexture = particleTxd?.get?.('cloudhilit')?.texture || particleTxd?.get?.('cloudhilit') || null;
 
           if (!waterTexture) {
             pushConsoleLine('warn', `Water texture missing: particle/${waterConfig.textureName}. Using flat color water.`);
@@ -1328,6 +1365,20 @@ function App() {
             pushConsoleLine('info', 'Cloud texture applied: particle/cloudmasked');
           } else {
             pushConsoleLine('warn', 'Fluffy cloud texture missing: particle/cloudmasked. Using fallback sprite.');
+          }
+
+          if (fluffyHighlightTexture) {
+            configureFluffyHighlightTexture(fluffyHighlightTexture);
+            fluffyHighlightTextureRef.current = fluffyHighlightTexture;
+            for (const sprite of fluffyHighlightSpritesRef.current) {
+              if (!sprite?.material) continue;
+              sprite.material.map = fluffyHighlightTexture;
+              sprite.material.premultipliedAlpha = true;
+              sprite.material.needsUpdate = true;
+            }
+            pushConsoleLine('info', 'Cloud highlight texture applied: particle/cloudhilit');
+          } else {
+            pushConsoleLine('warn', 'Cloud highlight texture missing: particle/cloudhilit. Using fallback sprite.');
           }
 
           const sunTextures = {
@@ -2332,6 +2383,7 @@ function App() {
       return sprite;
     });
     const fluffyCloudTexture = createFluffyCloudTexture(SKY_DEFAULT_TOP, SKY_DEFAULT_BOTTOM);
+    const fluffyHighlightTexture = createFluffyHighlightTexture();
     const fluffyCloudSprites = FLUFFY_OFFSETS_X.map(() => {
       const material = new THREE.SpriteMaterial({
         map: fluffyCloudTexture,
@@ -2346,6 +2398,23 @@ function App() {
       const sprite = new THREE.Sprite(material);
       sprite.scale.set(110, 110, 1);
       sprite.renderOrder = -850;
+      skyCloudScene.add(sprite);
+      return sprite;
+    });
+    const fluffyHighlightSprites = FLUFFY_OFFSETS_X.map(() => {
+      const material = new THREE.SpriteMaterial({
+        map: fluffyHighlightTexture,
+        transparent: true,
+        premultipliedAlpha: true,
+        depthTest: false,
+        depthWrite: false,
+        fog: false,
+        blending: THREE.AdditiveBlending,
+        toneMapped: false,
+      });
+      const sprite = new THREE.Sprite(material);
+      sprite.scale.set(60, 60, 1);
+      sprite.renderOrder = -840;
       skyCloudScene.add(sprite);
       return sprite;
     });
@@ -2473,6 +2542,8 @@ function App() {
     lowCloudSpritesRef.current = lowCloudSprites;
     fluffyCloudSpritesRef.current = fluffyCloudSprites;
     fluffyCloudTextureRef.current = fluffyCloudTexture;
+    fluffyHighlightSpritesRef.current = fluffyHighlightSprites;
+    fluffyHighlightTextureRef.current = fluffyHighlightTexture;
     moonPipelineRef.current = moonPipeline;
     starsPipelineRef.current = starsPipeline;
     sunPipelineRef.current = sunPipeline;
@@ -2950,14 +3021,17 @@ function App() {
         sprite.material.opacity = lowCloudAlpha;
       }
       const fluffyCloudSprites = fluffyCloudSpritesRef.current;
+      const fluffyHighlightSprites = fluffyHighlightSpritesRef.current;
       const sunHighlightColor = new THREE.Color().setRGB(1, 190 / 255, 190 / 255, THREE.SRGBColorSpace);
       let sunBlockedByClouds = false;
       for (let index = 0; index < fluffyCloudSprites.length; index += 1) {
         const sprite = fluffyCloudSprites[index];
+        const highlightSprite = fluffyHighlightSprites[index];
         if (!sprite) continue;
         const localX = 2 * FLUFFY_OFFSETS_X[index];
         const localZ = 2 * FLUFFY_OFFSETS_Z[index];
         sprite.visible = fluffyCloudAlpha > 0.001;
+        if (highlightSprite) highlightSprite.visible = false;
         sprite.position.set(
           camera.position.x + (localX * cloudRotCos) + (localZ * cloudRotSin),
           (40 * FLUFFY_HEIGHTS[index]) + 40,
@@ -2976,6 +3050,13 @@ function App() {
           );
           if (highlight > 0) {
             sprite.material.color.lerp(sunHighlightColor, THREE.MathUtils.clamp(highlight, 0, 1));
+            if (highlightSprite) {
+              highlightSprite.visible = true;
+              highlightSprite.position.copy(sprite.position);
+              highlightSprite.material.color.setRGB((200 / 255) * highlight, 0, 0, THREE.SRGBColorSpace);
+              highlightSprite.material.opacity = THREE.MathUtils.clamp(highlight, 0, 1);
+              highlightSprite.material.rotation = 1.7 - Math.atan2(spriteScreenX - sunMetrics.screenX, spriteScreenY - sunMetrics.screenY);
+            }
           }
           if (distanceToSun < viewportWidth * sunSettings.cloudBlockRadius) {
             sunBlockedByClouds = true;
@@ -2983,6 +3064,9 @@ function App() {
         }
         sprite.material.opacity = fluffyCloudAlpha;
         sprite.material.rotation = cloudMotion.individualRotation;
+        if (highlightSprite) {
+          highlightSprite.scale.setScalar(sprite.scale.x * (30 / 55));
+        }
       }
       const sunState = sunPipeline?.update(
         camera,
@@ -4689,7 +4773,11 @@ function App() {
       for (const sprite of fluffyCloudSpritesRef.current) {
         sprite.material.dispose?.();
       }
+      for (const sprite of fluffyHighlightSpritesRef.current) {
+        sprite.material.dispose?.();
+      }
       fluffyCloudTextureRef.current?.dispose?.();
+      fluffyHighlightTextureRef.current?.dispose?.();
       moonPipelineRef.current?.dispose();
       moonPipelineRef.current = null;
       starsPipelineRef.current?.dispose();
