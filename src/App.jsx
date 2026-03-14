@@ -118,6 +118,13 @@ function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
 }
 
+function computeSunLightIntensityFromState(sunState) {
+  const sunElevation = Number(sunState?.gtaDirection?.z);
+  if (!Number.isFinite(sunElevation)) return 0.8;
+  const daylight = Math.sqrt(clamp01((sunElevation + 0.2) / 0.8));
+  return THREE.MathUtils.lerp(0.15, 0.8, daylight);
+}
+
 function approachValue(current, target, delta) {
   if (current < target) return Math.min(current + delta, target);
   if (current > target) return Math.max(current - delta, target);
@@ -3088,7 +3095,7 @@ function App() {
         sunLight.position.copy(camera.position).addScaledVector(sunState?.direction || new THREE.Vector3(0.5, 1, 0.3), 1200);
         sunLight.target.position.copy(camera.position);
         sunLight.target.updateMatrixWorld();
-        sunLight.intensity = THREE.MathUtils.lerp(0.15, 0.8, THREE.MathUtils.clamp(sunState?.fadeAlpha ?? 0, 0, 1));
+        sunLight.intensity = computeSunLightIntensityFromState(sunState);
       }
       if (hemiLight) {
         if (timecycleCurrent?.values?.ambient) {

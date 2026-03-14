@@ -367,7 +367,7 @@ export class RWSunPipeline {
       return;
     }
 
-    const showCore = this.coreFadeAlpha > 0.001 && this.sunAboveHorizon && !this.occludedByWorld;
+    const showCore = this.coreFadeAlpha > 0.001 && this.sunAboveHorizon;
     const showCorona = this.coronaFadeAlpha > 0.001 && this.sunCoronaVisible;
     this.coreSprite.visible = showCore;
     this.coronaSprite.visible = showCorona;
@@ -425,7 +425,10 @@ export class RWSunPipeline {
 
   render(renderer) {
     if (this.coreFadeAlpha <= 0.0001 && this.coronaFadeAlpha <= 0.0001) return;
+    const previousAutoClear = renderer.autoClear;
+    renderer.autoClear = false;
     renderer.render(this.scene, this.camera);
+    renderer.autoClear = previousAutoClear;
   }
 
   dispose() {

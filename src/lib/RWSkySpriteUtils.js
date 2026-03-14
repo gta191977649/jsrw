@@ -4,15 +4,22 @@ const TMP_NDC = new THREE.Vector3();
 const TMP_VIEW = new THREE.Vector3();
 
 export function createRwSpriteMaterial(map) {
-  return new THREE.SpriteMaterial({
+  const material = new THREE.SpriteMaterial({
     map,
     transparent: true,
     depthTest: false,
     depthWrite: false,
     fog: false,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.CustomBlending,
     toneMapped: false,
   });
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquation = THREE.AddEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.AddEquation;
+  return material;
 }
 
 export function prepareRwSpriteTexture(texture) {
@@ -61,4 +68,3 @@ export function calcScreenCoorsLikeRw(camera, worldPosition, viewportWidth, view
     spriteH: halfHeightScale,
   };
 }
-
