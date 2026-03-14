@@ -313,6 +313,7 @@ export class RWSunPipeline {
       && metrics.aboveHorizon
       && metrics.visible
       && metrics.rwScreen
+      && this.occlusionAlpha > 0.5
     ) ? 255 : 0;
     const coronaTargetAlpha = (
       settings.enabled

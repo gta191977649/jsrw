@@ -25,6 +25,14 @@ function createFallbackMoonTexture() {
   return texture;
 }
 
+function resolveMoonScale(settings) {
+  const moonSizeIndex = Number(settings?.moonSizeIndex);
+  if (Number.isFinite(moonSizeIndex)) {
+    return (THREE.MathUtils.clamp(moonSizeIndex, 0, 7) * 2) + 4;
+  }
+  return settings.smallMoon ? settings.smallMoonScale : settings.baseScale;
+}
+
 export class RWMoonPipeline {
   constructor() {
     this.scene = new THREE.Scene();
@@ -90,7 +98,7 @@ export class RWMoonPipeline {
       return { visible: false, brightness: 0 };
     }
 
-    const scale = settings.smallMoon ? settings.smallMoonScale : settings.baseScale;
+    const scale = resolveMoonScale(settings);
     const widthPx = Math.max(1, screen.spriteW * scale * 2);
     const heightPx = Math.max(1, screen.spriteH * scale * 2);
     this.sprite.visible = true;

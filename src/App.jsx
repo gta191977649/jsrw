@@ -4535,6 +4535,7 @@ function App() {
               renderMoonSliderRow('offset-x', 'Offset X', () => moonSettings.offsetX, (value) => { moonSettings.offsetX = value; }, -300, 300, '%.0f');
               renderMoonSliderRow('offset-y', 'Offset Y', () => moonSettings.offsetY, (value) => { moonSettings.offsetY = value; }, -300, 300, '%.0f');
               renderMoonSliderRow('offset-z', 'Offset Z', () => moonSettings.offsetZ, (value) => { moonSettings.offsetZ = value; }, -100, 100, '%.0f');
+              renderMoonSliderRow('moon-size-index', 'Moon Size Index', () => moonSettings.moonSizeIndex, (value) => { moonSettings.moonSizeIndex = value; }, 0, 7, '%.0f');
               renderMoonSliderRow('base-scale', 'Base Scale', () => moonSettings.baseScale, (value) => { moonSettings.baseScale = value; }, 0, 32);
               renderMoonSliderRow('small-scale', 'Small Moon Scale', () => moonSettings.smallMoonScale, (value) => { moonSettings.smallMoonScale = value; }, 0, 16);
               renderMoonSliderRow('brightness-scale', 'Brightness Scale', () => moonSettings.brightnessScale, (value) => { moonSettings.brightnessScale = value; }, 0, 4);
