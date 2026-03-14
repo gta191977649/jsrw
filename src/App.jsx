@@ -396,9 +396,21 @@ function createFluffyCloudTexture(topColor, bottomColor) {
   updateFluffyCloudTexture(canvas, topColor, bottomColor);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
+  texture.premultiplyAlpha = true;
   texture.needsUpdate = true;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
+  return texture;
+}
+
+function configureFluffyCloudTexture(texture) {
+  if (!texture?.isTexture) return null;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.premultiplyAlpha = true;
+  texture.needsUpdate = true;
   return texture;
 }
 
@@ -1305,15 +1317,12 @@ function App() {
           }
 
           if (fluffyCloudTexture) {
-            fluffyCloudTexture.wrapS = THREE.ClampToEdgeWrapping;
-            fluffyCloudTexture.wrapT = THREE.ClampToEdgeWrapping;
-            fluffyCloudTexture.magFilter = THREE.LinearFilter;
-            fluffyCloudTexture.minFilter = THREE.LinearMipmapLinearFilter;
-            fluffyCloudTexture.needsUpdate = true;
+            configureFluffyCloudTexture(fluffyCloudTexture);
             fluffyCloudTextureRef.current = fluffyCloudTexture;
             for (const sprite of fluffyCloudSpritesRef.current) {
               if (!sprite?.material) continue;
               sprite.material.map = fluffyCloudTexture;
+              sprite.material.premultipliedAlpha = true;
               sprite.material.needsUpdate = true;
             }
             pushConsoleLine('info', 'Cloud texture applied: particle/cloudmasked');
@@ -2327,6 +2336,7 @@ function App() {
       const material = new THREE.SpriteMaterial({
         map: fluffyCloudTexture,
         transparent: true,
+        premultipliedAlpha: true,
         depthTest: false,
         depthWrite: false,
         fog: false,
