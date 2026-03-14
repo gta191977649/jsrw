@@ -29,10 +29,9 @@ import RWPipelineController from './lib/RWPipelineController';
 import {
   RW_PIPELINE_CATEGORY,
   RW_PIPELINE_PLATFORM,
-  RW_PIPELINE_SELECTION_DEFAULT,
-  cloneRWPipelineSelection,
+  RW_PIPELINE_SELECTION_DEFAULTS,
+  cloneRWPipelineSelections,
   createRWPipelineMaterialForProfile,
-  getRWPipelineCategoryOptions,
   getRWPipelineGameOptions,
   getRWPipelinePlatformOptions,
   resolveRWPipelineSelection,
@@ -306,16 +305,20 @@ function computeProjectedHorizonUvY(camera, scratch = {}) {
   return (horizonPoint.y * 0.5) + 0.5;
 }
 
-function getPipelineSelectionSignature(selection, backend, worldGameVersion) {
-  const normalized = resolveRWPipelineSelection(selection, worldGameVersion);
-  return [
-    normalized.enabled ? '1' : '0',
-    normalized.game,
-    normalized.category,
-    normalized.platform,
-    String(backend || 'WebGL'),
-    String(worldGameVersion || ''),
-  ].join('|');
+function getPipelineSelectionSignature(selectionMap, backend, worldGameVersion) {
+  const selections = cloneRWPipelineSelections(selectionMap);
+  return Object.values(RW_PIPELINE_CATEGORY).map((category) => {
+    const normalized = resolveRWPipelineSelection(selections[category], worldGameVersion);
+    return [
+      category,
+      normalized.enabled ? '1' : '0',
+      normalized.game,
+      normalized.platform,
+      JSON.stringify(normalized.config || {}),
+      String(backend || 'WebGL'),
+      String(worldGameVersion || ''),
+    ].join('|');
+  }).join('::');
 }
 
 function createRwPipelineTarget(gameVersion, isTobj) {
@@ -609,9 +612,7 @@ function App() {
     moon: { ...RW_MOON_DEBUG_DEFAULTS },
     stars: { ...RW_STARS_DEBUG_DEFAULTS },
     sun: { ...RW_SUN_DEBUG_DEFAULTS },
-    pipelineDebug: cloneRWPipelineSelection({
-      ...RW_PIPELINE_SELECTION_DEFAULT,
-    }),
+    pipelineDebug: cloneRWPipelineSelections(RW_PIPELINE_SELECTION_DEFAULTS),
     appMode: APP_MODE_EDITOR,
     backendSelection: 'WebGL',
     windows: Object.fromEntries(WINDOW_DEFS.map((item) => [item.key, item.defaultVisible])),
@@ -3318,7 +3319,13 @@ function App() {
       const farBackgroundColor = skyBottomColor;
       try {
         const rwRenderQueue = rwRenderQueueRef.current;
+        const postFxSceneTarget = rwPipelineControllerRef.current.beginPostFxSceneCapture({
+          ...pipelineRuntimeContext,
+          viewportWidth,
+          viewportHeight,
+        });
         rwRenderQueue?.prepareFrame(camera);
+        renderer.setRenderTarget(postFxSceneTarget);
         renderer.autoClear = true;
         if (skyScene && skyCamera) {
           renderer.render(skyScene, skyCamera);
@@ -3392,6 +3399,16 @@ function App() {
           renderer.render(scene, camera);
           rwRenderQueue?.popCameraBucketMask(camera);
         }
+        renderer.setRenderTarget(null);
+        if (postFxSceneTarget) {
+          rwPipelineControllerRef.current.renderPostFx(renderer, {
+            ...pipelineRuntimeContext,
+            viewportWidth,
+            viewportHeight,
+          });
+        }
+        renderer.clearDepth();
+        sunPipeline?.render(renderer);
 
         const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
         gameIconSprite.material.map = iconTextures[activeIcon];
@@ -3410,8 +3427,6 @@ function App() {
           1,
         );
         renderer.autoClear = false;
-        renderer.clearDepth();
-        sunPipeline?.render(renderer);
         renderer.clearDepth();
         renderer.render(hudScene, hudCamera);
         renderer.autoClear = true;
@@ -4176,58 +4191,149 @@ function App() {
                   4,
                 );
               }
-              if (ImGui.CollapsingHeader('RW Pipeline Debug', defaultOpen)) {
-                const pipelineDebug = uiStateRef.current.pipelineDebug;
-                const pipelineStatus = rwPipelineControllerRef.current.describeSelection({
-                  activeBackend,
-                  worldGameVersion: worldGameVersionRef.current,
-                });
-                const categoryOptions = getRWPipelineCategoryOptions();
+              {
                 const gameOptions = getRWPipelineGameOptions();
-                const platformOptions = getRWPipelinePlatformOptions(pipelineDebug.game, pipelineDebug.category);
-                if (!platformOptions.includes(pipelineDebug.platform)) {
-                  pipelineDebug.platform = platformOptions[0] || RW_PIPELINE_PLATFORM.DEFAULT;
-                }
+                const pipelineDebug = uiStateRef.current.pipelineDebug;
+                const renderPostFxColorRow = (id, label, targetColor) => {
+                  const color = [
+                    (Number(targetColor.r) || 0) / 255,
+                    (Number(targetColor.g) || 0) / 255,
+                    (Number(targetColor.b) || 0) / 255,
+                  ];
+                  const changed = ImGui.ColorEdit3(`##${id}`, color);
+                  if (changed) {
+                    targetColor.r = Math.round(Math.min(Math.max(color[0], 0), 1) * 255);
+                    targetColor.g = Math.round(Math.min(Math.max(color[1], 0), 1) * 255);
+                    targetColor.b = Math.round(Math.min(Math.max(color[2], 0), 1) * 255);
+                  }
+                  ImGui.SameLine();
+                  ImGui.TextUnformatted(label);
+                };
+                const renderPostFxSliderRow = (id, label, getter, setter, min, max, format) => {
+                  ImGui.PushID(id);
+                  ImGui.Columns(2, `postfx-row-${id}`, false);
+                  ImGui.SetColumnWidth(0, 170);
+                  ImGui.PushItemWidth(-1);
+                  ImGui.SliderFloat(
+                    '##value',
+                    (value = getter()) => {
+                      setter(value);
+                      return value;
+                    },
+                    min,
+                    max,
+                    format,
+                  );
+                  ImGui.PopItemWidth();
+                  ImGui.NextColumn();
+                  ImGui.AlignTextToFramePadding();
+                  ImGui.TextUnformatted(label);
+                  ImGui.Columns(1);
+                  ImGui.PopID();
+                };
+                const renderPipelineDebugSection = (category, label, description) => {
+                  const selection = pipelineDebug[category];
+                  const status = rwPipelineControllerRef.current.describeSelection(category, {
+                    activeBackend,
+                    worldGameVersion: worldGameVersionRef.current,
+                  });
+                  const platformOptions = getRWPipelinePlatformOptions(selection.game, category);
+                  if (!platformOptions.includes(selection.platform)) {
+                    selection.platform = platformOptions[0] || RW_PIPELINE_PLATFORM.DEFAULT;
+                  }
 
-                ImGui.TextWrapped('Hot-switch profile-backed RW building materials without rebuilding the world. V1 implements Leeds VCS PS2/PSP on WebGL.');
-                ImGui.Checkbox(
-                  'Enable Custom Pipeline Debug',
-                  (value = pipelineDebug.enabled) => (pipelineDebug.enabled = value),
-                );
-                if (ImGui.BeginCombo('Category', pipelineDebug.category)) {
-                  for (const option of categoryOptions) {
-                    const selected = pipelineDebug.category === option;
-                    if (ImGui.Selectable(option, selected)) pipelineDebug.category = option;
-                    if (selected) ImGui.SetItemDefaultFocus();
-                  }
-                  ImGui.EndCombo();
-                }
-                if (ImGui.BeginCombo('Game', pipelineDebug.game)) {
-                  for (const option of gameOptions) {
-                    const selected = pipelineDebug.game === option;
-                    if (ImGui.Selectable(option, selected)) {
-                      pipelineDebug.game = option;
-                      const nextPlatforms = getRWPipelinePlatformOptions(option, pipelineDebug.category);
-                      pipelineDebug.platform = nextPlatforms[0] || RW_PIPELINE_PLATFORM.DEFAULT;
+                  if (!ImGui.CollapsingHeader(label, defaultOpen)) return;
+                  ImGui.TextWrapped(description);
+                  ImGui.Checkbox(
+                    `Enable##${category}`,
+                    (value = selection.enabled) => (selection.enabled = value),
+                  );
+                  if (ImGui.BeginCombo(`Game##${category}`, selection.game)) {
+                    for (const option of gameOptions) {
+                      const selected = selection.game === option;
+                      if (ImGui.Selectable(option, selected)) {
+                        selection.game = option;
+                        const nextPlatforms = getRWPipelinePlatformOptions(option, category);
+                        selection.platform = nextPlatforms[0] || RW_PIPELINE_PLATFORM.DEFAULT;
+                      }
+                      if (selected) ImGui.SetItemDefaultFocus();
                     }
-                    if (selected) ImGui.SetItemDefaultFocus();
+                    ImGui.EndCombo();
                   }
-                  ImGui.EndCombo();
-                }
-                if (ImGui.BeginCombo('Platform', pipelineDebug.platform)) {
-                  for (const option of platformOptions) {
-                    const selected = pipelineDebug.platform === option;
-                    if (ImGui.Selectable(option, selected)) pipelineDebug.platform = option;
-                    if (selected) ImGui.SetItemDefaultFocus();
+                  if (ImGui.BeginCombo(`Profile##${category}`, selection.platform)) {
+                    for (const option of platformOptions) {
+                      const selected = selection.platform === option;
+                      if (ImGui.Selectable(option, selected)) selection.platform = option;
+                      if (selected) ImGui.SetItemDefaultFocus();
+                    }
+                    ImGui.EndCombo();
                   }
-                  ImGui.EndCombo();
-                }
-                ImGui.Separator();
-                ImGui.Text(`Resolved Profile: ${pipelineStatus.profile?.label || 'None'}`);
-                ImGui.Text(`Backend Support: ${pipelineStatus.supported ? 'Supported' : 'Unsupported'}`);
-                if (pipelineStatus.warning) {
-                  ImGui.TextWrapped(`Warning: ${pipelineStatus.warning}`);
-                }
+                  ImGui.Text(`Resolved Profile: ${status.profile?.label || 'None'}`);
+                  ImGui.Text(`Backend Support: ${status.supported ? 'Supported' : 'Unsupported'}`);
+                  if (status.warning) {
+                    ImGui.TextWrapped(`Warning: ${status.warning}`);
+                  }
+                  if (category === RW_PIPELINE_CATEGORY.POSTFX) {
+                    selection.config ||= {
+                      ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config,
+                      filterColor1: { ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config.filterColor1 },
+                      filterColor2: { ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config.filterColor2 },
+                    };
+                    ImGui.Separator();
+                    renderPostFxColorRow(`postfx-${category}-filter-1`, 'Filter Color 1 RGB', selection.config.filterColor1);
+                    renderPostFxSliderRow(
+                      `postfx-${category}-filter-1-alpha`,
+                      'Filter Color 1 Alpha',
+                      () => selection.config.filterColor1.a ?? 255,
+                      (value) => { selection.config.filterColor1.a = Math.round(value); },
+                      0,
+                      255,
+                      '%.0f',
+                    );
+                    renderPostFxColorRow(`postfx-${category}-filter-2`, 'Filter Color 2 RGB', selection.config.filterColor2);
+                    renderPostFxSliderRow(
+                      `postfx-${category}-filter-2-alpha`,
+                      'Filter Color 2 Alpha',
+                      () => selection.config.filterColor2.a ?? 0,
+                      (value) => { selection.config.filterColor2.a = Math.round(value); },
+                      0,
+                      255,
+                      '%.0f',
+                    );
+                    renderPostFxSliderRow(`postfx-${category}-trails-limit`, 'Trails Limit', () => selection.config.trailsLimit, (value) => { selection.config.trailsLimit = Math.round(value); }, 0, 255, '%.0f');
+                    renderPostFxSliderRow(`postfx-${category}-trails-intensity`, 'Trails Intensity', () => selection.config.trailsIntensity, (value) => { selection.config.trailsIntensity = Math.round(value); }, 0, 63, '%.0f');
+                    renderPostFxSliderRow(`postfx-${category}-blur-offset`, 'Blur Offset', () => selection.config.blurOffset, (value) => { selection.config.blurOffset = value; }, 0, 8, '%.2f');
+                    renderPostFxSliderRow(`postfx-${category}-blur-intensity`, 'Blur Intensity', () => selection.config.blurIntensity, (value) => { selection.config.blurIntensity = value; }, 0, 1, '%.3f');
+                    renderPostFxSliderRow(`postfx-${category}-history-intensity`, 'History Intensity', () => selection.config.historyIntensity, (value) => { selection.config.historyIntensity = value; }, 0, 1, '%.3f');
+                    ImGui.Checkbox(
+                      `Enable ColourFilter##${category}`,
+                      (value = selection.config.enableColourFilter) => (selection.config.enableColourFilter = value),
+                    );
+                    ImGui.Checkbox(
+                      `Enable Radiosity##${category}`,
+                      (value = selection.config.enableRadiosity) => (selection.config.enableRadiosity = value),
+                    );
+                    ImGui.Checkbox(
+                      `Enable Blur##${category}`,
+                      (value = selection.config.enableBlur) => (selection.config.enableBlur = value),
+                    );
+                    ImGui.Checkbox(
+                      `Enable History##${category}`,
+                      (value = selection.config.enableHistory) => (selection.config.enableHistory = value),
+                    );
+                  }
+                };
+
+                renderPipelineDebugSection(
+                  RW_PIPELINE_CATEGORY.BUILDING,
+                  'Building Pipeline',
+                  'Hot-switch profile-backed RW building materials without rebuilding the world. V1 implements Leeds VCS PS2/PSP on WebGL.',
+                );
+                renderPipelineDebugSection(
+                  RW_PIPELINE_CATEGORY.POSTFX,
+                  'PostFX Pipeline',
+                  'Fullscreen postfx profile switching. V1 implements a VCS-style WebGL postfx pass and leaves LCS hooks in the selection model.',
+                );
               }
               ImGui.EndTabItem();
             }

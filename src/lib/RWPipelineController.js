@@ -4,8 +4,11 @@ import {
   getRWMaterialDescriptor,
 } from './RWRender';
 import {
+  RW_PIPELINE_CATEGORY,
   RW_PIPELINE_SELECTION_DEFAULT,
+  RW_PIPELINE_SELECTION_DEFAULTS,
   cloneRWPipelineSelection,
+  cloneRWPipelineSelections,
   getDefaultRWPipelineRegistry,
   resolveRWPipelineSelection,
 } from './rwPipelineProfiles';
@@ -114,42 +117,63 @@ function captureBaseDescriptors(node) {
 export class RWPipelineController {
   constructor(registry = getDefaultRWPipelineRegistry()) {
     this.registry = registry;
-    this.selection = cloneRWPipelineSelection(RW_PIPELINE_SELECTION_DEFAULT);
+    this.selections = cloneRWPipelineSelections(RW_PIPELINE_SELECTION_DEFAULTS);
     this.root = null;
-    this.activeProfile = null;
+    this.activeProfiles = new Map();
     this.activeMaterials = new Set();
     this.materialCache = new Map();
-    this.status = {
-      enabled: false,
-      selection: cloneRWPipelineSelection(RW_PIPELINE_SELECTION_DEFAULT),
-      profileId: null,
-      profileLabel: 'Disabled',
-      supported: true,
-      warning: '',
-      backend: 'WebGL',
-    };
+    this.activeEffects = new Map();
+    this.statusByCategory = {};
+    for (const category of Object.values(RW_PIPELINE_CATEGORY)) {
+      this.statusByCategory[category] = {
+        enabled: false,
+        selection: cloneRWPipelineSelection(RW_PIPELINE_SELECTION_DEFAULTS[category] || RW_PIPELINE_SELECTION_DEFAULT),
+        profileId: null,
+        profileLabel: 'Disabled',
+        supported: true,
+        warning: '',
+        backend: 'WebGL',
+      };
+    }
   }
 
-  setSelection(selection) {
-    this.selection = cloneRWPipelineSelection(selection);
+  setSelection(categoryOrSelections, maybeSelection) {
+    if (typeof categoryOrSelections === 'string') {
+      this.selections[categoryOrSelections] = cloneRWPipelineSelection({
+        ...(RW_PIPELINE_SELECTION_DEFAULTS[categoryOrSelections] || RW_PIPELINE_SELECTION_DEFAULT),
+        ...(maybeSelection || {}),
+        category: categoryOrSelections,
+      });
+      return;
+    }
+    this.selections = cloneRWPipelineSelections(categoryOrSelections);
   }
 
   setRoot(root) {
     this.root = root || null;
   }
 
-  getStatus() {
+  getStatus(category = RW_PIPELINE_CATEGORY.BUILDING) {
     return {
-      ...this.status,
-      selection: cloneRWPipelineSelection(this.status.selection),
+      ...this.statusByCategory[category],
+      selection: cloneRWPipelineSelection(this.statusByCategory[category]?.selection),
     };
   }
 
-  describeSelection(runtimeContext = {}) {
-    const selection = cloneRWPipelineSelection(this.selection);
+  getStatuses() {
+    const next = {};
+    for (const category of Object.values(RW_PIPELINE_CATEGORY)) {
+      next[category] = this.getStatus(category);
+    }
+    return next;
+  }
+
+  describeSelection(category = RW_PIPELINE_CATEGORY.BUILDING, runtimeContext = {}) {
+    const selection = cloneRWPipelineSelection(this.selections[category] || RW_PIPELINE_SELECTION_DEFAULTS[category] || RW_PIPELINE_SELECTION_DEFAULT);
     const resolvedSelection = resolveRWPipelineSelection(selection, runtimeContext.worldGameVersion);
     const profile = this.registry.resolve({
       ...selection,
+      category,
       worldGameVersion: runtimeContext.worldGameVersion,
     });
     const backend = String(runtimeContext.activeBackend || 'WebGL');
@@ -170,34 +194,86 @@ export class RWPipelineController {
     };
   }
 
+  describeSelections(runtimeContext = {}) {
+    const next = {};
+    for (const category of Object.values(RW_PIPELINE_CATEGORY)) {
+      next[category] = this.describeSelection(category, runtimeContext);
+    }
+    return next;
+  }
+
+  syncEffect(category, nextProfile, runtimeContext) {
+    const currentProfile = this.activeProfiles.get(category) || null;
+    const currentEffect = this.activeEffects.get(category) || null;
+    const selection = this.selections[category] || null;
+
+    if (!nextProfile) {
+      if (currentEffect) {
+        currentProfile?.disposeEffect?.(currentEffect);
+        this.activeEffects.delete(category);
+      }
+      this.activeProfiles.delete(category);
+      return;
+    }
+
+    let effect = currentEffect;
+    if (!effect || currentProfile?.id !== nextProfile.id) {
+      currentProfile?.disposeEffect?.(currentEffect);
+      effect = nextProfile.createEffect?.() || null;
+      if (effect) this.activeEffects.set(category, effect);
+    }
+
+    this.activeProfiles.set(category, nextProfile);
+    nextProfile.applyConfig?.(effect, selection, runtimeContext);
+    nextProfile.updateRuntime?.(runtimeContext, effect);
+  }
+
+  updateStatuses(descriptions) {
+    for (const category of Object.values(RW_PIPELINE_CATEGORY)) {
+      const description = descriptions[category];
+      const activeProfile = this.activeProfiles.get(category) || null;
+      this.statusByCategory[category] = {
+        enabled: description.selection.enabled,
+        selection: description.selection,
+        profileId: activeProfile?.id || null,
+        profileLabel: activeProfile?.label || (description.selection.enabled ? 'None' : 'Disabled'),
+        supported: description.supported,
+        warning: description.warning,
+        backend: description.backend,
+      };
+    }
+  }
+
   applyToRoot(root = this.root, runtimeContext = {}) {
     this.setRoot(root);
-    if (!root?.traverse) return;
-    const description = this.describeSelection(runtimeContext);
-    this.activeProfile = description.profile && description.supported ? description.profile : null;
+    const descriptions = this.describeSelections(runtimeContext);
+    const activeBuildingProfile = descriptions[RW_PIPELINE_CATEGORY.BUILDING].profile && descriptions[RW_PIPELINE_CATEGORY.BUILDING].supported
+      ? descriptions[RW_PIPELINE_CATEGORY.BUILDING].profile
+      : null;
+    const activePostFxProfile = descriptions[RW_PIPELINE_CATEGORY.POSTFX].profile && descriptions[RW_PIPELINE_CATEGORY.POSTFX].supported
+      ? descriptions[RW_PIPELINE_CATEGORY.POSTFX].profile
+      : null;
+
+    this.activeProfiles.set(RW_PIPELINE_CATEGORY.BUILDING, activeBuildingProfile);
+    this.syncEffect(RW_PIPELINE_CATEGORY.POSTFX, activePostFxProfile, runtimeContext);
     this.activeMaterials.clear();
-    root.traverse((node) => {
-      this.applyToNode(node, this.activeProfile, runtimeContext);
-    });
-    this.status = {
-      enabled: description.selection.enabled,
-      selection: description.selection,
-      profileId: this.activeProfile?.id || null,
-      profileLabel: this.activeProfile?.label || (description.selection.enabled ? 'None' : 'Disabled'),
-      supported: description.supported,
-      warning: description.warning,
-      backend: description.backend,
-    };
+    if (root?.traverse) {
+      root.traverse((node) => {
+        this.applyToNode(node, activeBuildingProfile, runtimeContext);
+      });
+    }
+    this.updateStatuses(descriptions);
   }
 
   applyToObject(object3D, runtimeContext = {}) {
     if (!object3D?.traverse) return;
-    const description = this.describeSelection(runtimeContext);
+    const description = this.describeSelection(RW_PIPELINE_CATEGORY.BUILDING, runtimeContext);
     const activeProfile = description.profile && description.supported ? description.profile : null;
     object3D.traverse((node) => {
       this.applyToNode(node, activeProfile, runtimeContext);
     });
-    this.status = {
+    this.activeProfiles.set(RW_PIPELINE_CATEGORY.BUILDING, activeProfile);
+    this.statusByCategory[RW_PIPELINE_CATEGORY.BUILDING] = {
       enabled: description.selection.enabled,
       selection: description.selection,
       profileId: activeProfile?.id || null,
@@ -276,15 +352,46 @@ export class RWPipelineController {
   }
 
   updateRuntime(runtimeContext = {}) {
-    if (!this.activeProfile) return;
-    if (typeof this.activeProfile.updateRuntime === 'function') {
-      this.activeProfile.updateRuntime(runtimeContext);
-      return;
+    const activeBuildingProfile = this.activeProfiles.get(RW_PIPELINE_CATEGORY.BUILDING);
+    if (activeBuildingProfile) {
+      if (typeof activeBuildingProfile.updateRuntime === 'function') {
+        activeBuildingProfile.updateRuntime(runtimeContext);
+      } else {
+        for (const material of this.activeMaterials) {
+          if (!material?.userData?.rwPipelineMaterial) continue;
+          activeBuildingProfile.updateMaterial(material, runtimeContext);
+        }
+      }
     }
-    for (const material of this.activeMaterials) {
-      if (!material?.userData?.rwPipelineMaterial) continue;
-      this.activeProfile.updateMaterial(material, runtimeContext);
+
+    const activePostFxProfile = this.activeProfiles.get(RW_PIPELINE_CATEGORY.POSTFX);
+    if (activePostFxProfile) {
+      activePostFxProfile.applyConfig?.(
+        this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX) || null,
+        this.selections[RW_PIPELINE_CATEGORY.POSTFX] || null,
+        runtimeContext,
+      );
+      activePostFxProfile.updateRuntime?.(runtimeContext, this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX) || null);
     }
+  }
+
+  renderPostFx(renderer, runtimeContext = {}) {
+    const activePostFxProfile = this.activeProfiles.get(RW_PIPELINE_CATEGORY.POSTFX);
+    const effect = this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX);
+    if (!activePostFxProfile || !effect) return;
+    activePostFxProfile.applyConfig?.(effect, this.selections[RW_PIPELINE_CATEGORY.POSTFX] || null, runtimeContext);
+    activePostFxProfile.updateRuntime?.(runtimeContext, effect);
+    effect.render?.(renderer, runtimeContext);
+  }
+
+  beginPostFxSceneCapture(runtimeContext = {}) {
+    const effect = this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX);
+    if (!effect || typeof effect.beginSceneCapture !== 'function') return null;
+    return effect.beginSceneCapture(runtimeContext);
+  }
+
+  hasActivePostFx() {
+    return Boolean(this.activeProfiles.get(RW_PIPELINE_CATEGORY.POSTFX) && this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX));
   }
 }
 

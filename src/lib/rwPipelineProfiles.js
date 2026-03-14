@@ -5,15 +5,18 @@ import {
   getRWMaterialDescriptor,
   setRWMaterialDescriptor,
 } from './RWRender';
+import { RWPostFxPipeline } from './RWPostFxPipeline';
 
 export const RW_PIPELINE_GAME = Object.freeze({
   DEFAULT: 'DEFAULT',
   VCS: 'VCS',
+  LCS: 'LCS',
   SA: 'SA',
 });
 
 export const RW_PIPELINE_CATEGORY = Object.freeze({
   BUILDING: 'building',
+  POSTFX: 'postfx',
 });
 
 export const RW_PIPELINE_PLATFORM = Object.freeze({
@@ -21,6 +24,8 @@ export const RW_PIPELINE_PLATFORM = Object.freeze({
   PS2: 'PS2',
   PSP: 'PSP',
   PC: 'PC',
+  VCS: 'VCS',
+  LCS: 'LCS',
 });
 
 export const RW_PIPELINE_SELECTION_DEFAULT = Object.freeze({
@@ -30,48 +35,133 @@ export const RW_PIPELINE_SELECTION_DEFAULT = Object.freeze({
   platform: RW_PIPELINE_PLATFORM.PS2,
 });
 
+export const RW_PIPELINE_SELECTION_DEFAULTS = Object.freeze({
+  [RW_PIPELINE_CATEGORY.BUILDING]: Object.freeze({
+    enabled: false,
+    game: RW_PIPELINE_GAME.DEFAULT,
+    category: RW_PIPELINE_CATEGORY.BUILDING,
+    platform: RW_PIPELINE_PLATFORM.PS2,
+  }),
+  [RW_PIPELINE_CATEGORY.POSTFX]: Object.freeze({
+    enabled: false,
+    game: RW_PIPELINE_GAME.DEFAULT,
+    category: RW_PIPELINE_CATEGORY.POSTFX,
+    platform: RW_PIPELINE_PLATFORM.VCS,
+    config: Object.freeze({
+      trailsLimit: 80,
+      trailsIntensity: 38,
+      blurOffset: 2.1,
+      blurIntensity: (39.0 * 0.8) / 255.0,
+      historyIntensity: 32 / 255.0,
+      enableColourFilter: true,
+      enableRadiosity: true,
+      enableBlur: true,
+      enableHistory: true,
+      filterColor1: Object.freeze({ r: 128, g: 128, b: 128, a: 255 }),
+      filterColor2: Object.freeze({ r: 0, g: 0, b: 0, a: 0 }),
+    }),
+  }),
+});
+
 const RW_PIPELINE_GAME_OPTIONS = Object.freeze([
   RW_PIPELINE_GAME.DEFAULT,
   RW_PIPELINE_GAME.VCS,
+  RW_PIPELINE_GAME.LCS,
   RW_PIPELINE_GAME.SA,
 ]);
 
 const RW_PIPELINE_CATEGORY_OPTIONS = Object.freeze([
   RW_PIPELINE_CATEGORY.BUILDING,
+  RW_PIPELINE_CATEGORY.POSTFX,
 ]);
 
 const RW_PIPELINE_PLATFORM_OPTIONS = Object.freeze({
-  [RW_PIPELINE_GAME.DEFAULT]: [RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PSP, RW_PIPELINE_PLATFORM.PC, RW_PIPELINE_PLATFORM.DEFAULT],
-  [RW_PIPELINE_GAME.VCS]: [RW_PIPELINE_PLATFORM.DEFAULT, RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PSP],
-  [RW_PIPELINE_GAME.SA]: [RW_PIPELINE_PLATFORM.DEFAULT, RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PC],
+  [RW_PIPELINE_CATEGORY.BUILDING]: Object.freeze({
+    [RW_PIPELINE_GAME.DEFAULT]: [RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PSP, RW_PIPELINE_PLATFORM.PC, RW_PIPELINE_PLATFORM.DEFAULT],
+    [RW_PIPELINE_GAME.VCS]: [RW_PIPELINE_PLATFORM.DEFAULT, RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PSP],
+    [RW_PIPELINE_GAME.LCS]: [RW_PIPELINE_PLATFORM.DEFAULT, RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PSP],
+    [RW_PIPELINE_GAME.SA]: [RW_PIPELINE_PLATFORM.DEFAULT, RW_PIPELINE_PLATFORM.PS2, RW_PIPELINE_PLATFORM.PC],
+  }),
+  [RW_PIPELINE_CATEGORY.POSTFX]: Object.freeze({
+    [RW_PIPELINE_GAME.DEFAULT]: [RW_PIPELINE_PLATFORM.VCS, RW_PIPELINE_PLATFORM.LCS, RW_PIPELINE_PLATFORM.DEFAULT],
+    [RW_PIPELINE_GAME.VCS]: [RW_PIPELINE_PLATFORM.VCS, RW_PIPELINE_PLATFORM.DEFAULT],
+    [RW_PIPELINE_GAME.LCS]: [RW_PIPELINE_PLATFORM.LCS, RW_PIPELINE_PLATFORM.DEFAULT],
+    [RW_PIPELINE_GAME.SA]: [RW_PIPELINE_PLATFORM.DEFAULT],
+  }),
 });
 
 function clampPipelineValue(value, validValues, fallback) {
   return validValues.includes(value) ? value : fallback;
 }
 
+function getSelectionDefault(category = RW_PIPELINE_CATEGORY.BUILDING) {
+  return RW_PIPELINE_SELECTION_DEFAULTS[category] || RW_PIPELINE_SELECTION_DEFAULT;
+}
+
+function getPlatformOptionsFor(category, game) {
+  const categoryOptions = RW_PIPELINE_PLATFORM_OPTIONS[category] || RW_PIPELINE_PLATFORM_OPTIONS[RW_PIPELINE_CATEGORY.BUILDING];
+  return categoryOptions[String(game || '').toUpperCase()] || categoryOptions[RW_PIPELINE_GAME.DEFAULT] || [RW_PIPELINE_PLATFORM.DEFAULT];
+}
+
 export function cloneRWPipelineSelection(selection = RW_PIPELINE_SELECTION_DEFAULT) {
+  const defaultSelection = getSelectionDefault(String(selection?.category || RW_PIPELINE_CATEGORY.BUILDING));
   const game = clampPipelineValue(
     String(selection.game || '').toUpperCase(),
     RW_PIPELINE_GAME_OPTIONS,
-    RW_PIPELINE_SELECTION_DEFAULT.game,
+    defaultSelection.game,
   );
   const category = clampPipelineValue(
     String(selection.category || ''),
     RW_PIPELINE_CATEGORY_OPTIONS,
-    RW_PIPELINE_SELECTION_DEFAULT.category,
+    defaultSelection.category,
   );
   const platform = clampPipelineValue(
     String(selection.platform || '').toUpperCase(),
-    RW_PIPELINE_PLATFORM_OPTIONS[game] || RW_PIPELINE_PLATFORM_OPTIONS[RW_PIPELINE_GAME.DEFAULT],
-    RW_PIPELINE_SELECTION_DEFAULT.platform,
+    getPlatformOptionsFor(category, game),
+    defaultSelection.platform,
   );
   return {
     enabled: Boolean(selection.enabled),
     game,
     category,
     platform,
+    ...(defaultSelection.config || selection?.config
+      ? {
+        config: {
+          ...(defaultSelection.config || {}),
+          ...(selection?.config || {}),
+          ...(defaultSelection.config?.filterColor1 || selection?.config?.filterColor1
+            ? {
+              filterColor1: {
+                ...(defaultSelection.config?.filterColor1 || {}),
+                ...(selection?.config?.filterColor1 || {}),
+              },
+            }
+            : {}),
+          ...(defaultSelection.config?.filterColor2 || selection?.config?.filterColor2
+            ? {
+              filterColor2: {
+                ...(defaultSelection.config?.filterColor2 || {}),
+                ...(selection?.config?.filterColor2 || {}),
+              },
+            }
+            : {}),
+        },
+      }
+      : {}),
   };
+}
+
+export function cloneRWPipelineSelections(selections = RW_PIPELINE_SELECTION_DEFAULTS) {
+  const next = {};
+  for (const category of RW_PIPELINE_CATEGORY_OPTIONS) {
+    next[category] = cloneRWPipelineSelection({
+      ...getSelectionDefault(category),
+      ...(selections?.[category] || {}),
+      category,
+    });
+  }
+  return next;
 }
 
 export function getRWPipelineGameOptions() {
@@ -83,8 +173,7 @@ export function getRWPipelineCategoryOptions() {
 }
 
 export function getRWPipelinePlatformOptions(game, category = RW_PIPELINE_CATEGORY.BUILDING) {
-  if (category !== RW_PIPELINE_CATEGORY.BUILDING) return [RW_PIPELINE_PLATFORM.DEFAULT];
-  return [...(RW_PIPELINE_PLATFORM_OPTIONS[String(game || '').toUpperCase()] || [RW_PIPELINE_PLATFORM.DEFAULT])];
+  return [...getPlatformOptionsFor(category, game)];
 }
 
 export function resolveRWPipelineSelection(selection, worldGameVersion) {
@@ -97,7 +186,7 @@ export function resolveRWPipelineSelection(selection, worldGameVersion) {
     )
     : normalized.game;
 
-  const validPlatforms = RW_PIPELINE_PLATFORM_OPTIONS[resolvedGame] || [RW_PIPELINE_PLATFORM.DEFAULT];
+  const validPlatforms = getPlatformOptionsFor(normalized.category, resolvedGame);
   const resolvedPlatform = validPlatforms.includes(normalized.platform)
     ? normalized.platform
     : (validPlatforms[0] || RW_PIPELINE_PLATFORM.DEFAULT);
@@ -107,6 +196,15 @@ export function resolveRWPipelineSelection(selection, worldGameVersion) {
     game: resolvedGame,
     platform: resolvedPlatform,
   };
+}
+
+export function resolveRWPipelineSelections(selections, worldGameVersion) {
+  const next = {};
+  const normalizedSelections = cloneRWPipelineSelections(selections);
+  for (const category of RW_PIPELINE_CATEGORY_OPTIONS) {
+    next[category] = resolveRWPipelineSelection(normalizedSelections[category], worldGameVersion);
+  }
+  return next;
 }
 
 let sharedWhiteTexture = null;
@@ -349,6 +447,7 @@ function updateLeedsVcsBuildingRuntime(profile, runtimeContext = {}) {
 
 function createLeedsVcsBuildingProfile(options) {
   return {
+    kind: 'material',
     id: options.id,
     label: options.label,
     game: RW_PIPELINE_GAME.VCS,
@@ -378,6 +477,39 @@ function createLeedsVcsBuildingProfile(options) {
     },
     updateRuntime(runtimeContext) {
       updateLeedsVcsBuildingRuntime(this, runtimeContext);
+    },
+  };
+}
+
+function createVcsPostFxProfile(options) {
+  return {
+    kind: 'postfx',
+    id: options.id,
+    label: options.label,
+    game: RW_PIPELINE_GAME.VCS,
+    category: RW_PIPELINE_CATEGORY.POSTFX,
+    platform: RW_PIPELINE_PLATFORM.VCS,
+    backend: 'WebGL',
+    config: {
+      ...(options.config || {}),
+    },
+    isApplicable() {
+      return true;
+    },
+    createEffect() {
+      return new RWPostFxPipeline(this.config);
+    },
+    applyConfig(effect, selection) {
+      effect?.setConfig?.({
+        ...this.config,
+        ...(selection?.config || {}),
+      });
+    },
+    updateRuntime(runtimeContext, effect) {
+      effect?.updateRuntime(runtimeContext);
+    },
+    disposeEffect(effect) {
+      effect?.dispose?.();
     },
   };
 }
@@ -433,6 +565,11 @@ export function createDefaultRWPipelineRegistry() {
     platform: RW_PIPELINE_PLATFORM.PSP,
     surfaceEmissiveScale: 1.0,
   }));
+  registry.register(createVcsPostFxProfile({
+    id: 'vcs-postfx-vcs',
+    label: 'VCS / PostFX / VCS',
+    config: RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config,
+  }));
   return registry;
 }
 
@@ -447,7 +584,7 @@ export function getDefaultRWPipelineRegistry() {
 
 export function createRWPipelineMaterialForProfile(profileId, input) {
   const profile = getDefaultRWPipelineRegistry().get(profileId);
-  if (!profile) return null;
+  if (!profile || typeof profile.createMaterial !== 'function') return null;
   const material = profile.createMaterial(input);
   profile.updateMaterial(material, input?.runtimeContext);
   return material;
