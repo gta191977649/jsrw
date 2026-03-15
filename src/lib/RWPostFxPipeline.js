@@ -2,29 +2,16 @@ import * as THREE from 'three';
 import rwPostFxFullscreenVertexShader from '../shaders/postfx/fullscreen.vertex.glsl.js';
 import rwPostFxCopyFragmentShader from '../shaders/postfx/copy.fragment.glsl.js';
 import rwPostFxPresentFragmentShader from '../shaders/postfx/present.fragment.glsl.js';
-import rwPostFxRadiosityThresholdFragmentShader from '../shaders/postfx/radiosity-threshold.fragment.glsl.js';
-import rwPostFxRadiosityBlurFragmentShader from '../shaders/postfx/radiosity-blur.fragment.glsl.js';
-
-const VCS_RADIOSITY_WIDTH = 256;
-const VCS_RADIOSITY_HEIGHT = 128;
+const SKYGFX_RADIOSITY_FILTER_PASSES = 2;
+const SKYGFX_RADIOSITY_RENDER_PASSES = 1;
+const SKYGFX_RADIOSITY_INTENSITY = 0x23;
+const SKYGFX_RADIOSITY_U_CORRECTION = 2;
+const SKYGFX_RADIOSITY_V_CORRECTION = 2;
 const VCS_BLUR_OFFSET = 2.1;
 const VCS_BLUR_INTENSITY = (39.0 * 0.8) / 255.0;
 const VCS_HISTORY_INTENSITY = 32 / 255.0;
 const VCS_TRAILS_LIMIT = 80;
 const VCS_TRAILS_INTENSITY = 38;
-const VCS_RADIOSITY_TAP_WEIGHT = 36 / 255.0;
-const VCS_RADIOSITY_OFFSETS_A = Object.freeze([
-  new THREE.Vector2(-1, 0),
-  new THREE.Vector2(1, 0),
-  new THREE.Vector2(0, -1),
-  new THREE.Vector2(0, 1),
-]);
-const VCS_RADIOSITY_OFFSETS_B = Object.freeze([
-  new THREE.Vector2(-1, -1),
-  new THREE.Vector2(1, -1),
-  new THREE.Vector2(-1, 1),
-  new THREE.Vector2(1, 1),
-]);
 
 function createRenderTarget(width, height, options = {}) {
   const target = new THREE.WebGLRenderTarget(width, height, {
@@ -50,6 +37,12 @@ function getFiniteOrDefault(value, fallback) {
 
 function getBooleanOrDefault(value, fallback) {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function getClampedScalar(value, min, max, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return THREE.MathUtils.clamp(numeric, min, max);
 }
 
 function setVector3FromColor(target, color, scale = 1) {
@@ -92,6 +85,8 @@ export class RWPostFxPipeline {
     this.lastFrameTarget = null;
     this.radiosityTargetA = null;
     this.radiosityTargetB = null;
+    this.blurCurrentTarget = null;
+    this.blurHistoryTarget = null;
 
     this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
     this.camera.position.z = 1;
@@ -132,40 +127,73 @@ export class RWPostFxPipeline {
       toneMapped: false,
     });
 
-    this.thresholdMaterial = new THREE.ShaderMaterial({
+    this.radiosityBlurMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uTex: { value: null },
-        uLimit: { value: 0.5 },
+        uDirection: { value: new THREE.Vector2(0, 0) },
+        uScale: { value: 1 },
       },
       vertexShader: rwPostFxFullscreenVertexShader,
-      fragmentShader: rwPostFxRadiosityThresholdFragmentShader,
+      fragmentShader: `
+uniform sampler2D uTex;
+uniform vec2 uDirection;
+uniform float uScale;
+varying vec2 vUv;
+
+void main() {
+  vec4 color = vec4(0.0);
+  for (int i = 0; i < 10; i += 1) {
+    float t = (float(i) / 9.0) - 0.5;
+    color += texture2D(uTex, clamp(vUv + (uDirection * t * uScale), 0.0, 1.0));
+  }
+  gl_FragColor = vec4(color.rgb / 10.0, 1.0);
+}
+`,
       depthTest: false,
       depthWrite: false,
       transparent: false,
       toneMapped: false,
     });
 
-    this.radiosityBlurMaterial = new THREE.ShaderMaterial({
+    this.radiosityCompositeMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uTex: { value: null },
-        uTexelSize: { value: new THREE.Vector2(1 / VCS_RADIOSITY_WIDTH, 1 / VCS_RADIOSITY_HEIGHT) },
-        uOffsets: {
-          value: [
-            new THREE.Vector2(),
-            new THREE.Vector2(),
-            new THREE.Vector2(),
-            new THREE.Vector2(),
-          ],
-        },
-        uTapWeight: { value: VCS_RADIOSITY_TAP_WEIGHT },
+        uLimit: { value: 0.0 },
+        uIntensity: { value: 0.0 },
+        uRenderPasses: { value: SKYGFX_RADIOSITY_RENDER_PASSES },
+        uUvOffset: { value: new THREE.Vector2(0, 0) },
+        uUvScale: { value: new THREE.Vector2(1, 1) },
       },
       vertexShader: rwPostFxFullscreenVertexShader,
-      fragmentShader: rwPostFxRadiosityBlurFragmentShader,
+      fragmentShader: `
+uniform sampler2D uTex;
+uniform float uLimit;
+uniform float uIntensity;
+uniform float uRenderPasses;
+uniform vec2 uUvOffset;
+uniform vec2 uUvScale;
+varying vec2 vUv;
+
+void main() {
+  vec2 uv = (vUv * uUvScale) + uUvOffset;
+  vec3 color = texture2D(uTex, clamp(uv, 0.0, 1.0)).rgb;
+  color = clamp((color * 2.0) - vec3(uLimit), vec3(0.0), vec3(1.0));
+  color *= (uIntensity * uRenderPasses);
+  gl_FragColor = vec4(color, 1.0);
+}
+`,
       depthTest: false,
       depthWrite: false,
-      transparent: false,
+      transparent: true,
       toneMapped: false,
     });
+    this.radiosityCompositeMaterial.blending = THREE.CustomBlending;
+    this.radiosityCompositeMaterial.blendSrc = THREE.OneFactor;
+    this.radiosityCompositeMaterial.blendDst = THREE.OneFactor;
+    this.radiosityCompositeMaterial.blendEquation = THREE.AddEquation;
+    this.radiosityCompositeMaterial.blendSrcAlpha = THREE.OneFactor;
+    this.radiosityCompositeMaterial.blendDstAlpha = THREE.ZeroFactor;
+    this.radiosityCompositeMaterial.blendEquationAlpha = THREE.AddEquation;
 
     this.accumulationMaterial = this.copyMaterial.clone();
     this.accumulationMaterial.transparent = true;
@@ -195,14 +223,45 @@ export class RWPostFxPipeline {
     this.colourFilterAddMaterial.blendDstAlpha = THREE.ZeroFactor;
     this.colourFilterAddMaterial.blendEquationAlpha = THREE.AddEquation;
 
-    this.radiosityCompositeMaterial = this.copyMaterial.clone();
-    this.radiosityCompositeMaterial.transparent = true;
-    this.radiosityCompositeMaterial.blending = THREE.CustomBlending;
-    this.radiosityCompositeMaterial.blendSrc = THREE.ConstantColorFactor;
-    this.radiosityCompositeMaterial.blendDst = THREE.OneFactor;
-    this.radiosityCompositeMaterial.blendEquation = THREE.AddEquation;
-    this.radiosityCompositeMaterial.blendColor = new THREE.Color(0, 0, 0);
+    this.solidColorMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new THREE.Vector3(0, 0, 0) },
+        uOpacity: { value: 1 },
+      },
+      vertexShader: rwPostFxFullscreenVertexShader,
+      fragmentShader: `
+uniform vec3 uColor;
+uniform float uOpacity;
+void main() {
+  gl_FragColor = vec4(uColor, uOpacity);
+}
+`,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      toneMapped: false,
+    });
+    this.solidColorMaterial.blending = THREE.AdditiveBlending;
+    this.solidColorMaterial.blendSrcAlpha = THREE.OneFactor;
+    this.solidColorMaterial.blendDstAlpha = THREE.ZeroFactor;
+    this.solidColorMaterial.blendEquationAlpha = THREE.AddEquation;
 
+    this.configRuntime = {
+      filterColor1Rgb: new THREE.Color(1, 1, 1),
+      filterColor1Alpha: 1,
+      filterColor2Rgb: new THREE.Color(0, 0, 0),
+      filterColor2Alpha: 0,
+      blurColor: new THREE.Color(0, 0, 0),
+      radiosityLimit: VCS_TRAILS_LIMIT,
+      radiosityIntensity: SKYGFX_RADIOSITY_INTENSITY,
+      blurOffset: VCS_BLUR_OFFSET,
+      blurIntensity: VCS_BLUR_INTENSITY,
+      historyIntensity: VCS_HISTORY_INTENSITY,
+      enableColourFilter: true,
+      enableRadiosity: true,
+      enableBlur: true,
+      enableHistory: true,
+    };
     this.runtime = {
       filterColor1Rgb: new THREE.Color(1, 1, 1),
       filterColor1Alpha: 1,
@@ -210,7 +269,7 @@ export class RWPostFxPipeline {
       filterColor2Alpha: 0,
       blurColor: new THREE.Color(0, 0, 0),
       radiosityLimit: VCS_TRAILS_LIMIT,
-      radiosityIntensity: VCS_TRAILS_INTENSITY,
+      radiosityIntensity: SKYGFX_RADIOSITY_INTENSITY,
       blurOffset: VCS_BLUR_OFFSET,
       blurIntensity: VCS_BLUR_INTENSITY,
       historyIntensity: VCS_HISTORY_INTENSITY,
@@ -232,32 +291,49 @@ export class RWPostFxPipeline {
   }
 
   setConfig(config = {}) {
-    this.runtime.radiosityLimit = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsLimit, VCS_TRAILS_LIMIT), 0, 255);
-    this.runtime.radiosityIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsIntensity, VCS_TRAILS_INTENSITY), 0, 63);
-    this.runtime.blurOffset = Math.max(0, getFiniteOrDefault(config.blurOffset, VCS_BLUR_OFFSET));
-    this.runtime.blurIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.blurIntensity, VCS_BLUR_INTENSITY), 0, 1);
-    this.runtime.historyIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.historyIntensity, VCS_HISTORY_INTENSITY), 0, 1);
-    this.runtime.enableColourFilter = getBooleanOrDefault(config.enableColourFilter, true);
-    this.runtime.enableRadiosity = getBooleanOrDefault(config.enableRadiosity, true);
-    this.runtime.enableBlur = getBooleanOrDefault(config.enableBlur, true);
-    this.runtime.enableHistory = getBooleanOrDefault(config.enableHistory, true);
+    this.configRuntime.radiosityLimit = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsLimit, VCS_TRAILS_LIMIT), 0, 255);
+    this.configRuntime.radiosityIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsIntensity, SKYGFX_RADIOSITY_INTENSITY), 0, 63);
+    this.configRuntime.blurOffset = Math.max(0, getFiniteOrDefault(config.blurOffset, VCS_BLUR_OFFSET));
+    this.configRuntime.blurIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.blurIntensity, VCS_BLUR_INTENSITY), 0, 1);
+    this.configRuntime.historyIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.historyIntensity, VCS_HISTORY_INTENSITY), 0, 1);
+    this.configRuntime.enableColourFilter = getBooleanOrDefault(config.enableColourFilter, true);
+    this.configRuntime.enableRadiosity = getBooleanOrDefault(config.enableRadiosity, true);
+    this.configRuntime.enableBlur = getBooleanOrDefault(config.enableBlur, true);
+    this.configRuntime.enableHistory = getBooleanOrDefault(config.enableHistory, true);
     const filterColor1 = getColorConfig(config, 'filterColor1', 255);
     const filterColor2 = getColorConfig(config, 'filterColor2', 0);
-    this.runtime.filterColor1Rgb.setRGB(
+    this.configRuntime.filterColor1Rgb.setRGB(
       filterColor1.r / 255,
       filterColor1.g / 255,
       filterColor1.b / 255,
       THREE.LinearSRGBColorSpace,
     );
-    this.runtime.filterColor1Alpha = filterColor1.a / 255;
-    this.runtime.filterColor2Rgb.setRGB(
+    this.configRuntime.filterColor1Alpha = filterColor1.a / 255;
+    this.configRuntime.filterColor2Rgb.setRGB(
       filterColor2.r / 255,
       filterColor2.g / 255,
       filterColor2.b / 255,
       THREE.LinearSRGBColorSpace,
     );
-    this.runtime.filterColor2Alpha = filterColor2.a / 255;
-    this.runtime.blurColor.copy(this.runtime.filterColor2Rgb);
+    this.configRuntime.filterColor2Alpha = filterColor2.a / 255;
+    this.configRuntime.blurColor.copy(this.configRuntime.filterColor2Rgb);
+
+    this.runtime.filterColor1Rgb.copy(this.configRuntime.filterColor1Rgb);
+    this.runtime.filterColor1Alpha = this.configRuntime.filterColor1Alpha;
+    this.runtime.filterColor2Rgb.copy(this.configRuntime.filterColor2Rgb);
+    this.runtime.filterColor2Alpha = this.configRuntime.filterColor2Alpha;
+    this.runtime.blurColor.copy(this.configRuntime.blurColor);
+    this.runtime.radiosityLimit = this.configRuntime.radiosityLimit;
+    this.runtime.radiosityIntensity = this.configRuntime.radiosityIntensity;
+    this.runtime.blurOffset = this.configRuntime.blurOffset;
+    this.runtime.blurIntensity = this.configRuntime.blurIntensity;
+    this.runtime.historyIntensity = this.configRuntime.historyIntensity;
+    this.runtime.enableColourFilter = this.configRuntime.enableColourFilter;
+    this.runtime.enableRadiosity = this.configRuntime.enableRadiosity;
+    this.runtime.enableBlur = this.configRuntime.enableBlur;
+    this.runtime.enableHistory = this.configRuntime.enableHistory;
+
+    if (!this.runtime.enableHistory) this.resetHistory();
   }
 
   ensureSize(width, height) {
@@ -272,6 +348,8 @@ export class RWPostFxPipeline {
       && this.lastFrameTarget
       && this.radiosityTargetA
       && this.radiosityTargetB
+      && this.blurCurrentTarget
+      && this.blurHistoryTarget
     ) {
       return;
     }
@@ -284,18 +362,47 @@ export class RWPostFxPipeline {
     this.lastFrameTarget?.dispose();
     this.radiosityTargetA?.dispose();
     this.radiosityTargetB?.dispose();
+    this.blurCurrentTarget?.dispose();
+    this.blurHistoryTarget?.dispose();
 
     this.sceneTarget = createRenderTarget(nextWidth, nextHeight, { depthBuffer: true });
     this.composeTarget = createRenderTarget(nextWidth, nextHeight);
     this.frontBufferTarget = createRenderTarget(nextWidth, nextHeight);
     this.lastFrameTarget = createRenderTarget(nextWidth, nextHeight);
-    this.radiosityTargetA = createRenderTarget(VCS_RADIOSITY_WIDTH, VCS_RADIOSITY_HEIGHT);
-    this.radiosityTargetB = createRenderTarget(VCS_RADIOSITY_WIDTH, VCS_RADIOSITY_HEIGHT);
+    this.radiosityTargetA = createRenderTarget(nextWidth, nextHeight);
+    this.radiosityTargetB = createRenderTarget(nextWidth, nextHeight);
+    this.blurCurrentTarget = createRenderTarget(nextWidth, nextHeight);
+    this.blurHistoryTarget = createRenderTarget(nextWidth, nextHeight);
     this.resetHistory();
   }
 
   updateRuntime(runtimeContext = {}) {
-    void runtimeContext;
+    this.runtime.filterColor1Rgb.copy(this.configRuntime.filterColor1Rgb);
+    this.runtime.filterColor1Alpha = this.configRuntime.filterColor1Alpha;
+    this.runtime.filterColor2Rgb.copy(this.configRuntime.filterColor2Rgb);
+    this.runtime.filterColor2Alpha = this.configRuntime.filterColor2Alpha;
+    this.runtime.radiosityLimit = this.configRuntime.radiosityLimit;
+    this.runtime.radiosityIntensity = this.configRuntime.radiosityIntensity;
+    this.runtime.blurOffset = this.configRuntime.blurOffset;
+    this.runtime.blurIntensity = this.configRuntime.blurIntensity;
+    this.runtime.historyIntensity = this.configRuntime.historyIntensity;
+    this.runtime.enableColourFilter = this.configRuntime.enableColourFilter;
+    this.runtime.enableRadiosity = this.configRuntime.enableRadiosity;
+    this.runtime.enableBlur = this.configRuntime.enableBlur;
+    this.runtime.enableHistory = this.configRuntime.enableHistory;
+
+    const values = runtimeContext?.timecycleCurrent?.values;
+    if (!values || !this.runtime.enableColourFilter || !values.blur) {
+      this.runtime.blurColor.setRGB(0, 0, 0, THREE.LinearSRGBColorSpace);
+      return;
+    }
+
+    this.runtime.blurColor.setRGB(
+      getClampedScalar(values.blur.r, 0, 255, 0) / 255,
+      getClampedScalar(values.blur.g, 0, 255, 0) / 255,
+      getClampedScalar(values.blur.b, 0, 255, 0) / 255,
+      THREE.LinearSRGBColorSpace,
+    );
   }
 
   beginSceneCapture(runtimeContext = {}) {
@@ -376,62 +483,73 @@ export class RWPostFxPipeline {
   runRadiosityStage(renderer) {
     if (!this.runtime.enableRadiosity || this.runtime.radiosityIntensity <= 0) return;
 
-    this.thresholdMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
-    this.thresholdMaterial.uniforms.uLimit.value = this.runtime.radiosityLimit / 255.0;
-    this.renderFullscreen(renderer, this.radiosityTargetB, this.thresholdMaterial, true);
+    const blurScale = (2 ** SKYGFX_RADIOSITY_FILTER_PASSES) * (this.viewportWidth / 640.0);
+    this.radiosityBlurMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
+    this.radiosityBlurMaterial.uniforms.uDirection.value.set(0, 1 / Math.max(1, this.frontBufferTarget.height));
+    this.radiosityBlurMaterial.uniforms.uScale.value = blurScale;
+    this.renderFullscreen(renderer, this.radiosityTargetA, this.radiosityBlurMaterial, true);
 
-    const offsetGroups = [VCS_RADIOSITY_OFFSETS_A, VCS_RADIOSITY_OFFSETS_B];
-    let source = this.radiosityTargetB;
-    let destination = this.radiosityTargetA;
-    for (let pass = 0; pass < 4; pass += 1) {
-      const group = offsetGroups[pass % 2];
-      this.radiosityBlurMaterial.uniforms.uTex.value = source.texture;
-      this.radiosityBlurMaterial.uniforms.uOffsets.value[0].copy(group[0]);
-      this.radiosityBlurMaterial.uniforms.uOffsets.value[1].copy(group[1]);
-      this.radiosityBlurMaterial.uniforms.uOffsets.value[2].copy(group[2]);
-      this.radiosityBlurMaterial.uniforms.uOffsets.value[3].copy(group[3]);
-      this.renderFullscreen(renderer, destination, this.radiosityBlurMaterial, true);
-      const tmp = source;
-      source = destination;
-      destination = tmp;
-    }
+    this.radiosityBlurMaterial.uniforms.uTex.value = this.radiosityTargetA.texture;
+    this.radiosityBlurMaterial.uniforms.uDirection.value.set(1 / Math.max(1, this.frontBufferTarget.width), 0);
+    this.radiosityBlurMaterial.uniforms.uScale.value = blurScale;
+    this.renderFullscreen(renderer, this.radiosityTargetB, this.radiosityBlurMaterial, true);
 
-    this.radiosityCompositeMaterial.uniforms.uTex.value = source.texture;
-    this.radiosityCompositeMaterial.uniforms.uUvOffset.value.set(0, 0);
-    this.radiosityCompositeMaterial.uniforms.uColor.value.set(1, 1, 1);
-    this.radiosityCompositeMaterial.uniforms.uOpacity.value = 1;
-    const factor = THREE.MathUtils.clamp((this.runtime.radiosityIntensity * 4) / 255.0, 0, 1);
-    setMaterialBlendConstant(this.radiosityCompositeMaterial, factor);
-    this.renderFullscreen(renderer, this.composeTarget, this.radiosityCompositeMaterial, false);
+    const off = (2 ** SKYGFX_RADIOSITY_FILTER_PASSES) - 1;
+    const offU = off * SKYGFX_RADIOSITY_U_CORRECTION;
+    const offV = off * SKYGFX_RADIOSITY_V_CORRECTION;
+    const maxU = this.viewportWidth - offU;
+    const maxV = this.viewportHeight - offV;
+    const cU = ((offU * (this.viewportWidth + 0.5)) + (offU * 0.5)) / this.viewportWidth;
+    const cV = ((offV * (this.viewportHeight + 0.5)) + (offV * 0.5)) / this.viewportHeight;
+
+    this.radiosityCompositeMaterial.uniforms.uTex.value = this.radiosityTargetB.texture;
+    this.radiosityCompositeMaterial.uniforms.uLimit.value = this.runtime.radiosityLimit / 255.0;
+    this.radiosityCompositeMaterial.uniforms.uIntensity.value = THREE.MathUtils.clamp(
+      this.runtime.radiosityIntensity / 255.0,
+      0,
+      1,
+    );
+    this.radiosityCompositeMaterial.uniforms.uRenderPasses.value = SKYGFX_RADIOSITY_RENDER_PASSES;
+    this.radiosityCompositeMaterial.uniforms.uUvOffset.value.set(
+      cU / Math.max(1, this.frontBufferTarget.width),
+      cV / Math.max(1, this.frontBufferTarget.height),
+    );
+    this.radiosityCompositeMaterial.uniforms.uUvScale.value.set(
+      (maxU - offU) / Math.max(1, this.viewportWidth),
+      (maxV - offV) / Math.max(1, this.viewportHeight),
+    );
     this.renderFullscreen(renderer, this.composeTarget, this.radiosityCompositeMaterial, false);
   }
 
   runBlurStage(renderer) {
     if (!this.runtime.enableBlur) return;
 
-    this.accumulationMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
+    this.copyTarget(renderer, this.composeTarget, this.blurCurrentTarget, true);
+
+    this.accumulationMaterial.uniforms.uTex.value = this.blurCurrentTarget.texture;
     this.accumulationMaterial.uniforms.uColor.value.set(1, 1, 1);
     this.accumulationMaterial.uniforms.uOpacity.value = 1;
     setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
 
+    const blurOffset = VCS_BLUR_OFFSET;
+    const blurIntensity = VCS_BLUR_INTENSITY;
     const offsets = [
-      new THREE.Vector2(this.runtime.blurOffset / this.viewportWidth, 0),
-      new THREE.Vector2(this.runtime.blurOffset / this.viewportWidth, this.runtime.blurOffset / this.viewportHeight),
-      new THREE.Vector2(0, this.runtime.blurOffset / this.viewportHeight),
+      new THREE.Vector2(blurOffset / this.blurCurrentTarget.width, 0),
+      new THREE.Vector2(blurOffset / this.blurCurrentTarget.width, blurOffset / this.blurCurrentTarget.height),
+      new THREE.Vector2(0, blurOffset / this.blurCurrentTarget.height),
     ];
+    setMaterialBlendConstant(this.accumulationMaterial, blurIntensity);
     for (const offset of offsets) {
       this.accumulationMaterial.uniforms.uUvOffset.value.copy(offset);
       this.renderFullscreen(renderer, this.composeTarget, this.accumulationMaterial, false);
     }
 
-    this.additiveMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
-    this.additiveMaterial.uniforms.uUvOffset.value.set(0, 0);
-    setVector3FromColor(this.additiveMaterial.uniforms.uColor.value, this.runtime.blurColor);
-    this.additiveMaterial.uniforms.uOpacity.value = 1;
-    this.renderFullscreen(renderer, this.composeTarget, this.additiveMaterial, false);
+    setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
+    this.solidColorMaterial.uniforms.uOpacity.value = 1;
+    this.renderFullscreen(renderer, this.composeTarget, this.solidColorMaterial, false);
 
     if (this.runtime.enableHistory && this.hasHistory) {
-      this.accumulationMaterial.uniforms.uTex.value = this.lastFrameTarget.texture;
+      this.accumulationMaterial.uniforms.uTex.value = this.blurHistoryTarget.texture;
       this.accumulationMaterial.uniforms.uUvOffset.value.set(0, 0);
       this.accumulationMaterial.uniforms.uColor.value.set(1, 1, 1);
       setMaterialBlendConstant(this.accumulationMaterial, this.runtime.historyIntensity);
@@ -451,8 +569,7 @@ export class RWPostFxPipeline {
     this.updateRuntime(runtimeContext);
 
     this.primeFrontBuffer(renderer);
-    this.runColourFilterStage(renderer);
-    this.updateFrontBuffer(renderer);
+    this.copyTarget(renderer, this.frontBufferTarget, this.composeTarget, true);
     this.runRadiosityStage(renderer);
     this.updateFrontBuffer(renderer);
     this.runBlurStage(renderer);
@@ -460,8 +577,8 @@ export class RWPostFxPipeline {
   }
 
   endFrame(renderer) {
-    if (!this.enabled || !renderer?.setRenderTarget || !this.composeTarget || !this.lastFrameTarget) return;
-    this.copyTarget(renderer, this.composeTarget, this.lastFrameTarget, true);
+    if (!this.enabled || !renderer?.setRenderTarget || !this.composeTarget || !this.blurHistoryTarget) return;
+    this.copyTarget(renderer, this.composeTarget, this.blurHistoryTarget, true);
     this.hasHistory = true;
   }
 
@@ -477,14 +594,16 @@ export class RWPostFxPipeline {
     this.lastFrameTarget?.dispose();
     this.radiosityTargetA?.dispose();
     this.radiosityTargetB?.dispose();
+    this.blurCurrentTarget?.dispose();
+    this.blurHistoryTarget?.dispose();
     this.copyMaterial.dispose();
     this.presentMaterial.dispose();
-    this.thresholdMaterial.dispose();
     this.radiosityBlurMaterial.dispose();
     this.accumulationMaterial.dispose();
     this.additiveMaterial.dispose();
     this.colourFilterAddMaterial.dispose();
     this.radiosityCompositeMaterial.dispose();
+    this.solidColorMaterial.dispose();
     this.quad.geometry.dispose();
   }
 }
