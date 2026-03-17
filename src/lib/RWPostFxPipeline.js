@@ -561,10 +561,11 @@ void main() {
       this.renderFullscreen(renderer, this.composeTarget, this.accumulationMaterial, false);
     }
 
-    setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
-    // VCSPC adds the blur tint with full-strength additive color; alpha is only used for blur strength.
-    this.solidColorMaterial.uniforms.uOpacity.value = 1;
-    this.renderFullscreen(renderer, this.composeTarget, this.solidColorMaterial, false);
+    if (this.runtime.enableColorFilter) {
+      setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
+      this.solidColorMaterial.uniforms.uOpacity.value = 1;
+      this.renderFullscreen(renderer, this.composeTarget, this.solidColorMaterial, false);
+    }
 
     if (this.runtime.enableTrails && this.hasHistory) {
       this.accumulationMaterial.uniforms.uTex.value = this.blurHistoryTarget.texture;
@@ -599,8 +600,13 @@ void main() {
         this.presentTarget(renderer, this.blurHistoryTarget, true);
         return;
       case POSTFX_DEBUG_VIEW.BLUR_TINT:
-        setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
-        this.solidColorMaterial.uniforms.uOpacity.value = 1;
+        if (this.runtime.enableColorFilter) {
+          setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
+          this.solidColorMaterial.uniforms.uOpacity.value = 1;
+        } else {
+          this.solidColorMaterial.uniforms.uColor.value.set(0, 0, 0);
+          this.solidColorMaterial.uniforms.uOpacity.value = 1;
+        }
         this.renderFullscreen(renderer, null, this.solidColorMaterial, true);
         return;
       default:
