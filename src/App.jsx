@@ -725,6 +725,22 @@ function App() {
   const lastDisableVertexColorRef = useRef(false);
   const lastDisableBackfaceCullingRef = useRef(true);
   const lastRenderWaterRef = useRef(true);
+  const sunRuntimeDebugRef = useRef({
+    enableBigBloom: true,
+    bigSunBloom: false,
+    bloomEligible: false,
+    screenCenterBloomFactor: 0,
+    facingBloomFactor: 0,
+    viewAlignment: 0,
+    centerBloomFactor: 0,
+    brightnessBloomFactor: 0,
+    bloomBrightnessScale: 0.35,
+    bigBloomFadeAlpha: 0,
+    bigBloomScale: 1,
+    sunOnScreen: false,
+    coronaFadeAlpha: 0,
+    sunLightsMult: 1,
+  });
 
   const [status, setStatus] = useState('Select an extracted GTA folder to begin.');
   const [activeBackend, setActiveBackend] = useState('WebGL');
@@ -3142,6 +3158,12 @@ function App() {
       }
       const fluffyCloudSprites = fluffyCloudSpritesRef.current;
       const fluffyHighlightSprites = fluffyHighlightSpritesRef.current;
+      const postFxSelection = uiStateRef.current.pipelineDebug?.[RW_PIPELINE_CATEGORY.POSTFX];
+      const postFxSunCoronaEnabled = (
+        postFxSelection?.config?.enableBigBloomSunEffect
+        ?? postFxSelection?.config?.enableSunCorona
+        ?? true
+      );
       const sunHighlightColor = new THREE.Color().setRGB(1, 190 / 255, 190 / 255, THREE.SRGBColorSpace);
       let sunBlockedByClouds = false;
       for (let index = 0; index < fluffyCloudSprites.length; index += 1) {
@@ -3197,8 +3219,25 @@ function App() {
         time,
         sunBlockedByClouds,
         sunMetrics,
+        postFxSunCoronaEnabled,
       );
       const sunLightsMult = computeSunLightsMultFromState(sunState);
+      sunRuntimeDebugRef.current = {
+        enableBigBloom: postFxSunCoronaEnabled,
+        bigSunBloom: Boolean(sunState?.bigSunBloom),
+        bloomEligible: Boolean(sunState?.bloomEligible),
+        screenCenterBloomFactor: Number(sunState?.screenCenterBloomFactor) || 0,
+        facingBloomFactor: Number(sunState?.facingBloomFactor) || 0,
+        viewAlignment: Number(sunState?.viewAlignment) || 0,
+        centerBloomFactor: Number(sunState?.centerBloomFactor) || 0,
+        brightnessBloomFactor: Number(sunState?.brightnessBloomFactor) || 0,
+        bloomBrightnessScale: Number(sunState?.bloomBrightnessScale) || 0.35,
+        bigBloomFadeAlpha: Number(sunState?.bigBloomFadeAlpha) || 0,
+        bigBloomScale: Number(sunState?.bigBloomScale) || 1,
+        sunOnScreen: Boolean(sunState?.onScreen),
+        coronaFadeAlpha: Number(sunState?.fadeAlpha) || 0,
+        sunLightsMult,
+      };
       const skyLightMult = computeSkyLightMultFromLightsMult(sunLightsMult);
       skyTopColor.copy(baseSkyTopColor).multiplyScalar(skyLightMult);
       skyBottomColor.copy(baseSkyBottomColor).multiplyScalar(skyLightMult);
@@ -3536,12 +3575,6 @@ function App() {
         waveHeight: uiStateRef.current.waterWaveHeight,
         farAlpha: uiStateRef.current.waterAlpha,
       });
-      const postFxSelection = uiStateRef.current.pipelineDebug?.[RW_PIPELINE_CATEGORY.POSTFX];
-      const postFxSunCoronaEnabled = (
-        postFxSelection?.config?.enableBigBloomSunEffect
-        ?? postFxSelection?.config?.enableSunCorona
-        ?? true
-      );
       const skyScene = skySceneRef.current;
       const skyCamera = skyCameraRef.current;
       const skyCloudScene = skyCloudSceneRef.current;
@@ -4607,6 +4640,20 @@ function App() {
                         return value;
                       },
                     );
+                    const sunRuntimeDebug = sunRuntimeDebugRef.current;
+                    ImGui.TextDisabled(
+                      `Sun runtime: bigSunBloom=${sunRuntimeDebug.bigSunBloom ? 1 : 0} enabled=${sunRuntimeDebug.enableBigBloom ? 1 : 0} eligible=${sunRuntimeDebug.bloomEligible ? 1 : 0} onScreen=${sunRuntimeDebug.sunOnScreen ? 1 : 0}`,
+                    );
+                    ImGui.TextDisabled(
+                      `fade=${sunRuntimeDebug.bigBloomFadeAlpha.toFixed(3)} scale=${sunRuntimeDebug.bigBloomScale.toFixed(3)} corona=${sunRuntimeDebug.coronaFadeAlpha.toFixed(3)} lights=${sunRuntimeDebug.sunLightsMult.toFixed(3)}`,
+                    );
+                    ImGui.TextDisabled(
+                      `center=${sunRuntimeDebug.centerBloomFactor.toFixed(3)} screen=${sunRuntimeDebug.screenCenterBloomFactor.toFixed(3)} facing=${sunRuntimeDebug.facingBloomFactor.toFixed(3)} align=${sunRuntimeDebug.viewAlignment.toFixed(3)}`,
+                    );
+                    ImGui.TextDisabled(
+                      `bright=${sunRuntimeDebug.brightnessBloomFactor.toFixed(3)} brightScale=${sunRuntimeDebug.bloomBrightnessScale.toFixed(3)}`,
+                    );
+                    ImGui.TextDisabled(`Sun mode: ${sunRuntimeDebug.bigSunBloom ? 'big-bloom' : 'normal-corona'}`);
                     selection.config.debugView ||= 'final';
                     ImGui.Text('Debug View');
                     ImGui.SameLine();

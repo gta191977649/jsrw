@@ -15,6 +15,7 @@ const TMP_NDC = new THREE.Vector3();
 const TMP_GTA_SUN_DIR = new THREE.Vector3();
 const TMP_THREE_SUN_DIR = new THREE.Vector3();
 const TMP_CAMERA_DIR = new THREE.Vector3();
+const TMP_CAMERA_FORWARD = new THREE.Vector3();
 const SUN_BLOOM_MIN_RADIUS = 0.18;
 const SUN_BLOOM_MAX_RADIUS = 0.65;
 const SUN_BLOOM_CORE_SCALE = 0.55;
@@ -317,7 +318,7 @@ export class RWSunPipeline {
     };
   }
 
-  update(camera, worldRoot, timecycleSample, settings = RW_SUN_DEBUG_DEFAULTS, dt = 0, timeMs = 0, sunBlockedByClouds = false, metrics = null) {
+  update(camera, worldRoot, timecycleSample, settings = RW_SUN_DEBUG_DEFAULTS, dt = 0, timeMs = 0, sunBlockedByClouds = false, metrics = null, enableBigBloom = true) {
     const sunMetrics = metrics || this.updateSunMetrics(camera, timecycleSample, settings);
     const shouldCheckOcclusion = (
       settings.useWorldOcclusion
@@ -349,17 +350,21 @@ export class RWSunPipeline {
       SUN_BLOOM_MIN_RADIUS,
       SUN_BLOOM_MAX_RADIUS,
     );
-    const centerBloomFactor = clamp01(1 - (centerDistance / Math.max(1, bloomRadius)));
+    const screenCenterBloomFactor = clamp01(1 - (centerDistance / Math.max(1, bloomRadius)));
+    camera.getWorldDirection(TMP_CAMERA_FORWARD);
+    const viewAlignment = clamp01(TMP_CAMERA_FORWARD.normalize().dot(this.sunDirection));
+    const facingBloomFactor = clamp01((viewAlignment - 0.9) / 0.1);
+    const centerBloomFactor = Math.max(screenCenterBloomFactor, facingBloomFactor);
     const brightnessBloomFactor = clamp01(spriteBrightness / 10);
+    const bloomBrightnessScale = Math.max(0.35, brightnessBloomFactor);
     const bloomEligible = (
-      settings.enabled
-      && sunMetrics.onScreen
-      && sunMetrics.coronaVisible
-      && sunMetrics.rwScreen
-      && this.occlusionAlpha > 0.5
-      && !blockedByClouds
-      && centerBloomFactor > 0.001
-      && brightnessBloomFactor > 0.001
+      enableBigBloom &&
+      settings.enabled &&
+      sunMetrics.onScreen &&
+      sunMetrics.coronaVisible &&
+      sunMetrics.rwScreen &&
+      this.occlusionAlpha > 0.5 &&
+      !blockedByClouds
     );
     const coreTargetAlpha = (
       settings.enabled
@@ -376,9 +381,9 @@ export class RWSunPipeline {
       && this.occlusionAlpha > 0.5
       && !blockedByClouds
     ) ? 255 : 0;
-    const bloomTargetAlpha = bloomEligible ? (255 * centerBloomFactor * brightnessBloomFactor) : 0;
+    const bloomTargetAlpha = bloomEligible ? (255 * bloomBrightnessScale) : 0;
     const bloomTargetScale = bloomEligible
-      ? (1 + (centerBloomFactor * brightnessBloomFactor * Math.max(0.5, spriteSize)))
+      ? (1 + (bloomBrightnessScale * Math.max(0.5, spriteSize)))
       : 1;
     const fadeStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 30;
     const scaleStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 0.12;
@@ -410,6 +415,15 @@ export class RWSunPipeline {
 
     return {
       ...sunMetrics,
+      bigSunBloom: bloomEligible && this.bigBloomFadeAlpha > 0.0001,
+      bloomEligible,
+      screenCenterBloomFactor,
+      facingBloomFactor,
+      viewAlignment,
+      centerBloomFactor,
+      brightnessBloomFactor,
+      bloomBrightnessScale,
+      enableBigBloom,
       blockedByClouds,
       occludedByWorld: this.occludedByWorld,
       fadeAlpha: this.coronaFadeAlpha / 255,
