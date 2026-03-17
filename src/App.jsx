@@ -518,6 +518,21 @@ function applyTimecycleOverrides(sampled, overrides) {
     if (!field) continue;
     next.values[key] = cloneTimecycleValue(overrideValue, field.type);
   }
+  if (next.values.blur) {
+    const blurAlpha = Number.isFinite(Number(next.values.blurAlpha)) ? Number(next.values.blurAlpha) : 0;
+    next.values.postfx1 = {
+      r: next.values.blur.r,
+      g: next.values.blur.g,
+      b: next.values.blur.b,
+      a: blurAlpha,
+    };
+    next.values.postfx2 = {
+      r: next.values.blur.r,
+      g: next.values.blur.g,
+      b: next.values.blur.b,
+      a: blurAlpha,
+    };
+  }
   if (!Object.prototype.hasOwnProperty.call(overrides, 'fogColor') && next.values.skyTop && next.values.skyBottom) {
     next.values.fogColor = {
       r: (next.values.skyTop.r + (2 * next.values.skyBottom.r)) / 3,
@@ -4381,21 +4396,6 @@ function App() {
               {
                 const gameOptions = getRWPipelineGameOptions();
                 const pipelineDebug = uiStateRef.current.pipelineDebug;
-                const renderPostFxColorRow = (id, label, targetColor) => {
-                  const color = [
-                    (Number(targetColor.r) || 0) / 255,
-                    (Number(targetColor.g) || 0) / 255,
-                    (Number(targetColor.b) || 0) / 255,
-                  ];
-                  const changed = ImGui.ColorEdit3(`##${id}`, color);
-                  if (changed) {
-                    targetColor.r = Math.round(Math.min(Math.max(color[0], 0), 1) * 255);
-                    targetColor.g = Math.round(Math.min(Math.max(color[1], 0), 1) * 255);
-                    targetColor.b = Math.round(Math.min(Math.max(color[2], 0), 1) * 255);
-                  }
-                  ImGui.SameLine();
-                  ImGui.TextUnformatted(label);
-                };
                 const renderPostFxSliderRow = (id, label, getter, setter, min, max, format) => {
                   ImGui.PushID(id);
                   ImGui.Columns(2, `postfx-row-${id}`, false);
@@ -4461,52 +4461,45 @@ function App() {
                     ImGui.TextWrapped(`Warning: ${status.warning}`);
                   }
                   if (category === RW_PIPELINE_CATEGORY.POSTFX) {
+                    const timecyclePostFxValues = timecycleStateRef.current?.current?.values || null;
+                    const hasLiveTimecyclePostFx = Boolean(timecyclePostFxValues?.blur);
+                    const liveRadiosityLimit = hasLiveTimecyclePostFx
+                      ? Number(timecyclePostFxValues.radiosityLimit)
+                      : selection.config.trailsLimit;
+                    const liveRadiosityIntensity = hasLiveTimecyclePostFx
+                      ? Number(timecyclePostFxValues.radiosityIntensity)
+                      : selection.config.trailsIntensity;
+                    const liveBlurOffset = hasLiveTimecyclePostFx
+                      ? Number(timecyclePostFxValues.blurOffset)
+                      : selection.config.blurOffset;
+                    const liveBlurIntensity = hasLiveTimecyclePostFx
+                      ? ((Number(timecyclePostFxValues.postfx1?.a ?? timecyclePostFxValues.blurAlpha) || 0) * 0.8 / 255)
+                      : selection.config.blurIntensity;
                     const postFxDebugViewOptions = [
                       ['final', 'Final'],
                       ['scene', 'Scene'],
-                      ['frontbuffer', 'FrontBuffer'],
+                      ['current-frame', 'Current Frame'],
                       ['radiosity-blur-a', 'Radiosity Blur A'],
                       ['radiosity-blur-b', 'Radiosity Blur B'],
-                      ['radiosity-result', 'Radiosity Result'],
+                      ['after-radiosity', 'After Radiosity'],
                       ['blur-source', 'Blur Source'],
                       ['history', 'History'],
                       ['blur-tint', 'Blur Tint'],
                     ];
                     selection.config ||= {
                       ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config,
-                      filterColor1: { ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config.filterColor1 },
-                      filterColor2: { ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config.filterColor2 },
                     };
                     ImGui.Separator();
-                    renderPostFxColorRow(`postfx-${category}-filter-1`, 'Filter Color 1 RGB', selection.config.filterColor1);
-                    renderPostFxSliderRow(
-                      `postfx-${category}-filter-1-alpha`,
-                      'Filter Color 1 Alpha',
-                      () => selection.config.filterColor1.a ?? 255,
-                      (value) => { selection.config.filterColor1.a = Math.round(value); },
-                      0,
-                      255,
-                      '%.0f',
-                    );
-                    renderPostFxColorRow(`postfx-${category}-filter-2`, 'Filter Color 2 RGB', selection.config.filterColor2);
-                    renderPostFxSliderRow(
-                      `postfx-${category}-filter-2-alpha`,
-                      'Filter Color 2 Alpha',
-                      () => selection.config.filterColor2.a ?? 0,
-                      (value) => { selection.config.filterColor2.a = Math.round(value); },
-                      0,
-                      255,
-                      '%.0f',
-                    );
-                    renderPostFxSliderRow(`postfx-${category}-trails-limit`, 'Trails Limit', () => selection.config.trailsLimit, (value) => { selection.config.trailsLimit = Math.round(value); }, 0, 255, '%.0f');
-                    renderPostFxSliderRow(`postfx-${category}-trails-intensity`, 'Trails Intensity', () => selection.config.trailsIntensity, (value) => { selection.config.trailsIntensity = Math.round(value); }, 0, 63, '%.0f');
-                    renderPostFxSliderRow(`postfx-${category}-blur-offset`, 'Blur Offset', () => selection.config.blurOffset, (value) => { selection.config.blurOffset = value; }, 0, 8, '%.2f');
-                    renderPostFxSliderRow(`postfx-${category}-blur-intensity`, 'Blur Intensity', () => selection.config.blurIntensity, (value) => { selection.config.blurIntensity = value; }, 0, 1, '%.3f');
-                    renderPostFxSliderRow(`postfx-${category}-history-intensity`, 'History Intensity', () => selection.config.historyIntensity, (value) => { selection.config.historyIntensity = value; }, 0, 1, '%.3f');
-                    ImGui.Checkbox(
-                      `Enable ColourFilter##${category}`,
-                      (value = selection.config.enableColourFilter) => (selection.config.enableColourFilter = value),
-                    );
+                    if (hasLiveTimecyclePostFx) ImGui.BeginDisabled();
+                    renderPostFxSliderRow(`postfx-${category}-trails-limit`, 'Radiosity Limit', () => liveRadiosityLimit, (value) => { selection.config.trailsLimit = Math.round(value); }, 0, 255, '%.0f');
+                    renderPostFxSliderRow(`postfx-${category}-trails-intensity`, 'Radiosity Intensity', () => liveRadiosityIntensity, (value) => { selection.config.trailsIntensity = Math.round(value); }, 0, 63, '%.0f');
+                    renderPostFxSliderRow(`postfx-${category}-blur-offset`, 'Blur Offset', () => liveBlurOffset, (value) => { selection.config.blurOffset = value; }, 0, 8, '%.2f');
+                    renderPostFxSliderRow(`postfx-${category}-blur-intensity`, 'Blur Intensity', () => liveBlurIntensity, (value) => { selection.config.blurIntensity = value; }, 0, 1, '%.3f');
+                    if (hasLiveTimecyclePostFx) ImGui.EndDisabled();
+                    renderPostFxSliderRow(`postfx-${category}-history-intensity`, 'Trails Intensity', () => selection.config.historyIntensity, (value) => { selection.config.historyIntensity = value; }, 0, 1, '%.3f');
+                    if (hasLiveTimecyclePostFx) {
+                      ImGui.TextDisabled('Radiosity/blur sliders are timecyc-driven and update live.');
+                    }
                     ImGui.Checkbox(
                       `Enable Radiosity##${category}`,
                       (value = selection.config.enableRadiosity) => (selection.config.enableRadiosity = value),
@@ -4516,8 +4509,19 @@ function App() {
                       (value = selection.config.enableBlur) => (selection.config.enableBlur = value),
                     );
                     ImGui.Checkbox(
-                      `Enable History##${category}`,
-                      (value = selection.config.enableHistory) => (selection.config.enableHistory = value),
+                      `Enable Trails##${category}`,
+                      (value = (selection.config.enableTrails ?? selection.config.enableHistory ?? true)) => {
+                        selection.config.enableTrails = value;
+                        selection.config.enableHistory = value;
+                        return value;
+                      },
+                    );
+                    ImGui.Checkbox(
+                      `Enable Color Filter##${category}`,
+                      (value = (selection.config.enableColorFilter ?? false)) => {
+                        selection.config.enableColorFilter = value;
+                        return value;
+                      },
                     );
                     selection.config.debugView ||= 'final';
                     ImGui.Text('Debug View');
@@ -4536,7 +4540,7 @@ function App() {
                     if (postFxDebugPreviews.length > 0) {
                       ImGui.Separator();
                       ImGui.Text('Stage Previews');
-                      ImGui.TextDisabled('SKYGFX VCS order: Pre Radiosity -> After Radiosity -> After Blur');
+                      ImGui.TextDisabled('VCSPC order: Current Frame -> After Radiosity -> After BlurOverlay');
                       const previewWidth = Math.max(120, Math.min(220, (ImGui.GetContentRegionAvail().x - 16) / 3));
                       for (let i = 0; i < postFxDebugPreviews.length; i += 1) {
                         const preview = postFxDebugPreviews[i];
@@ -4566,7 +4570,7 @@ function App() {
                 renderPipelineDebugSection(
                   RW_PIPELINE_CATEGORY.POSTFX,
                   'PostFX Pipeline',
-                  'Fullscreen postfx profile switching. V1 implements a VCS-style WebGL postfx pass and leaves LCS hooks in the selection model.',
+                  'Fullscreen postfx profile switching. VCS now follows the VCSPC Render() order: Radiosity -> BlurOverlay(history) -> Present.',
                 );
               }
               ImGui.EndTabItem();

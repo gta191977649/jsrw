@@ -2,23 +2,23 @@ import * as THREE from 'three';
 import rwPostFxFullscreenVertexShader from '../shaders/postfx/fullscreen.vertex.glsl.js';
 import rwPostFxCopyFragmentShader from '../shaders/postfx/copy.fragment.glsl.js';
 import rwPostFxPresentFragmentShader from '../shaders/postfx/present.fragment.glsl.js';
-const SKYGFX_RADIOSITY_FILTER_PASSES = 2;
-const SKYGFX_RADIOSITY_RENDER_PASSES = 1;
 const SKYGFX_RADIOSITY_INTENSITY = 0x23;
-const SKYGFX_RADIOSITY_U_CORRECTION = 2;
-const SKYGFX_RADIOSITY_V_CORRECTION = 2;
 const VCS_BLUR_OFFSET = 2.1;
 const VCS_BLUR_INTENSITY = (39.0 * 0.8) / 255.0;
 const VCS_HISTORY_INTENSITY = 32 / 255.0;
 const VCS_TRAILS_LIMIT = 80;
 const VCS_TRAILS_INTENSITY = 38;
+const VCS_RADIOSITY_WIDTH = 256;
+const VCS_RADIOSITY_HEIGHT = 128;
+const VCS_RADIOSITY_PING_PONG_PASSES = 4;
+const VCS_RADIOSITY_SPREAD_WEIGHT = 36 / 255;
 const POSTFX_DEBUG_VIEW = Object.freeze({
   FINAL: 'final',
   SCENE: 'scene',
-  FRONTBUFFER: 'frontbuffer',
+  CURRENT_FRAME: 'current-frame',
   RADIOSITY_BLUR_A: 'radiosity-blur-a',
   RADIOSITY_BLUR_B: 'radiosity-blur-b',
-  RADIOSITY_RESULT: 'radiosity-result',
+  AFTER_RADIOSITY: 'after-radiosity',
   BLUR_SOURCE: 'blur-source',
   HISTORY: 'history',
   BLUR_TINT: 'blur-tint',
@@ -72,25 +72,6 @@ function setVector3FromColor(target, color, scale = 1) {
   );
 }
 
-function normalizeByteChannel(value, fallback) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  if (numeric >= 0 && numeric <= 1) {
-    return THREE.MathUtils.clamp(Math.round(numeric * 255), 0, 255);
-  }
-  return THREE.MathUtils.clamp(Math.round(numeric), 0, 255);
-}
-
-function getColorConfig(config, key, fallbackAlpha) {
-  const source = config?.[key] || {};
-  return {
-    r: normalizeByteChannel(source.r, key === 'filterColor1' ? 128 : 0),
-    g: normalizeByteChannel(source.g, key === 'filterColor1' ? 128 : 0),
-    b: normalizeByteChannel(source.b, key === 'filterColor1' ? 128 : 0),
-    a: normalizeByteChannel(source.a, fallbackAlpha),
-  };
-}
-
 export class RWPostFxPipeline {
   constructor(options = {}) {
     this.enabled = true;
@@ -106,7 +87,7 @@ export class RWPostFxPipeline {
     this.radiosityTargetB = null;
     this.blurCurrentTarget = null;
     this.blurHistoryTarget = null;
-    this.debugColourFilterTarget = null;
+    this.debugCurrentFrameTarget = null;
     this.debugRadiosityTarget = null;
     this.debugBlurTarget = null;
 
@@ -152,23 +133,45 @@ export class RWPostFxPipeline {
     this.radiosityBlurMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uTex: { value: null },
-        uDirection: { value: new THREE.Vector2(0, 0) },
-        uScale: { value: 1 },
+        uTexelSize: { value: new THREE.Vector2(1 / VCS_RADIOSITY_WIDTH, 1 / VCS_RADIOSITY_HEIGHT) },
+        uOffsetSet: { value: 0 },
+        uWeight: { value: VCS_RADIOSITY_SPREAD_WEIGHT },
       },
       vertexShader: rwPostFxFullscreenVertexShader,
       fragmentShader: `
 uniform sampler2D uTex;
-uniform vec2 uDirection;
-uniform float uScale;
+uniform vec2 uTexelSize;
+uniform int uOffsetSet;
+uniform float uWeight;
 varying vec2 vUv;
 
 void main() {
-  vec4 color = vec4(0.0);
-  for (int i = 0; i < 10; i += 1) {
-    float t = (float(i) / 9.0) - 0.5;
-    color += texture2D(uTex, clamp(vUv + (uDirection * t * uScale), 0.0, 1.0));
+  vec2 offsets[8];
+  if (uOffsetSet == 0) {
+    offsets[0] = vec2(-1.0, 0.0);
+    offsets[1] = vec2(1.0, 0.0);
+    offsets[2] = vec2(0.0, -1.0);
+    offsets[3] = vec2(0.0, 1.0);
+    offsets[4] = vec2(-1.0, -1.0);
+    offsets[5] = vec2(1.0, -1.0);
+    offsets[6] = vec2(-1.0, 1.0);
+    offsets[7] = vec2(1.0, 1.0);
+  } else {
+    offsets[0] = vec2(1.0, 0.0);
+    offsets[1] = vec2(-1.0, 0.0);
+    offsets[2] = vec2(0.0, 1.0);
+    offsets[3] = vec2(0.0, -1.0);
+    offsets[4] = vec2(1.0, 1.0);
+    offsets[5] = vec2(-1.0, 1.0);
+    offsets[6] = vec2(1.0, -1.0);
+    offsets[7] = vec2(-1.0, -1.0);
   }
-  gl_FragColor = vec4(color.rgb / 10.0, 1.0);
+
+  vec3 color = vec3(0.0);
+  for (int i = 0; i < 8; i += 1) {
+    color += texture2D(uTex, clamp(vUv + (offsets[i] * uTexelSize), 0.0, 1.0)).rgb * uWeight;
+  }
+  gl_FragColor = vec4(color, 1.0);
 }
 `,
       depthTest: false,
@@ -180,27 +183,16 @@ void main() {
     this.radiosityCompositeMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uTex: { value: null },
-        uLimit: { value: 0.0 },
         uIntensity: { value: 0.0 },
-        uRenderPasses: { value: SKYGFX_RADIOSITY_RENDER_PASSES },
-        uUvOffset: { value: new THREE.Vector2(0, 0) },
-        uUvScale: { value: new THREE.Vector2(1, 1) },
       },
       vertexShader: rwPostFxFullscreenVertexShader,
       fragmentShader: `
 uniform sampler2D uTex;
-uniform float uLimit;
 uniform float uIntensity;
-uniform float uRenderPasses;
-uniform vec2 uUvOffset;
-uniform vec2 uUvScale;
 varying vec2 vUv;
 
 void main() {
-  vec2 uv = (vUv * uUvScale) + uUvOffset;
-  vec3 color = texture2D(uTex, clamp(uv, 0.0, 1.0)).rgb;
-  color = clamp((color * 2.0) - vec3(uLimit), vec3(0.0), vec3(1.0));
-  color *= (uIntensity * uRenderPasses);
+  vec3 color = texture2D(uTex, clamp(vUv, 0.0, 1.0)).rgb * uIntensity;
   gl_FragColor = vec4(color, 1.0);
 }
 `,
@@ -216,6 +208,29 @@ void main() {
     this.radiosityCompositeMaterial.blendSrcAlpha = THREE.OneFactor;
     this.radiosityCompositeMaterial.blendDstAlpha = THREE.ZeroFactor;
     this.radiosityCompositeMaterial.blendEquationAlpha = THREE.AddEquation;
+
+    this.radiosityThresholdMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uTex: { value: null },
+        uLimit: { value: 0.0 },
+      },
+      vertexShader: rwPostFxFullscreenVertexShader,
+      fragmentShader: `
+uniform sampler2D uTex;
+uniform float uLimit;
+varying vec2 vUv;
+
+void main() {
+  vec3 color = texture2D(uTex, clamp(vUv, 0.0, 1.0)).rgb;
+  color = max((color * 2.0) - vec3(uLimit), vec3(0.0));
+  gl_FragColor = vec4(color, 1.0);
+}
+`,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      toneMapped: false,
+    });
 
     this.accumulationMaterial = this.copyMaterial.clone();
     this.accumulationMaterial.transparent = true;
@@ -234,16 +249,6 @@ void main() {
     this.additiveMaterial.blendSrcAlpha = THREE.OneFactor;
     this.additiveMaterial.blendDstAlpha = THREE.ZeroFactor;
     this.additiveMaterial.blendEquationAlpha = THREE.AddEquation;
-
-    this.colourFilterAddMaterial = this.copyMaterial.clone();
-    this.colourFilterAddMaterial.transparent = true;
-    this.colourFilterAddMaterial.blending = THREE.CustomBlending;
-    this.colourFilterAddMaterial.blendSrc = THREE.SrcAlphaFactor;
-    this.colourFilterAddMaterial.blendDst = THREE.OneFactor;
-    this.colourFilterAddMaterial.blendEquation = THREE.AddEquation;
-    this.colourFilterAddMaterial.blendSrcAlpha = THREE.OneFactor;
-    this.colourFilterAddMaterial.blendDstAlpha = THREE.ZeroFactor;
-    this.colourFilterAddMaterial.blendEquationAlpha = THREE.AddEquation;
 
     this.solidColorMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -269,37 +274,29 @@ void main() {
     this.solidColorMaterial.blendEquationAlpha = THREE.AddEquation;
 
     this.configRuntime = {
-      filterColor1Rgb: new THREE.Color(1, 1, 1),
-      filterColor1Alpha: 1,
-      filterColor2Rgb: new THREE.Color(0, 0, 0),
-      filterColor2Alpha: 0,
       blurColor: new THREE.Color(0, 0, 0),
       radiosityLimit: VCS_TRAILS_LIMIT,
       radiosityIntensity: SKYGFX_RADIOSITY_INTENSITY,
       blurOffset: VCS_BLUR_OFFSET,
       blurIntensity: VCS_BLUR_INTENSITY,
       historyIntensity: VCS_HISTORY_INTENSITY,
-      enableColourFilter: true,
+      enableTrails: true,
+      enableColorFilter: false,
       enableRadiosity: true,
       enableBlur: true,
-      enableHistory: true,
       debugView: POSTFX_DEBUG_VIEW.FINAL,
     };
     this.runtime = {
-      filterColor1Rgb: new THREE.Color(1, 1, 1),
-      filterColor1Alpha: 1,
-      filterColor2Rgb: new THREE.Color(0, 0, 0),
-      filterColor2Alpha: 0,
       blurColor: new THREE.Color(0, 0, 0),
       radiosityLimit: VCS_TRAILS_LIMIT,
       radiosityIntensity: SKYGFX_RADIOSITY_INTENSITY,
       blurOffset: VCS_BLUR_OFFSET,
       blurIntensity: VCS_BLUR_INTENSITY,
       historyIntensity: VCS_HISTORY_INTENSITY,
-      enableColourFilter: true,
+      enableTrails: true,
+      enableColorFilter: false,
       enableRadiosity: true,
       enableBlur: true,
-      enableHistory: true,
       debugView: POSTFX_DEBUG_VIEW.FINAL,
     };
     this.setConfig(options);
@@ -320,32 +317,22 @@ void main() {
     const nextBlurOffset = Math.max(0, getFiniteOrDefault(config.blurOffset, VCS_BLUR_OFFSET));
     const nextBlurIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.blurIntensity, VCS_BLUR_INTENSITY), 0, 1);
     const nextHistoryIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.historyIntensity, VCS_HISTORY_INTENSITY), 0, 1);
-    const nextEnableColourFilter = getBooleanOrDefault(config.enableColourFilter, true);
+    const nextEnableTrails = getBooleanOrDefault(config.enableTrails, getBooleanOrDefault(config.enableHistory, true));
+    const nextEnableColorFilter = getBooleanOrDefault(config.enableColorFilter, false);
     const nextEnableRadiosity = getBooleanOrDefault(config.enableRadiosity, true);
     const nextEnableBlur = getBooleanOrDefault(config.enableBlur, true);
-    const nextEnableHistory = getBooleanOrDefault(config.enableHistory, true);
     const nextDebugView = getPostFxDebugViewOrDefault(config.debugView);
-    const filterColor1 = getColorConfig(config, 'filterColor1', 255);
-    const filterColor2 = getColorConfig(config, 'filterColor2', 0);
     const configChanged = (
       this.configRuntime.radiosityLimit !== nextRadiosityLimit
       || this.configRuntime.radiosityIntensity !== nextRadiosityIntensity
       || this.configRuntime.blurOffset !== nextBlurOffset
       || this.configRuntime.blurIntensity !== nextBlurIntensity
       || this.configRuntime.historyIntensity !== nextHistoryIntensity
-      || this.configRuntime.enableColourFilter !== nextEnableColourFilter
+      || this.configRuntime.enableTrails !== nextEnableTrails
+      || this.configRuntime.enableColorFilter !== nextEnableColorFilter
       || this.configRuntime.enableRadiosity !== nextEnableRadiosity
       || this.configRuntime.enableBlur !== nextEnableBlur
-      || this.configRuntime.enableHistory !== nextEnableHistory
       || this.configRuntime.debugView !== nextDebugView
-      || Math.round(this.configRuntime.filterColor1Rgb.r * 255) !== filterColor1.r
-      || Math.round(this.configRuntime.filterColor1Rgb.g * 255) !== filterColor1.g
-      || Math.round(this.configRuntime.filterColor1Rgb.b * 255) !== filterColor1.b
-      || Math.round(this.configRuntime.filterColor2Rgb.r * 255) !== filterColor2.r
-      || Math.round(this.configRuntime.filterColor2Rgb.g * 255) !== filterColor2.g
-      || Math.round(this.configRuntime.filterColor2Rgb.b * 255) !== filterColor2.b
-      || Math.round(this.configRuntime.filterColor1Alpha * 255) !== filterColor1.a
-      || Math.round(this.configRuntime.filterColor2Alpha * 255) !== filterColor2.a
     );
 
     this.configRuntime.radiosityLimit = nextRadiosityLimit;
@@ -353,45 +340,25 @@ void main() {
     this.configRuntime.blurOffset = nextBlurOffset;
     this.configRuntime.blurIntensity = nextBlurIntensity;
     this.configRuntime.historyIntensity = nextHistoryIntensity;
-    this.configRuntime.enableColourFilter = nextEnableColourFilter;
+    this.configRuntime.enableTrails = nextEnableTrails;
+    this.configRuntime.enableColorFilter = nextEnableColorFilter;
     this.configRuntime.enableRadiosity = nextEnableRadiosity;
     this.configRuntime.enableBlur = nextEnableBlur;
-    this.configRuntime.enableHistory = nextEnableHistory;
     this.configRuntime.debugView = nextDebugView;
-    this.configRuntime.filterColor1Rgb.setRGB(
-      filterColor1.r / 255,
-      filterColor1.g / 255,
-      filterColor1.b / 255,
-      THREE.LinearSRGBColorSpace,
-    );
-    this.configRuntime.filterColor1Alpha = filterColor1.a / 255;
-    this.configRuntime.filterColor2Rgb.setRGB(
-      filterColor2.r / 255,
-      filterColor2.g / 255,
-      filterColor2.b / 255,
-      THREE.LinearSRGBColorSpace,
-    );
-    this.configRuntime.filterColor2Alpha = filterColor2.a / 255;
-    this.configRuntime.blurColor.copy(this.configRuntime.filterColor2Rgb);
 
-    this.runtime.filterColor1Rgb.copy(this.configRuntime.filterColor1Rgb);
-    this.runtime.filterColor1Alpha = this.configRuntime.filterColor1Alpha;
-    this.runtime.filterColor2Rgb.copy(this.configRuntime.filterColor2Rgb);
-    this.runtime.filterColor2Alpha = this.configRuntime.filterColor2Alpha;
     this.runtime.blurColor.copy(this.configRuntime.blurColor);
     this.runtime.radiosityLimit = this.configRuntime.radiosityLimit;
     this.runtime.radiosityIntensity = this.configRuntime.radiosityIntensity;
     this.runtime.blurOffset = this.configRuntime.blurOffset;
     this.runtime.blurIntensity = this.configRuntime.blurIntensity;
     this.runtime.historyIntensity = this.configRuntime.historyIntensity;
-    this.runtime.enableColourFilter = this.configRuntime.enableColourFilter;
+    this.runtime.enableTrails = this.configRuntime.enableTrails;
+    this.runtime.enableColorFilter = this.configRuntime.enableColorFilter;
     this.runtime.enableRadiosity = this.configRuntime.enableRadiosity;
     this.runtime.enableBlur = this.configRuntime.enableBlur;
-    this.runtime.enableHistory = this.configRuntime.enableHistory;
     this.runtime.debugView = this.configRuntime.debugView;
 
     if (configChanged) this.resetHistory();
-    if (!this.runtime.enableHistory) this.resetHistory();
   }
 
   ensureSize(width, height) {
@@ -408,7 +375,7 @@ void main() {
       && this.radiosityTargetB
       && this.blurCurrentTarget
       && this.blurHistoryTarget
-      && this.debugColourFilterTarget
+      && this.debugCurrentFrameTarget
       && this.debugRadiosityTarget
       && this.debugBlurTarget
     ) {
@@ -425,7 +392,7 @@ void main() {
     this.radiosityTargetB?.dispose();
     this.blurCurrentTarget?.dispose();
     this.blurHistoryTarget?.dispose();
-    this.debugColourFilterTarget?.dispose();
+    this.debugCurrentFrameTarget?.dispose();
     this.debugRadiosityTarget?.dispose();
     this.debugBlurTarget?.dispose();
 
@@ -433,44 +400,54 @@ void main() {
     this.composeTarget = createRenderTarget(nextWidth, nextHeight);
     this.frontBufferTarget = createRenderTarget(nextWidth, nextHeight);
     this.lastFrameTarget = createRenderTarget(nextWidth, nextHeight);
-    this.radiosityTargetA = createRenderTarget(nextWidth, nextHeight);
-    this.radiosityTargetB = createRenderTarget(nextWidth, nextHeight);
+    this.radiosityTargetA = createRenderTarget(VCS_RADIOSITY_WIDTH, VCS_RADIOSITY_HEIGHT);
+    this.radiosityTargetB = createRenderTarget(VCS_RADIOSITY_WIDTH, VCS_RADIOSITY_HEIGHT);
     this.blurCurrentTarget = createRenderTarget(nextWidth, nextHeight);
     this.blurHistoryTarget = createRenderTarget(nextWidth, nextHeight);
-    this.debugColourFilterTarget = createRenderTarget(nextWidth, nextHeight);
+    this.debugCurrentFrameTarget = createRenderTarget(nextWidth, nextHeight);
     this.debugRadiosityTarget = createRenderTarget(nextWidth, nextHeight);
     this.debugBlurTarget = createRenderTarget(nextWidth, nextHeight);
     this.resetHistory();
   }
 
   updateRuntime(runtimeContext = {}) {
-    this.runtime.filterColor1Rgb.copy(this.configRuntime.filterColor1Rgb);
-    this.runtime.filterColor1Alpha = this.configRuntime.filterColor1Alpha;
-    this.runtime.filterColor2Rgb.copy(this.configRuntime.filterColor2Rgb);
-    this.runtime.filterColor2Alpha = this.configRuntime.filterColor2Alpha;
     this.runtime.radiosityLimit = this.configRuntime.radiosityLimit;
     this.runtime.radiosityIntensity = this.configRuntime.radiosityIntensity;
     this.runtime.blurOffset = this.configRuntime.blurOffset;
     this.runtime.blurIntensity = this.configRuntime.blurIntensity;
     this.runtime.historyIntensity = this.configRuntime.historyIntensity;
-    this.runtime.enableColourFilter = this.configRuntime.enableColourFilter;
+    this.runtime.enableTrails = this.configRuntime.enableTrails;
+    this.runtime.enableColorFilter = this.configRuntime.enableColorFilter;
     this.runtime.enableRadiosity = this.configRuntime.enableRadiosity;
     this.runtime.enableBlur = this.configRuntime.enableBlur;
-    this.runtime.enableHistory = this.configRuntime.enableHistory;
     this.runtime.debugView = this.configRuntime.debugView;
 
     const values = runtimeContext?.timecycleCurrent?.values;
-    if (!values || !this.runtime.enableColourFilter || !values.blur) {
-      this.runtime.blurColor.setRGB(0, 0, 0, THREE.LinearSRGBColorSpace);
+    if (!values || !values.blur) {
+      this.runtime.blurColor.copy(this.configRuntime.blurColor);
       return;
     }
 
-    this.runtime.blurColor.setRGB(
-      getClampedScalar(values.blur.r, 0, 255, 0) / 255,
-      getClampedScalar(values.blur.g, 0, 255, 0) / 255,
-      getClampedScalar(values.blur.b, 0, 255, 0) / 255,
-      THREE.LinearSRGBColorSpace,
+    this.runtime.radiosityLimit = getClampedScalar(
+      values.radiosityLimit,
+      0,
+      255,
+      this.configRuntime.radiosityLimit,
     );
+    this.runtime.radiosityIntensity = getClampedScalar(
+      values.radiosityIntensity,
+      0,
+      255,
+      this.configRuntime.radiosityIntensity,
+    );
+
+    const blurSource = values.postfx2 || values.blur;
+    const blurR = getClampedScalar(blurSource.r, 0, 255, 0) / 255;
+    const blurG = getClampedScalar(blurSource.g, 0, 255, 0) / 255;
+    const blurB = getClampedScalar(blurSource.b, 0, 255, 0) / 255;
+    this.runtime.blurColor.setRGB(blurR, blurG, blurB);
+    this.runtime.blurIntensity = getClampedScalar(values.postfx1?.a ?? values.blurAlpha, 0, 255, this.configRuntime.blurIntensity * 255) * 0.8 / 255;
+    this.runtime.blurOffset = getClampedScalar(values.blurOffset, 0, 32, this.configRuntime.blurOffset);
   }
 
   beginSceneCapture(runtimeContext = {}) {
@@ -520,80 +497,51 @@ void main() {
     this.renderFullscreen(renderer, null, this.presentMaterial, clear);
   }
 
-  runColourFilterStage(renderer) {
-    if (!this.runtime.enableColourFilter) {
-      this.copyTarget(renderer, this.frontBufferTarget, this.composeTarget, true);
-      return;
-    }
-    // VCS follows SKYGFX::ColourFilter_PS2/ColourFilter_switch semantics here.
-    // reVC's extended VC colourfilter shader is a different path and is intentionally not used.
-    this.copyMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
-    this.copyMaterial.uniforms.uUvOffset.value.set(0, 0);
-    setVector3FromColor(this.copyMaterial.uniforms.uColor.value, this.runtime.filterColor1Rgb, 255 / 128);
-    this.copyMaterial.uniforms.uOpacity.value = 1;
-    this.copyMaterial.transparent = false;
-    this.copyMaterial.blending = THREE.NormalBlending;
-    this.renderFullscreen(renderer, this.composeTarget, this.copyMaterial, true);
-
-    if (this.runtime.filterColor2Alpha <= 0) return;
-
-    this.colourFilterAddMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
-    this.colourFilterAddMaterial.uniforms.uUvOffset.value.set(0, 0);
-    setVector3FromColor(this.colourFilterAddMaterial.uniforms.uColor.value, this.runtime.filterColor2Rgb);
-    this.colourFilterAddMaterial.uniforms.uOpacity.value = this.runtime.filterColor2Alpha;
-    this.renderFullscreen(renderer, this.composeTarget, this.colourFilterAddMaterial, false);
-  }
-
   captureDebugStage(renderer, source, destination) {
     if (!source || !destination) return;
     this.copyTarget(renderer, source, destination, true);
   }
 
   runRadiosityStage(renderer) {
+    this.copyTarget(renderer, this.frontBufferTarget, this.composeTarget, true);
     if (!this.runtime.enableRadiosity || this.runtime.radiosityIntensity <= 0) return;
 
-    const blurScale = (2 ** SKYGFX_RADIOSITY_FILTER_PASSES) * (this.viewportWidth / 640.0);
-    this.radiosityBlurMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
-    this.radiosityBlurMaterial.uniforms.uDirection.value.set(0, 1 / Math.max(1, this.frontBufferTarget.height));
-    this.radiosityBlurMaterial.uniforms.uScale.value = blurScale;
-    this.renderFullscreen(renderer, this.radiosityTargetA, this.radiosityBlurMaterial, true);
+    this.radiosityThresholdMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
+    this.radiosityThresholdMaterial.uniforms.uLimit.value = this.runtime.radiosityLimit / 255.0;
+    this.renderFullscreen(renderer, this.radiosityTargetB, this.radiosityThresholdMaterial, true);
 
-    this.radiosityBlurMaterial.uniforms.uTex.value = this.radiosityTargetA.texture;
-    this.radiosityBlurMaterial.uniforms.uDirection.value.set(1 / Math.max(1, this.frontBufferTarget.width), 0);
-    this.radiosityBlurMaterial.uniforms.uScale.value = blurScale;
-    this.renderFullscreen(renderer, this.radiosityTargetB, this.radiosityBlurMaterial, true);
+    let source = this.radiosityTargetB;
+    let destination = this.radiosityTargetA;
+    this.radiosityBlurMaterial.uniforms.uTexelSize.value.set(
+      1 / Math.max(1, this.radiosityTargetA.width),
+      1 / Math.max(1, this.radiosityTargetA.height),
+    );
+    this.radiosityBlurMaterial.uniforms.uWeight.value = VCS_RADIOSITY_SPREAD_WEIGHT;
+    for (let i = 0; i < VCS_RADIOSITY_PING_PONG_PASSES; i += 1) {
+      this.radiosityBlurMaterial.uniforms.uTex.value = source.texture;
+      this.radiosityBlurMaterial.uniforms.uOffsetSet.value = i % 2;
+      this.renderFullscreen(renderer, destination, this.radiosityBlurMaterial, true);
+      const nextSource = destination;
+      destination = source;
+      source = nextSource;
+    }
 
-    const off = (2 ** SKYGFX_RADIOSITY_FILTER_PASSES) - 1;
-    const offU = off * SKYGFX_RADIOSITY_U_CORRECTION;
-    const offV = off * SKYGFX_RADIOSITY_V_CORRECTION;
-    const maxU = this.viewportWidth - offU;
-    const maxV = this.viewportHeight - offV;
-    const cU = ((offU * (this.viewportWidth + 0.5)) + (offU * 0.5)) / this.viewportWidth;
-    const cV = ((offV * (this.viewportHeight + 0.5)) + (offV * 0.5)) / this.viewportHeight;
+    this.captureDebugStage(renderer, source, this.radiosityTargetB === source ? this.debugRadiosityTarget : this.debugRadiosityTarget);
 
-    this.radiosityCompositeMaterial.uniforms.uTex.value = this.radiosityTargetB.texture;
-    this.radiosityCompositeMaterial.uniforms.uLimit.value = this.runtime.radiosityLimit / 255.0;
+    this.radiosityCompositeMaterial.uniforms.uTex.value = source.texture;
     this.radiosityCompositeMaterial.uniforms.uIntensity.value = THREE.MathUtils.clamp(
-      this.runtime.radiosityIntensity / 255.0,
+      (this.runtime.radiosityIntensity * 4) / 255.0,
       0,
       1,
     );
-    this.radiosityCompositeMaterial.uniforms.uRenderPasses.value = SKYGFX_RADIOSITY_RENDER_PASSES;
-    this.radiosityCompositeMaterial.uniforms.uUvOffset.value.set(
-      cU / Math.max(1, this.frontBufferTarget.width),
-      cV / Math.max(1, this.frontBufferTarget.height),
-    );
-    this.radiosityCompositeMaterial.uniforms.uUvScale.value.set(
-      (maxU - offU) / Math.max(1, this.viewportWidth),
-      (maxV - offV) / Math.max(1, this.viewportHeight),
-    );
+    this.renderFullscreen(renderer, this.composeTarget, this.radiosityCompositeMaterial, false);
     this.renderFullscreen(renderer, this.composeTarget, this.radiosityCompositeMaterial, false);
   }
 
   runBlurStage(renderer) {
     if (!this.runtime.enableBlur) return;
 
-    // VCS trails sample the original captured front buffer, not a colour-filtered or radiosity-fed result.
+    // VCSPC BlurOverlay always samples the original captured current frame.
     this.copyTarget(renderer, this.frontBufferTarget, this.blurCurrentTarget, true);
 
     this.accumulationMaterial.uniforms.uTex.value = this.blurCurrentTarget.texture;
@@ -602,23 +550,23 @@ void main() {
     setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
 
     const blurOffset = this.runtime.blurOffset;
-    const blurIntensity = this.runtime.blurIntensity;
     const offsets = [
       new THREE.Vector2(blurOffset / this.blurCurrentTarget.width, 0),
       new THREE.Vector2(blurOffset / this.blurCurrentTarget.width, blurOffset / this.blurCurrentTarget.height),
       new THREE.Vector2(0, blurOffset / this.blurCurrentTarget.height),
     ];
-    setMaterialBlendConstant(this.accumulationMaterial, blurIntensity);
+    setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
     for (const offset of offsets) {
       this.accumulationMaterial.uniforms.uUvOffset.value.copy(offset);
       this.renderFullscreen(renderer, this.composeTarget, this.accumulationMaterial, false);
     }
 
     setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
+    // VCSPC adds the blur tint with full-strength additive color; alpha is only used for blur strength.
     this.solidColorMaterial.uniforms.uOpacity.value = 1;
     this.renderFullscreen(renderer, this.composeTarget, this.solidColorMaterial, false);
 
-    if (this.runtime.enableHistory && this.hasHistory) {
+    if (this.runtime.enableTrails && this.hasHistory) {
       this.accumulationMaterial.uniforms.uTex.value = this.blurHistoryTarget.texture;
       this.accumulationMaterial.uniforms.uUvOffset.value.set(0, 0);
       this.accumulationMaterial.uniforms.uColor.value.set(1, 1, 1);
@@ -632,7 +580,7 @@ void main() {
       case POSTFX_DEBUG_VIEW.SCENE:
         this.presentTarget(renderer, this.sceneTarget, true);
         return;
-      case POSTFX_DEBUG_VIEW.FRONTBUFFER:
+      case POSTFX_DEBUG_VIEW.CURRENT_FRAME:
         this.presentTarget(renderer, this.frontBufferTarget, true);
         return;
       case POSTFX_DEBUG_VIEW.RADIOSITY_BLUR_A:
@@ -641,8 +589,8 @@ void main() {
       case POSTFX_DEBUG_VIEW.RADIOSITY_BLUR_B:
         this.presentTarget(renderer, this.radiosityTargetB, true);
         return;
-      case POSTFX_DEBUG_VIEW.RADIOSITY_RESULT:
-        this.presentTarget(renderer, this.frontBufferTarget, true);
+      case POSTFX_DEBUG_VIEW.AFTER_RADIOSITY:
+        this.presentTarget(renderer, this.debugRadiosityTarget, true);
         return;
       case POSTFX_DEBUG_VIEW.BLUR_SOURCE:
         this.presentTarget(renderer, this.blurCurrentTarget, true);
@@ -668,8 +616,7 @@ void main() {
     this.updateRuntime(runtimeContext);
 
     this.primeFrontBuffer(renderer);
-    this.runColourFilterStage(renderer);
-    this.captureDebugStage(renderer, this.composeTarget, this.debugColourFilterTarget);
+    this.captureDebugStage(renderer, this.frontBufferTarget, this.debugCurrentFrameTarget);
     this.runRadiosityStage(renderer);
     this.captureDebugStage(renderer, this.composeTarget, this.debugRadiosityTarget);
     this.runBlurStage(renderer);
@@ -679,7 +626,7 @@ void main() {
 
   endFrame(renderer) {
     if (!this.enabled || !renderer?.setRenderTarget || !this.composeTarget || !this.blurHistoryTarget) return;
-    if (!this.runtime.enableBlur || !this.runtime.enableHistory) {
+    if (!this.runtime.enableBlur) {
       this.resetHistory();
       return;
     }
@@ -696,10 +643,10 @@ void main() {
     return [
       {
         id: 'pre-radiosity',
-        label: 'Pre Radiosity',
-        texture: this.debugColourFilterTarget?.texture || null,
-        width: this.debugColourFilterTarget?.width || 0,
-        height: this.debugColourFilterTarget?.height || 0,
+        label: 'Current Frame',
+        texture: this.debugCurrentFrameTarget?.texture || null,
+        width: this.debugCurrentFrameTarget?.width || 0,
+        height: this.debugCurrentFrameTarget?.height || 0,
       },
       {
         id: 'radiosity',
@@ -710,7 +657,7 @@ void main() {
       },
       {
         id: 'blur',
-        label: 'After Blur',
+        label: 'After BlurOverlay',
         texture: this.debugBlurTarget?.texture || null,
         width: this.debugBlurTarget?.width || 0,
         height: this.debugBlurTarget?.height || 0,
@@ -727,7 +674,7 @@ void main() {
     this.radiosityTargetB?.dispose();
     this.blurCurrentTarget?.dispose();
     this.blurHistoryTarget?.dispose();
-    this.debugColourFilterTarget?.dispose();
+    this.debugCurrentFrameTarget?.dispose();
     this.debugRadiosityTarget?.dispose();
     this.debugBlurTarget?.dispose();
     this.copyMaterial.dispose();
@@ -735,8 +682,8 @@ void main() {
     this.radiosityBlurMaterial.dispose();
     this.accumulationMaterial.dispose();
     this.additiveMaterial.dispose();
-    this.colourFilterAddMaterial.dispose();
     this.radiosityCompositeMaterial.dispose();
+    this.radiosityThresholdMaterial.dispose();
     this.solidColorMaterial.dispose();
     this.quad.geometry.dispose();
   }

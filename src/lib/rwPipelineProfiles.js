@@ -53,13 +53,11 @@ export const RW_PIPELINE_SELECTION_DEFAULTS = Object.freeze({
       blurOffset: 2.1,
       blurIntensity: (39.0 * 0.8) / 255.0,
       historyIntensity: 32 / 255.0,
-      enableColourFilter: true,
+      enableTrails: true,
+      enableColorFilter: false,
       enableRadiosity: true,
       enableBlur: true,
-      enableHistory: true,
       debugView: 'final',
-      filterColor1: Object.freeze({ r: 128, g: 128, b: 128, a: 255 }),
-      filterColor2: Object.freeze({ r: 0, g: 0, b: 0, a: 0 }),
     }),
   }),
 });
@@ -131,22 +129,6 @@ export function cloneRWPipelineSelection(selection = RW_PIPELINE_SELECTION_DEFAU
         config: {
           ...(defaultSelection.config || {}),
           ...(selection?.config || {}),
-          ...(defaultSelection.config?.filterColor1 || selection?.config?.filterColor1
-            ? {
-              filterColor1: {
-                ...(defaultSelection.config?.filterColor1 || {}),
-                ...(selection?.config?.filterColor1 || {}),
-              },
-            }
-            : {}),
-          ...(defaultSelection.config?.filterColor2 || selection?.config?.filterColor2
-            ? {
-              filterColor2: {
-                ...(defaultSelection.config?.filterColor2 || {}),
-                ...(selection?.config?.filterColor2 || {}),
-              },
-            }
-            : {}),
         },
       }
       : {}),

@@ -201,6 +201,12 @@ function buildBelowHorizonColor(hour, minute) {
   return makeRgb(value, value, value);
 }
 
+function buildPostFxFromBlur(entry) {
+  const blur = entry?.blur || makeRgb(0, 0, 0);
+  const alpha = Number.isFinite(Number(entry?.blurAlpha)) ? Number(entry.blurAlpha) : 0;
+  return makeRgba(blur.r, blur.g, blur.b, alpha);
+}
+
 function sanitizeLines(text) {
   return String(text || '')
     .split(/\r?\n/)
@@ -300,6 +306,8 @@ export function sampleTimecyc(data, options = {}) {
   }
   const fogColor = buildFogColor(current);
   const belowHorizonColor = buildBelowHorizonColor(hour, minute);
+  const postfx1 = buildPostFxFromBlur(current);
+  const postfx2 = buildPostFxFromBlur(current);
   const flagsA = data.weatherFlags?.[weatherA] || 0;
   const flagsB = data.weatherFlags?.[weatherB] || 0;
   let cloudCoverage = (flagsA & WEATHER_FLAG.SUNNY) ? 0 : (1 - weatherBlend);
@@ -331,6 +339,8 @@ export function sampleTimecyc(data, options = {}) {
     extraSunnyness,
     values: {
       ...current,
+      postfx1,
+      postfx2,
       fogColor,
       belowHorizonColor,
     },
