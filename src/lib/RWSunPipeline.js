@@ -386,7 +386,8 @@ export class RWSunPipeline {
       ? (1 + (bloomBrightnessScale * Math.max(0.5, spriteSize)))
       : 1;
     const fadeStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 30;
-    const scaleStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 0.12;
+    const bigBloomFadeStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 18;
+    const bigBloomScaleStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 0.08;
     if (settings.debugBypassFade) {
       this.coreFadeAlpha = coreTargetAlpha;
       this.coronaFadeAlpha = coronaTargetAlpha;
@@ -399,23 +400,18 @@ export class RWSunPipeline {
       if (this.coronaFadeAlpha < coronaTargetAlpha) this.coronaFadeAlpha = Math.min(this.coronaFadeAlpha + fadeStep, coronaTargetAlpha);
       else if (this.coronaFadeAlpha > coronaTargetAlpha) this.coronaFadeAlpha = Math.max(this.coronaFadeAlpha - fadeStep, coronaTargetAlpha);
 
-      if (!bloomEligible) {
-        this.bigBloomFadeAlpha = 0;
-        this.bigBloomScale = 1;
-      } else {
-        if (this.bigBloomFadeAlpha < bloomTargetAlpha) this.bigBloomFadeAlpha = Math.min(this.bigBloomFadeAlpha + fadeStep, bloomTargetAlpha);
-        else if (this.bigBloomFadeAlpha > bloomTargetAlpha) this.bigBloomFadeAlpha = Math.max(this.bigBloomFadeAlpha - fadeStep, bloomTargetAlpha);
+      if (this.bigBloomFadeAlpha < bloomTargetAlpha) this.bigBloomFadeAlpha = Math.min(this.bigBloomFadeAlpha + bigBloomFadeStep, bloomTargetAlpha);
+      else if (this.bigBloomFadeAlpha > bloomTargetAlpha) this.bigBloomFadeAlpha = Math.max(this.bigBloomFadeAlpha - bigBloomFadeStep, bloomTargetAlpha);
 
-        if (this.bigBloomScale < bloomTargetScale) this.bigBloomScale = Math.min(this.bigBloomScale + scaleStep, bloomTargetScale);
-        else if (this.bigBloomScale > bloomTargetScale) this.bigBloomScale = Math.max(this.bigBloomScale - scaleStep, bloomTargetScale);
-      }
+      if (this.bigBloomScale < bloomTargetScale) this.bigBloomScale = Math.min(this.bigBloomScale + bigBloomScaleStep, bloomTargetScale);
+      else if (this.bigBloomScale > bloomTargetScale) this.bigBloomScale = Math.max(this.bigBloomScale - bigBloomScaleStep, bloomTargetScale);
     }
 
     this.applySpriteState(camera, timecycleSample, settings, timeMs);
 
     return {
       ...sunMetrics,
-      bigSunBloom: bloomEligible && this.bigBloomFadeAlpha > 0.0001,
+      bigSunBloom: this.bigBloomFadeAlpha > 0.0001,
       bloomEligible,
       screenCenterBloomFactor,
       facingBloomFactor,
