@@ -393,6 +393,10 @@ export class RWPipelineController {
   hasActivePostFx() {
     return Boolean(this.activeProfiles.get(RW_PIPELINE_CATEGORY.POSTFX) && this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX));
   }
+
+  getActiveEffect(category) {
+    return this.activeEffects.get(category) || null;
+  }
 }
 
 export default RWPipelineController;

@@ -13,11 +13,14 @@ class DFFReader {
     this.position = 0;
   }
 
-  parse(arraybuffer) {
-    this.data = new DataView(arraybuffer);
+  parse(input) {
+    const view = input instanceof Uint8Array
+      ? input
+      : new Uint8Array(input);
+    this.data = new DataView(view.buffer, view.byteOffset, view.byteLength);
     this.position = 0;
 
-    while (this.position < arraybuffer.byteLength) {
+    while (this.position < view.byteLength) {
       const clump = this.readChunk(ChunkType.CHUNK_CLUMP);
       if (clump) return clump;
     }

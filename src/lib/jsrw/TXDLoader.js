@@ -61,9 +61,14 @@ class TXDLoader extends THREE.Loader {
     }, onProgress, onError);
   }
 
-  parse(arraybuffer) {
-    this.arraybuffer = arraybuffer;
-    this.data = new DataView(arraybuffer);
+  parse(input) {
+    const view = input instanceof Uint8Array
+      ? input
+      : new Uint8Array(input);
+    this.arraybuffer = view.buffer;
+    this.byteOffset = view.byteOffset;
+    this.byteLength = view.byteLength;
+    this.data = new DataView(view.buffer, view.byteOffset, view.byteLength);
     this.position = 0;
     this.textures = new Map();
 
@@ -184,7 +189,7 @@ class TXDLoader extends THREE.Loader {
     }
 
     const dataSize = this.readUInt32();
-    const rawData = new Uint8Array(this.arraybuffer.slice(this.position, this.position + dataSize));
+    const rawData = new Uint8Array(this.arraybuffer, this.byteOffset + this.position, dataSize);
     this.position += dataSize;
 
     const compressionName = getCompressionName(compression, d3dFormat);

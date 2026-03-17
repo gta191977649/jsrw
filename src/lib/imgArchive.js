@@ -60,6 +60,7 @@ export class IMGParser {
   constructor() {
     this.assets = new Map();
     this.assetSources = new Map();
+    this.archives = [];
   }
 
   async appendArchive(imgFile, dirFile, sourcePath = '') {
@@ -69,7 +70,11 @@ export class IMGParser {
 
     const [imgBuffer, dirBuffer] = await Promise.all([imgFile.arrayBuffer(), dirFile.arrayBuffer()]);
     const entries = parseDirEntries(dirBuffer);
-    const imgBytes = new Uint8Array(imgBuffer);
+    const archiveIndex = this.archives.length;
+    this.archives.push({
+      buffer: imgBuffer,
+      bytes: new Uint8Array(imgBuffer),
+    });
 
     let added = 0;
     let overridden = 0;
@@ -77,12 +82,15 @@ export class IMGParser {
 
     for (const entry of entries) {
       const start = entry.start;
-      const end = Math.min(imgBytes.byteLength, start + entry.size);
+      const end = Math.min(imgBuffer.byteLength, start + entry.size);
       if (start >= end) continue;
 
       const exists = this.assets.has(entry.name);
-      const slice = imgBytes.slice(start, end);
-      this.assets.set(entry.name, slice);
+      this.assets.set(entry.name, {
+        archiveIndex,
+        start,
+        end,
+      });
       this.assetSources.set(entry.name, normalizedSource);
 
       if (exists) overridden += 1;
@@ -93,7 +101,12 @@ export class IMGParser {
   }
 
   getAssetBytes(name) {
-    return this.assets.get(normalizePath(name));
+    const record = this.assets.get(normalizePath(name));
+    if (!record) return undefined;
+    if (record instanceof Uint8Array) return record;
+    const archive = this.archives[record.archiveIndex];
+    if (!archive?.bytes) return undefined;
+    return archive.bytes.subarray(record.start, record.end);
   }
 
   getAssetSource(name) {

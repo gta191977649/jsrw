@@ -12,6 +12,21 @@ const VCS_BLUR_INTENSITY = (39.0 * 0.8) / 255.0;
 const VCS_HISTORY_INTENSITY = 32 / 255.0;
 const VCS_TRAILS_LIMIT = 80;
 const VCS_TRAILS_INTENSITY = 38;
+const POSTFX_DEBUG_VIEW = Object.freeze({
+  FINAL: 'final',
+  SCENE: 'scene',
+  FRONTBUFFER: 'frontbuffer',
+  RADIOSITY_BLUR_A: 'radiosity-blur-a',
+  RADIOSITY_BLUR_B: 'radiosity-blur-b',
+  RADIOSITY_RESULT: 'radiosity-result',
+  BLUR_SOURCE: 'blur-source',
+  HISTORY: 'history',
+  BLUR_TINT: 'blur-tint',
+});
+
+function getPostFxDebugViewOrDefault(value) {
+  return Object.values(POSTFX_DEBUG_VIEW).includes(value) ? value : POSTFX_DEBUG_VIEW.FINAL;
+}
 
 function createRenderTarget(width, height, options = {}) {
   const target = new THREE.WebGLRenderTarget(width, height, {
@@ -22,6 +37,10 @@ function createRenderTarget(width, height, options = {}) {
   });
   target.texture.colorSpace = THREE.NoColorSpace;
   target.texture.generateMipmaps = false;
+  target.texture.userData = {
+    ...(target.texture.userData || {}),
+    rwRenderTarget: target,
+  };
   return target;
 }
 
@@ -87,6 +106,9 @@ export class RWPostFxPipeline {
     this.radiosityTargetB = null;
     this.blurCurrentTarget = null;
     this.blurHistoryTarget = null;
+    this.debugColourFilterTarget = null;
+    this.debugRadiosityTarget = null;
+    this.debugBlurTarget = null;
 
     this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 2);
     this.camera.position.z = 1;
@@ -261,6 +283,7 @@ void main() {
       enableRadiosity: true,
       enableBlur: true,
       enableHistory: true,
+      debugView: POSTFX_DEBUG_VIEW.FINAL,
     };
     this.runtime = {
       filterColor1Rgb: new THREE.Color(1, 1, 1),
@@ -277,6 +300,7 @@ void main() {
       enableRadiosity: true,
       enableBlur: true,
       enableHistory: true,
+      debugView: POSTFX_DEBUG_VIEW.FINAL,
     };
     this.setConfig(options);
   }
@@ -291,17 +315,49 @@ void main() {
   }
 
   setConfig(config = {}) {
-    this.configRuntime.radiosityLimit = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsLimit, VCS_TRAILS_LIMIT), 0, 255);
-    this.configRuntime.radiosityIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsIntensity, SKYGFX_RADIOSITY_INTENSITY), 0, 63);
-    this.configRuntime.blurOffset = Math.max(0, getFiniteOrDefault(config.blurOffset, VCS_BLUR_OFFSET));
-    this.configRuntime.blurIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.blurIntensity, VCS_BLUR_INTENSITY), 0, 1);
-    this.configRuntime.historyIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.historyIntensity, VCS_HISTORY_INTENSITY), 0, 1);
-    this.configRuntime.enableColourFilter = getBooleanOrDefault(config.enableColourFilter, true);
-    this.configRuntime.enableRadiosity = getBooleanOrDefault(config.enableRadiosity, true);
-    this.configRuntime.enableBlur = getBooleanOrDefault(config.enableBlur, true);
-    this.configRuntime.enableHistory = getBooleanOrDefault(config.enableHistory, true);
+    const nextRadiosityLimit = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsLimit, VCS_TRAILS_LIMIT), 0, 255);
+    const nextRadiosityIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsIntensity, SKYGFX_RADIOSITY_INTENSITY), 0, 63);
+    const nextBlurOffset = Math.max(0, getFiniteOrDefault(config.blurOffset, VCS_BLUR_OFFSET));
+    const nextBlurIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.blurIntensity, VCS_BLUR_INTENSITY), 0, 1);
+    const nextHistoryIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.historyIntensity, VCS_HISTORY_INTENSITY), 0, 1);
+    const nextEnableColourFilter = getBooleanOrDefault(config.enableColourFilter, true);
+    const nextEnableRadiosity = getBooleanOrDefault(config.enableRadiosity, true);
+    const nextEnableBlur = getBooleanOrDefault(config.enableBlur, true);
+    const nextEnableHistory = getBooleanOrDefault(config.enableHistory, true);
+    const nextDebugView = getPostFxDebugViewOrDefault(config.debugView);
     const filterColor1 = getColorConfig(config, 'filterColor1', 255);
     const filterColor2 = getColorConfig(config, 'filterColor2', 0);
+    const configChanged = (
+      this.configRuntime.radiosityLimit !== nextRadiosityLimit
+      || this.configRuntime.radiosityIntensity !== nextRadiosityIntensity
+      || this.configRuntime.blurOffset !== nextBlurOffset
+      || this.configRuntime.blurIntensity !== nextBlurIntensity
+      || this.configRuntime.historyIntensity !== nextHistoryIntensity
+      || this.configRuntime.enableColourFilter !== nextEnableColourFilter
+      || this.configRuntime.enableRadiosity !== nextEnableRadiosity
+      || this.configRuntime.enableBlur !== nextEnableBlur
+      || this.configRuntime.enableHistory !== nextEnableHistory
+      || this.configRuntime.debugView !== nextDebugView
+      || Math.round(this.configRuntime.filterColor1Rgb.r * 255) !== filterColor1.r
+      || Math.round(this.configRuntime.filterColor1Rgb.g * 255) !== filterColor1.g
+      || Math.round(this.configRuntime.filterColor1Rgb.b * 255) !== filterColor1.b
+      || Math.round(this.configRuntime.filterColor2Rgb.r * 255) !== filterColor2.r
+      || Math.round(this.configRuntime.filterColor2Rgb.g * 255) !== filterColor2.g
+      || Math.round(this.configRuntime.filterColor2Rgb.b * 255) !== filterColor2.b
+      || Math.round(this.configRuntime.filterColor1Alpha * 255) !== filterColor1.a
+      || Math.round(this.configRuntime.filterColor2Alpha * 255) !== filterColor2.a
+    );
+
+    this.configRuntime.radiosityLimit = nextRadiosityLimit;
+    this.configRuntime.radiosityIntensity = nextRadiosityIntensity;
+    this.configRuntime.blurOffset = nextBlurOffset;
+    this.configRuntime.blurIntensity = nextBlurIntensity;
+    this.configRuntime.historyIntensity = nextHistoryIntensity;
+    this.configRuntime.enableColourFilter = nextEnableColourFilter;
+    this.configRuntime.enableRadiosity = nextEnableRadiosity;
+    this.configRuntime.enableBlur = nextEnableBlur;
+    this.configRuntime.enableHistory = nextEnableHistory;
+    this.configRuntime.debugView = nextDebugView;
     this.configRuntime.filterColor1Rgb.setRGB(
       filterColor1.r / 255,
       filterColor1.g / 255,
@@ -332,7 +388,9 @@ void main() {
     this.runtime.enableRadiosity = this.configRuntime.enableRadiosity;
     this.runtime.enableBlur = this.configRuntime.enableBlur;
     this.runtime.enableHistory = this.configRuntime.enableHistory;
+    this.runtime.debugView = this.configRuntime.debugView;
 
+    if (configChanged) this.resetHistory();
     if (!this.runtime.enableHistory) this.resetHistory();
   }
 
@@ -350,6 +408,9 @@ void main() {
       && this.radiosityTargetB
       && this.blurCurrentTarget
       && this.blurHistoryTarget
+      && this.debugColourFilterTarget
+      && this.debugRadiosityTarget
+      && this.debugBlurTarget
     ) {
       return;
     }
@@ -364,6 +425,9 @@ void main() {
     this.radiosityTargetB?.dispose();
     this.blurCurrentTarget?.dispose();
     this.blurHistoryTarget?.dispose();
+    this.debugColourFilterTarget?.dispose();
+    this.debugRadiosityTarget?.dispose();
+    this.debugBlurTarget?.dispose();
 
     this.sceneTarget = createRenderTarget(nextWidth, nextHeight, { depthBuffer: true });
     this.composeTarget = createRenderTarget(nextWidth, nextHeight);
@@ -373,6 +437,9 @@ void main() {
     this.radiosityTargetB = createRenderTarget(nextWidth, nextHeight);
     this.blurCurrentTarget = createRenderTarget(nextWidth, nextHeight);
     this.blurHistoryTarget = createRenderTarget(nextWidth, nextHeight);
+    this.debugColourFilterTarget = createRenderTarget(nextWidth, nextHeight);
+    this.debugRadiosityTarget = createRenderTarget(nextWidth, nextHeight);
+    this.debugBlurTarget = createRenderTarget(nextWidth, nextHeight);
     this.resetHistory();
   }
 
@@ -390,6 +457,7 @@ void main() {
     this.runtime.enableRadiosity = this.configRuntime.enableRadiosity;
     this.runtime.enableBlur = this.configRuntime.enableBlur;
     this.runtime.enableHistory = this.configRuntime.enableHistory;
+    this.runtime.debugView = this.configRuntime.debugView;
 
     const values = runtimeContext?.timecycleCurrent?.values;
     if (!values || !this.runtime.enableColourFilter || !values.blur) {
@@ -476,8 +544,9 @@ void main() {
     this.renderFullscreen(renderer, this.composeTarget, this.colourFilterAddMaterial, false);
   }
 
-  updateFrontBuffer(renderer) {
-    this.copyTarget(renderer, this.composeTarget, this.frontBufferTarget, true);
+  captureDebugStage(renderer, source, destination) {
+    if (!source || !destination) return;
+    this.copyTarget(renderer, source, destination, true);
   }
 
   runRadiosityStage(renderer) {
@@ -524,15 +593,16 @@ void main() {
   runBlurStage(renderer) {
     if (!this.runtime.enableBlur) return;
 
-    this.copyTarget(renderer, this.composeTarget, this.blurCurrentTarget, true);
+    // VCS trails sample the original captured front buffer, not a colour-filtered or radiosity-fed result.
+    this.copyTarget(renderer, this.frontBufferTarget, this.blurCurrentTarget, true);
 
     this.accumulationMaterial.uniforms.uTex.value = this.blurCurrentTarget.texture;
     this.accumulationMaterial.uniforms.uColor.value.set(1, 1, 1);
     this.accumulationMaterial.uniforms.uOpacity.value = 1;
     setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
 
-    const blurOffset = VCS_BLUR_OFFSET;
-    const blurIntensity = VCS_BLUR_INTENSITY;
+    const blurOffset = this.runtime.blurOffset;
+    const blurIntensity = this.runtime.blurIntensity;
     const offsets = [
       new THREE.Vector2(blurOffset / this.blurCurrentTarget.width, 0),
       new THREE.Vector2(blurOffset / this.blurCurrentTarget.width, blurOffset / this.blurCurrentTarget.height),
@@ -558,7 +628,36 @@ void main() {
   }
 
   present(renderer) {
-    this.presentTarget(renderer, this.composeTarget, true);
+    switch (this.runtime.debugView) {
+      case POSTFX_DEBUG_VIEW.SCENE:
+        this.presentTarget(renderer, this.sceneTarget, true);
+        return;
+      case POSTFX_DEBUG_VIEW.FRONTBUFFER:
+        this.presentTarget(renderer, this.frontBufferTarget, true);
+        return;
+      case POSTFX_DEBUG_VIEW.RADIOSITY_BLUR_A:
+        this.presentTarget(renderer, this.radiosityTargetA, true);
+        return;
+      case POSTFX_DEBUG_VIEW.RADIOSITY_BLUR_B:
+        this.presentTarget(renderer, this.radiosityTargetB, true);
+        return;
+      case POSTFX_DEBUG_VIEW.RADIOSITY_RESULT:
+        this.presentTarget(renderer, this.frontBufferTarget, true);
+        return;
+      case POSTFX_DEBUG_VIEW.BLUR_SOURCE:
+        this.presentTarget(renderer, this.blurCurrentTarget, true);
+        return;
+      case POSTFX_DEBUG_VIEW.HISTORY:
+        this.presentTarget(renderer, this.blurHistoryTarget, true);
+        return;
+      case POSTFX_DEBUG_VIEW.BLUR_TINT:
+        setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
+        this.solidColorMaterial.uniforms.uOpacity.value = 1;
+        this.renderFullscreen(renderer, null, this.solidColorMaterial, true);
+        return;
+      default:
+        this.presentTarget(renderer, this.composeTarget, true);
+    }
   }
 
   applyVcsPostFx(renderer, runtimeContext = {}) {
@@ -569,15 +668,21 @@ void main() {
     this.updateRuntime(runtimeContext);
 
     this.primeFrontBuffer(renderer);
-    this.copyTarget(renderer, this.frontBufferTarget, this.composeTarget, true);
+    this.runColourFilterStage(renderer);
+    this.captureDebugStage(renderer, this.composeTarget, this.debugColourFilterTarget);
     this.runRadiosityStage(renderer);
-    this.updateFrontBuffer(renderer);
+    this.captureDebugStage(renderer, this.composeTarget, this.debugRadiosityTarget);
     this.runBlurStage(renderer);
+    this.captureDebugStage(renderer, this.composeTarget, this.debugBlurTarget);
     this.present(renderer);
   }
 
   endFrame(renderer) {
     if (!this.enabled || !renderer?.setRenderTarget || !this.composeTarget || !this.blurHistoryTarget) return;
+    if (!this.runtime.enableBlur || !this.runtime.enableHistory) {
+      this.resetHistory();
+      return;
+    }
     this.copyTarget(renderer, this.composeTarget, this.blurHistoryTarget, true);
     this.hasHistory = true;
   }
@@ -585,6 +690,32 @@ void main() {
   render(renderer, runtimeContext = {}) {
     this.applyVcsPostFx(renderer, runtimeContext);
     this.endFrame(renderer);
+  }
+
+  getDebugPreviewTextures() {
+    return [
+      {
+        id: 'pre-radiosity',
+        label: 'Pre Radiosity',
+        texture: this.debugColourFilterTarget?.texture || null,
+        width: this.debugColourFilterTarget?.width || 0,
+        height: this.debugColourFilterTarget?.height || 0,
+      },
+      {
+        id: 'radiosity',
+        label: 'After Radiosity',
+        texture: this.debugRadiosityTarget?.texture || null,
+        width: this.debugRadiosityTarget?.width || 0,
+        height: this.debugRadiosityTarget?.height || 0,
+      },
+      {
+        id: 'blur',
+        label: 'After Blur',
+        texture: this.debugBlurTarget?.texture || null,
+        width: this.debugBlurTarget?.width || 0,
+        height: this.debugBlurTarget?.height || 0,
+      },
+    ];
   }
 
   dispose() {
@@ -596,6 +727,9 @@ void main() {
     this.radiosityTargetB?.dispose();
     this.blurCurrentTarget?.dispose();
     this.blurHistoryTarget?.dispose();
+    this.debugColourFilterTarget?.dispose();
+    this.debugRadiosityTarget?.dispose();
+    this.debugBlurTarget?.dispose();
     this.copyMaterial.dispose();
     this.presentMaterial.dispose();
     this.radiosityBlurMaterial.dispose();

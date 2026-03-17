@@ -30,10 +30,10 @@ class DFFLoader extends THREE.Loader {
     }, onProgress, onError);
   }
 
-  parse(arraybuffer) {
+  parse(input) {
     const reader = new DFFReader();
     const group = new THREE.Group();
-    const clump = reader.parse(arraybuffer);
+    const clump = reader.parse(input);
 
     if (!clump) {
       console.warn('DFFLoader: No clump found in file');

@@ -57,6 +57,7 @@ export const RW_PIPELINE_SELECTION_DEFAULTS = Object.freeze({
       enableRadiosity: true,
       enableBlur: true,
       enableHistory: true,
+      debugView: 'final',
       filterColor1: Object.freeze({ r: 128, g: 128, b: 128, a: 255 }),
       filterColor2: Object.freeze({ r: 0, g: 0, b: 0, a: 0 }),
     }),

@@ -72,7 +72,9 @@ const MAX_FAILED_MODELS = 5000;
 const DEFAULT_SCENE_BACKGROUND = new THREE.Color(0x8ea9b5);
 const CHUNK_ACTIVE_MARGIN = 384;
 const CHUNK_SPHERE_PADDING = WORLD_CHUNK_SIZE * 0.75;
-const ENABLE_WORLD_INSTANCING = false;
+const ENABLE_WORLD_INSTANCING = true;
+const STREAMING_BUILD_PLACEMENT_BUDGET = 8;
+const STREAMING_BUILD_FRAME_BUDGET_MS = 8;
 const RW_DISTANCE_FADE_WINDOW = 20;
 const RW_STREAM_ALPHA_PER_SECOND = 3.2;
 const RW_FADE_EPSILON = 0.001;
@@ -113,6 +115,16 @@ const INSTANCE_SELECTION_MATERIAL = new THREE.MeshBasicMaterial({
   fog: false,
   toneMapped: false,
 });
+
+function createResourceCacheState() {
+  return {
+    rawAssetCache: new Map(),
+    parsedTxdCache: new Map(),
+    modelTemplateCache: new Map(),
+    missingDff: new Set(),
+    missingTxd: new Set(),
+  };
+}
 
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
@@ -624,6 +636,16 @@ function App() {
   const worldGameVersionRef = useRef('VCS');
   const buildTokenRef = useRef(0);
   const buildActiveRef = useRef(false);
+  const resourceCacheRef = useRef(createResourceCacheState());
+  const streamingBuildRef = useRef({
+    token: 0,
+    running: false,
+    queue: [],
+    queuedKeys: new Set(),
+    context: null,
+    startedAt: 0,
+    firstChunkReadyAt: 0,
+  });
   const rwPipelineControllerRef = useRef(new RWPipelineController());
   const lastPipelineSelectionSignatureRef = useRef('');
 
@@ -655,6 +677,8 @@ function App() {
     showLods: true,
     forceLodOnly: false,
     showTobjs: false,
+    streamingBuild: true,
+    backgroundPreloadRadius: 1.5,
     showGrid: true,
     showAxes: false,
     wireframe: false,
@@ -694,6 +718,8 @@ function App() {
     totalChunks: 0,
     instancedBatches: 0,
     instancedItems: 0,
+    queuedChunks: 0,
+    readyChunks: 0,
   });
   const [consoleLines, setConsoleLines] = useState([]);
   const [failedModels, setFailedModels] = useState([]);
@@ -866,6 +892,16 @@ function App() {
     rwWaterPipelineRef.current?.dispose();
     rwWaterPipelineRef.current = null;
     timecycleDataRef.current = null;
+    resourceCacheRef.current = createResourceCacheState();
+    streamingBuildRef.current = {
+      token: buildTokenRef.current,
+      running: false,
+      queue: [],
+      queuedKeys: new Set(),
+      context: null,
+      startedAt: 0,
+      firstChunkReadyAt: 0,
+    };
     timecycleStateRef.current = {
       sourcePath: '',
       data: null,
@@ -921,6 +957,8 @@ function App() {
       totalChunks: 0,
       instancedBatches: 0,
       instancedItems: 0,
+      queuedChunks: 0,
+      readyChunks: 0,
     }));
     setFailedModels([]);
     pushConsoleLine('info', 'World cleared');
@@ -2754,6 +2792,54 @@ function App() {
       const gl = imguiGlRef.current;
       if (!gl || !textureSource) return null;
 
+      const renderer = rendererRef.current;
+      const renderTarget = textureSource?.userData?.rwRenderTarget || null;
+      if (renderer?.isWebGLRenderer && renderTarget) {
+        const image = textureSource?.image ?? textureSource;
+        const width = image?.width ?? renderTarget.width ?? 0;
+        const height = image?.height ?? renderTarget.height ?? 0;
+        if (!width || !height) return null;
+
+        let texture = imguiTextureCacheRef.current.get(textureSource) || null;
+        if (!texture) {
+          texture = gl.createTexture();
+          if (!texture) return null;
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          imguiTextureCacheRef.current.set(textureSource, texture);
+          imguiTextureListRef.current.push(texture);
+        } else {
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+        }
+
+        const pixelCount = width * height * 4;
+        const previousBuffer = textureSource.userData.rwImguiPreviewPixels;
+        const previousFlipped = textureSource.userData.rwImguiPreviewPixelsFlipped;
+        const pixels = previousBuffer instanceof Uint8Array && previousBuffer.length === pixelCount
+          ? previousBuffer
+          : new Uint8Array(pixelCount);
+        const flipped = previousFlipped instanceof Uint8Array && previousFlipped.length === pixelCount
+          ? previousFlipped
+          : new Uint8Array(pixelCount);
+        renderer.readRenderTargetPixels(renderTarget, 0, 0, width, height, pixels);
+        const rowSize = width * 4;
+        for (let y = 0; y < height; y += 1) {
+          const srcOffset = y * rowSize;
+          const dstOffset = (height - y - 1) * rowSize;
+          flipped.set(pixels.subarray(srcOffset, srcOffset + rowSize), dstOffset);
+        }
+        textureSource.userData.rwImguiPreviewPixels = pixels;
+        textureSource.userData.rwImguiPreviewPixelsFlipped = flipped;
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, flipped);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        return texture;
+      }
+
       const cached = imguiTextureCacheRef.current.get(textureSource);
       if (cached) return cached;
 
@@ -4375,6 +4461,17 @@ function App() {
                     ImGui.TextWrapped(`Warning: ${status.warning}`);
                   }
                   if (category === RW_PIPELINE_CATEGORY.POSTFX) {
+                    const postFxDebugViewOptions = [
+                      ['final', 'Final'],
+                      ['scene', 'Scene'],
+                      ['frontbuffer', 'FrontBuffer'],
+                      ['radiosity-blur-a', 'Radiosity Blur A'],
+                      ['radiosity-blur-b', 'Radiosity Blur B'],
+                      ['radiosity-result', 'Radiosity Result'],
+                      ['blur-source', 'Blur Source'],
+                      ['history', 'History'],
+                      ['blur-tint', 'Blur Tint'],
+                    ];
                     selection.config ||= {
                       ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config,
                       filterColor1: { ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config.filterColor1 },
@@ -4422,6 +4519,42 @@ function App() {
                       `Enable History##${category}`,
                       (value = selection.config.enableHistory) => (selection.config.enableHistory = value),
                     );
+                    selection.config.debugView ||= 'final';
+                    ImGui.Text('Debug View');
+                    ImGui.SameLine();
+                    ImGui.SetNextItemWidth(190);
+                    if (ImGui.BeginCombo(`##postfx-debug-view-${category}`, postFxDebugViewOptions.find(([value]) => value === selection.config.debugView)?.[1] || 'Final')) {
+                      for (const [value, label] of postFxDebugViewOptions) {
+                        const selected = selection.config.debugView === value;
+                        if (ImGui.Selectable(label, selected)) selection.config.debugView = value;
+                        if (selected) ImGui.SetItemDefaultFocus();
+                      }
+                      ImGui.EndCombo();
+                    }
+                    const postFxEffect = rwPipelineControllerRef.current?.getActiveEffect?.(RW_PIPELINE_CATEGORY.POSTFX) || null;
+                    const postFxDebugPreviews = postFxEffect?.getDebugPreviewTextures?.() || [];
+                    if (postFxDebugPreviews.length > 0) {
+                      ImGui.Separator();
+                      ImGui.Text('Stage Previews');
+                      ImGui.TextDisabled('SKYGFX VCS order: Pre Radiosity -> After Radiosity -> After Blur');
+                      const previewWidth = Math.max(120, Math.min(220, (ImGui.GetContentRegionAvail().x - 16) / 3));
+                      for (let i = 0; i < postFxDebugPreviews.length; i += 1) {
+                        const preview = postFxDebugPreviews[i];
+                        ImGui.BeginGroup();
+                        ImGui.Text(preview.label);
+                        const texId = getImguiTextureForImage(preview.texture);
+                        const aspect = preview.width > 0 && preview.height > 0 ? (preview.width / preview.height) : 1;
+                        const previewHeight = previewWidth / Math.max(0.5, aspect);
+                        if (texId) {
+                          ImGui.Image(texId, new Vec2(previewWidth, previewHeight));
+                        } else {
+                          ImGui.Dummy(new Vec2(previewWidth, previewHeight));
+                        }
+                        ImGui.Text(`${preview.width} x ${preview.height}`);
+                        ImGui.EndGroup();
+                        if (i !== postFxDebugPreviews.length - 1) ImGui.SameLine();
+                      }
+                    }
                   }
                 };
 
