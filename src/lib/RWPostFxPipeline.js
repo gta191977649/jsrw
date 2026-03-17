@@ -8,8 +8,11 @@ const VCS_BLUR_INTENSITY = (39.0 * 0.8) / 255.0;
 const VCS_HISTORY_INTENSITY = 32 / 255.0;
 const VCS_TRAILS_LIMIT = 80;
 const VCS_TRAILS_INTENSITY = 38;
-const VCS_RADIOSITY_WIDTH = 256;
-const VCS_RADIOSITY_HEIGHT = 128;
+const VCS_RADIOSITY_MIN_WIDTH = 256;
+const VCS_RADIOSITY_MIN_HEIGHT = 128;
+const VCS_RADIOSITY_MAX_WIDTH = 512;
+const VCS_RADIOSITY_MAX_HEIGHT = 256;
+const VCS_RADIOSITY_SCALE = 0.2;
 const VCS_RADIOSITY_PING_PONG_PASSES = 4;
 const VCS_RADIOSITY_SPREAD_WEIGHT = 36 / 255;
 const POSTFX_DEBUG_VIEW = Object.freeze({
@@ -34,6 +37,7 @@ function createRenderTarget(width, height, options = {}) {
     stencilBuffer: false,
     magFilter: THREE.LinearFilter,
     minFilter: THREE.LinearFilter,
+    type: options.type || THREE.UnsignedByteType,
   });
   target.texture.colorSpace = THREE.NoColorSpace;
   target.texture.generateMipmaps = false;
@@ -42,6 +46,15 @@ function createRenderTarget(width, height, options = {}) {
     rwRenderTarget: target,
   };
   return target;
+}
+
+function computeRadiositySize(width, height) {
+  const scaledWidth = Math.round(Math.max(1, width) * VCS_RADIOSITY_SCALE);
+  const scaledHeight = Math.round(Math.max(1, height) * VCS_RADIOSITY_SCALE);
+  return {
+    width: THREE.MathUtils.clamp(scaledWidth, VCS_RADIOSITY_MIN_WIDTH, VCS_RADIOSITY_MAX_WIDTH),
+    height: THREE.MathUtils.clamp(scaledHeight, VCS_RADIOSITY_MIN_HEIGHT, VCS_RADIOSITY_MAX_HEIGHT),
+  };
 }
 
 function setMaterialBlendConstant(material, scalar) {
@@ -77,6 +90,8 @@ export class RWPostFxPipeline {
     this.enabled = true;
     this.viewportWidth = 1;
     this.viewportHeight = 1;
+    this.radiosityWidth = VCS_RADIOSITY_MIN_WIDTH;
+    this.radiosityHeight = VCS_RADIOSITY_MIN_HEIGHT;
     this.hasHistory = false;
 
     this.sceneTarget = null;
@@ -133,7 +148,7 @@ export class RWPostFxPipeline {
     this.radiosityBlurMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uTex: { value: null },
-        uTexelSize: { value: new THREE.Vector2(1 / VCS_RADIOSITY_WIDTH, 1 / VCS_RADIOSITY_HEIGHT) },
+        uTexelSize: { value: new THREE.Vector2(1 / VCS_RADIOSITY_MIN_WIDTH, 1 / VCS_RADIOSITY_MIN_HEIGHT) },
         uOffsetSet: { value: 0 },
         uWeight: { value: VCS_RADIOSITY_SPREAD_WEIGHT },
       },
@@ -369,9 +384,12 @@ void main() {
   ensureSize(width, height) {
     const nextWidth = Math.max(1, Math.floor(width || 1));
     const nextHeight = Math.max(1, Math.floor(height || 1));
+    const nextRadiositySize = computeRadiositySize(nextWidth, nextHeight);
     if (
       this.viewportWidth === nextWidth
       && this.viewportHeight === nextHeight
+      && this.radiosityWidth === nextRadiositySize.width
+      && this.radiosityHeight === nextRadiositySize.height
       && this.sceneTarget
       && this.composeTarget
       && this.frontBufferTarget
@@ -388,6 +406,8 @@ void main() {
     }
     this.viewportWidth = nextWidth;
     this.viewportHeight = nextHeight;
+    this.radiosityWidth = nextRadiositySize.width;
+    this.radiosityHeight = nextRadiositySize.height;
 
     this.sceneTarget?.dispose();
     this.composeTarget?.dispose();
@@ -405,8 +425,8 @@ void main() {
     this.composeTarget = createRenderTarget(nextWidth, nextHeight);
     this.frontBufferTarget = createRenderTarget(nextWidth, nextHeight);
     this.lastFrameTarget = createRenderTarget(nextWidth, nextHeight);
-    this.radiosityTargetA = createRenderTarget(VCS_RADIOSITY_WIDTH, VCS_RADIOSITY_HEIGHT);
-    this.radiosityTargetB = createRenderTarget(VCS_RADIOSITY_WIDTH, VCS_RADIOSITY_HEIGHT);
+    this.radiosityTargetA = createRenderTarget(this.radiosityWidth, this.radiosityHeight, { type: THREE.HalfFloatType });
+    this.radiosityTargetB = createRenderTarget(this.radiosityWidth, this.radiosityHeight, { type: THREE.HalfFloatType });
     this.blurCurrentTarget = createRenderTarget(nextWidth, nextHeight);
     this.blurHistoryTarget = createRenderTarget(nextWidth, nextHeight);
     this.debugCurrentFrameTarget = createRenderTarget(nextWidth, nextHeight);
