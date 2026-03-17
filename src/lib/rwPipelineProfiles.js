@@ -55,6 +55,7 @@ export const RW_PIPELINE_SELECTION_DEFAULTS = Object.freeze({
       historyIntensity: 32 / 255.0,
       enableTrails: true,
       enableColorFilter: false,
+      enableBigBloomSunEffect: true,
       enableRadiosity: true,
       enableBlur: true,
       debugView: 'final',

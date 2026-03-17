@@ -137,6 +137,16 @@ function computeSunLightIntensityFromState(sunState) {
   return THREE.MathUtils.lerp(0.15, 0.8, daylight);
 }
 
+function computeSunLightsMultFromState(sunState) {
+  const bloomAlpha = clamp01(Number(sunState?.bigBloomFadeAlpha) || 0);
+  return THREE.MathUtils.lerp(1.0, 0.72, bloomAlpha);
+}
+
+function computeSkyLightMultFromLightsMult(lightsMult) {
+  const safeLightsMult = Math.max(0.35, Number(lightsMult) || 1);
+  return (1 / safeLightsMult + 3) * 0.25;
+}
+
 function approachValue(current, target, delta) {
   if (current < target) return Math.min(current + delta, target);
   if (current > target) return Math.max(current - delta, target);
@@ -3016,12 +3026,14 @@ function App() {
         camera.updateProjectionMatrix();
       }
       const skyMaterial = skyMaterialRef.current;
-      const skyTopColor = timecycleCurrent?.three?.skyTop?.isColor
+      const baseSkyTopColor = timecycleCurrent?.three?.skyTop?.isColor
         ? timecycleCurrent.three.skyTop
         : SKY_DEFAULT_TOP;
-      const skyBottomColor = timecycleCurrent?.three?.skyBottom?.isColor
+      const baseSkyBottomColor = timecycleCurrent?.three?.skyBottom?.isColor
         ? timecycleCurrent.three.skyBottom
         : SKY_DEFAULT_BOTTOM;
+      const skyTopColor = baseSkyTopColor.clone();
+      const skyBottomColor = baseSkyBottomColor.clone();
       const fogColor = timecycleCurrent?.three?.fogColor?.isColor
         ? timecycleCurrent.three.fogColor
         : SKY_DEFAULT_FOG;
@@ -3033,10 +3045,10 @@ function App() {
         : fogColor;
       const fluffyTopColor = timecycleCurrent?.values?.fluffyCloudTop
         ? toThreeColorFromTimecycleValue(timecycleCurrent.values.fluffyCloudTop)
-        : skyTopColor;
+        : baseSkyTopColor;
       const fluffyBottomColor = timecycleCurrent?.values?.fluffyCloudBottom
         ? toThreeColorFromTimecycleValue(timecycleCurrent.values.fluffyCloudBottom)
-        : skyBottomColor;
+        : baseSkyBottomColor;
       const cloudCoverage = THREE.MathUtils.clamp(timecycleCurrent?.cloudCoverage ?? 0, 0, 1);
       const foggyness = THREE.MathUtils.clamp(timecycleCurrent?.foggyness ?? 0, 0, 1);
       const extraSunnyness = THREE.MathUtils.clamp(timecycleCurrent?.extraSunnyness ?? 0, 0, 1);
@@ -3146,7 +3158,7 @@ function App() {
           camera.position.z + (localX * cloudRotSin) - (localZ * cloudRotCos),
         );
         sprite.material.color.copy(fluffyBottomColor).lerp(fluffyTopColor, 0.4);
-        if (sunMetrics?.visible && sunSettings.enabled) {
+        if (sunMetrics?.onScreen && sunSettings.enabled) {
           const spriteNdc = sprite.position.clone().project(camera);
           const spriteScreenX = (spriteNdc.x * 0.5 + 0.5) * viewportWidth;
           const spriteScreenY = (-spriteNdc.y * 0.5 + 0.5) * viewportHeight;
@@ -3184,7 +3196,16 @@ function App() {
         dt,
         time,
         sunBlockedByClouds,
+        sunMetrics,
       );
+      const sunLightsMult = computeSunLightsMultFromState(sunState);
+      const skyLightMult = computeSkyLightMultFromLightsMult(sunLightsMult);
+      skyTopColor.copy(baseSkyTopColor).multiplyScalar(skyLightMult);
+      skyBottomColor.copy(baseSkyBottomColor).multiplyScalar(skyLightMult);
+      if (skyMaterial?.uniforms) {
+        skyMaterial.uniforms.uSkyTop.value.copy(skyTopColor);
+        skyMaterial.uniforms.uSkyBottom.value.copy(skyBottomColor);
+      }
 
       const sunLight = sunLightRef.current;
       const hemiLight = hemiLightRef.current;
@@ -3192,17 +3213,17 @@ function App() {
         const directionalColor = timecycleCurrent?.values?.directional
           ? toThreeColorFromTimecycleValue(timecycleCurrent.values.directional)
           : new THREE.Color(1, 1, 1);
-        sunLight.color.copy(directionalColor);
+        sunLight.color.copy(directionalColor).multiplyScalar(sunLightsMult);
         sunLight.position.copy(camera.position).addScaledVector(sunState?.direction || new THREE.Vector3(0.5, 1, 0.3), 1200);
         sunLight.target.position.copy(camera.position);
         sunLight.target.updateMatrixWorld();
-        sunLight.intensity = computeSunLightIntensityFromState(sunState);
+        sunLight.intensity = computeSunLightIntensityFromState(sunState) * sunLightsMult;
       }
       if (hemiLight) {
         if (timecycleCurrent?.values?.ambient) {
-          hemiLight.color.copy(toThreeColorFromTimecycleValue(timecycleCurrent.values.ambient));
+          hemiLight.color.copy(toThreeColorFromTimecycleValue(timecycleCurrent.values.ambient)).multiplyScalar(sunLightsMult);
         }
-        hemiLight.intensity = 0.8;
+        hemiLight.intensity = 0.8 * sunLightsMult;
       }
 
       if (timecycleCurrent?.three?.fogColor?.isColor) {
@@ -3515,6 +3536,12 @@ function App() {
         waveHeight: uiStateRef.current.waterWaveHeight,
         farAlpha: uiStateRef.current.waterAlpha,
       });
+      const postFxSelection = uiStateRef.current.pipelineDebug?.[RW_PIPELINE_CATEGORY.POSTFX];
+      const postFxSunCoronaEnabled = (
+        postFxSelection?.config?.enableBigBloomSunEffect
+        ?? postFxSelection?.config?.enableSunCorona
+        ?? true
+      );
       const skyScene = skySceneRef.current;
       const skyCamera = skyCameraRef.current;
       const skyCloudScene = skyCloudSceneRef.current;
@@ -3601,6 +3628,10 @@ function App() {
           renderer.render(scene, camera);
           rwRenderQueue?.popCameraBucketMask(camera);
         }
+        if (postFxSceneTarget && postFxSunCoronaEnabled) {
+          renderer.clearDepth();
+          sunPipeline?.render(renderer, { mode: 'bloom' });
+        }
         renderer.setRenderTarget(null);
         if (postFxSceneTarget) {
           rwPipelineControllerRef.current.renderPostFx(renderer, {
@@ -3610,7 +3641,7 @@ function App() {
           });
         }
         renderer.clearDepth();
-        sunPipeline?.render(renderer);
+        sunPipeline?.render(renderer, { mode: 'full' });
 
         const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
         gameIconSprite.material.map = iconTextures[activeIcon];
@@ -3776,15 +3807,24 @@ function App() {
         }
         ImGui.Checkbox(
           'Show LODs',
-          (value = uiStateRef.current.showLods) => (uiStateRef.current.showLods = value),
+          (value = uiStateRef.current.showLods) => {
+            uiStateRef.current.showLods = value;
+            return value;
+          },
         );
         ImGui.Checkbox(
           'Force LOD only',
-          (value = uiStateRef.current.forceLodOnly) => (uiStateRef.current.forceLodOnly = value),
+          (value = uiStateRef.current.forceLodOnly) => {
+            uiStateRef.current.forceLodOnly = value;
+            return value;
+          },
         );
         ImGui.Checkbox(
           'Show TOBJs',
-          (value = uiStateRef.current.showTobjs) => (uiStateRef.current.showTobjs = value),
+          (value = uiStateRef.current.showTobjs) => {
+            uiStateRef.current.showTobjs = value;
+            return value;
+          },
         );
         ImGui.Text('draw dist: LOD switch distance (near model <-> LOD)');
         ImGui.PushItemWidth(-1);
@@ -3824,19 +3864,31 @@ function App() {
         ImGui.PopItemWidth();
         ImGui.Checkbox(
           'Show grid',
-          (value = uiStateRef.current.showGrid) => (uiStateRef.current.showGrid = value),
+          (value = uiStateRef.current.showGrid) => {
+            uiStateRef.current.showGrid = value;
+            return value;
+          },
         );
         ImGui.Checkbox(
           'Show axes',
-          (value = uiStateRef.current.showAxes) => (uiStateRef.current.showAxes = value),
+          (value = uiStateRef.current.showAxes) => {
+            uiStateRef.current.showAxes = value;
+            return value;
+          },
         );
         ImGui.Checkbox(
           'Wireframe',
-          (value = uiStateRef.current.wireframe) => (uiStateRef.current.wireframe = value),
+          (value = uiStateRef.current.wireframe) => {
+            uiStateRef.current.wireframe = value;
+            return value;
+          },
         );
         ImGui.Checkbox(
           'Disable Vertex Color',
-          (value = uiStateRef.current.disableVertexColor) => (uiStateRef.current.disableVertexColor = value),
+          (value = uiStateRef.current.disableVertexColor) => {
+            uiStateRef.current.disableVertexColor = value;
+            return value;
+          },
         );
 
         if (ImGui.Button('Build / Rebuild')) {
@@ -4303,14 +4355,20 @@ function App() {
             if (ImGui.BeginTabItem('Pipeline')) {
               ImGui.Checkbox(
                 'Disable Backface Culling',
-                (value = uiStateRef.current.disableBackfaceCulling) => (uiStateRef.current.disableBackfaceCulling = value),
+                (value = uiStateRef.current.disableBackfaceCulling) => {
+                  uiStateRef.current.disableBackfaceCulling = value;
+                  return value;
+                },
               );
               const defaultOpen = ImGui.TreeNodeFlags?.DefaultOpen ?? 0;
               if (ImGui.CollapsingHeader('Water', defaultOpen)) {
                 ImGui.TextWrapped('Single-layer RW water. The mesh is drawn as instanced 8x8 sector patches, with RW-style vertex waves on every patch.');
                 ImGui.Checkbox(
                   'Render Water',
-                  (value = uiStateRef.current.renderWater) => (uiStateRef.current.renderWater = value),
+                  (value = uiStateRef.current.renderWater) => {
+                    uiStateRef.current.renderWater = value;
+                    return value;
+                  },
                 );
                 const renderWaterSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
                   ImGui.PushID(id);
@@ -4433,7 +4491,10 @@ function App() {
                   ImGui.TextWrapped(description);
                   ImGui.Checkbox(
                     `Enable##${category}`,
-                    (value = selection.enabled) => (selection.enabled = value),
+                    (value = selection.enabled) => {
+                      selection.enabled = value;
+                      return value;
+                    },
                   );
                   if (ImGui.BeginCombo(`Game##${category}`, selection.game)) {
                     for (const option of gameOptions) {
@@ -4489,6 +4550,15 @@ function App() {
                     selection.config ||= {
                       ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config,
                     };
+                    if (typeof selection.config.enableColorFilter !== 'boolean') {
+                      selection.config.enableColorFilter = RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config.enableColorFilter;
+                    }
+                    if (typeof selection.config.enableBigBloomSunEffect !== 'boolean') {
+                      selection.config.enableBigBloomSunEffect = typeof selection.config.enableSunCorona === 'boolean'
+                        ? selection.config.enableSunCorona
+                        : RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config.enableBigBloomSunEffect;
+                    }
+                    selection.config.enableSunCorona = selection.config.enableBigBloomSunEffect;
                     ImGui.Separator();
                     if (hasLiveTimecyclePostFx) ImGui.BeginDisabled();
                     renderPostFxSliderRow(`postfx-${category}-trails-limit`, 'Radiosity Limit', () => liveRadiosityLimit, (value) => { selection.config.trailsLimit = Math.round(value); }, 0, 255, '%.0f');
@@ -4502,11 +4572,17 @@ function App() {
                     }
                     ImGui.Checkbox(
                       `Enable Radiosity##${category}`,
-                      (value = selection.config.enableRadiosity) => (selection.config.enableRadiosity = value),
+                      (value = selection.config.enableRadiosity) => {
+                        selection.config.enableRadiosity = value;
+                        return value;
+                      },
                     );
                     ImGui.Checkbox(
                       `Enable Blur##${category}`,
-                      (value = selection.config.enableBlur) => (selection.config.enableBlur = value),
+                      (value = selection.config.enableBlur) => {
+                        selection.config.enableBlur = value;
+                        return value;
+                      },
                     );
                     ImGui.Checkbox(
                       `Enable Trails##${category}`,
@@ -4518,8 +4594,16 @@ function App() {
                     );
                     ImGui.Checkbox(
                       `Enable Color Filter##${category}`,
-                      (value = (selection.config.enableColorFilter ?? false)) => {
+                      (value = selection.config.enableColorFilter) => {
                         selection.config.enableColorFilter = value;
+                        return value;
+                      },
+                    );
+                    ImGui.Checkbox(
+                      `Enable Big Bloom Sun Effect##${category}`,
+                      (value = selection.config.enableBigBloomSunEffect) => {
+                        selection.config.enableBigBloomSunEffect = value;
+                        selection.config.enableSunCorona = value;
                         return value;
                       },
                     );
@@ -4601,19 +4685,31 @@ function App() {
               const sunSettings = uiStateRef.current.sun;
               ImGui.Checkbox(
                 'Enable RW Sun',
-                (value = sunSettings.enabled) => (sunSettings.enabled = value),
+                (value = sunSettings.enabled) => {
+                  sunSettings.enabled = value;
+                  return value;
+                },
               );
               ImGui.Checkbox(
                 'World Occlusion',
-                (value = sunSettings.useWorldOcclusion) => (sunSettings.useWorldOcclusion = value),
+                (value = sunSettings.useWorldOcclusion) => {
+                  sunSettings.useWorldOcclusion = value;
+                  return value;
+                },
               );
               ImGui.Checkbox(
                 'Cloud Occlusion',
-                (value = sunSettings.useCloudOcclusion) => (sunSettings.useCloudOcclusion = value),
+                (value = sunSettings.useCloudOcclusion) => {
+                  sunSettings.useCloudOcclusion = value;
+                  return value;
+                },
               );
               ImGui.Checkbox(
                 'Bypass Fade',
-                (value = sunSettings.debugBypassFade) => (sunSettings.debugBypassFade = value),
+                (value = sunSettings.debugBypassFade) => {
+                  sunSettings.debugBypassFade = value;
+                  return value;
+                },
               );
               renderSunSliderRow('distance', 'Sun Distance', () => sunSettings.distance, (value) => { sunSettings.distance = value; }, 50, 1000, '%.0f');
               renderSunSliderRow('core-size-scale', 'Core Size Scale', () => sunSettings.coreSizeScale, (value) => { sunSettings.coreSizeScale = value; }, 0, 4);
@@ -4659,15 +4755,24 @@ function App() {
               const moonSettings = uiStateRef.current.moon;
               ImGui.Checkbox(
                 'Enable RW Moon',
-                (value = moonSettings.enabled) => (moonSettings.enabled = value),
+                (value = moonSettings.enabled) => {
+                  moonSettings.enabled = value;
+                  return value;
+                },
               );
               ImGui.Checkbox(
                 'Small Moon',
-                (value = moonSettings.smallMoon) => (moonSettings.smallMoon = value),
+                (value = moonSettings.smallMoon) => {
+                  moonSettings.smallMoon = value;
+                  return value;
+                },
               );
               ImGui.Checkbox(
                 'Coverage Dimming',
-                (value = moonSettings.coverageDimming) => (moonSettings.coverageDimming = value),
+                (value = moonSettings.coverageDimming) => {
+                  moonSettings.coverageDimming = value;
+                  return value;
+                },
               );
               renderMoonSliderRow('offset-x', 'Offset X', () => moonSettings.offsetX, (value) => { moonSettings.offsetX = value; }, -300, 300, '%.0f');
               renderMoonSliderRow('offset-y', 'Offset Y', () => moonSettings.offsetY, (value) => { moonSettings.offsetY = value; }, -300, 300, '%.0f');
@@ -4707,11 +4812,17 @@ function App() {
               const starsSettings = uiStateRef.current.stars;
               ImGui.Checkbox(
                 'Enable RW Stars',
-                (value = starsSettings.enabled) => (starsSettings.enabled = value),
+                (value = starsSettings.enabled) => {
+                  starsSettings.enabled = value;
+                  return value;
+                },
               );
               ImGui.Checkbox(
                 'Coverage Dimming',
-                (value = starsSettings.coverageDimming) => (starsSettings.coverageDimming = value),
+                (value = starsSettings.coverageDimming) => {
+                  starsSettings.coverageDimming = value;
+                  return value;
+                },
               );
               renderStarsSliderRow('brightness-scale', 'Brightness Scale', () => starsSettings.brightnessScale, (value) => { starsSettings.brightnessScale = value; }, 0, 4);
               renderStarsSliderRow('logo-offset-x', 'Logo Offset X', () => starsSettings.logoOffsetX, (value) => { starsSettings.logoOffsetX = value; }, -300, 300, '%.0f');

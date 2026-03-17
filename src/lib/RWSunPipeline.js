@@ -15,9 +15,24 @@ const TMP_NDC = new THREE.Vector3();
 const TMP_GTA_SUN_DIR = new THREE.Vector3();
 const TMP_THREE_SUN_DIR = new THREE.Vector3();
 const TMP_CAMERA_DIR = new THREE.Vector3();
+const SUN_BLOOM_MIN_RADIUS = 0.18;
+const SUN_BLOOM_MAX_RADIUS = 0.65;
+const SUN_BLOOM_CORE_SCALE = 0.55;
 
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
+}
+
+function cloneRwScreen(screen) {
+  if (!screen) return null;
+  return {
+    x: screen.x,
+    y: screen.y,
+    z: screen.z,
+    recipZ: screen.recipZ,
+    spriteW: screen.spriteW,
+    spriteH: screen.spriteH,
+  };
 }
 
 function createCanvasTexture(size, drawFn) {
@@ -202,15 +217,20 @@ export class RWSunPipeline {
     this.viewportHeight = 1;
     this.coreFadeAlpha = 0;
     this.coronaFadeAlpha = 0;
+    this.bigBloomFadeAlpha = 0;
+    this.bigBloomScale = 1;
     this.occlusionAlpha = 1;
     this.occludedByWorld = false;
     this.sunVisible = false;
+    this.sunOnScreen = false;
     this.sunAboveHorizon = false;
     this.sunCoronaVisible = false;
     this.sunWorldPosition = new THREE.Vector3();
     this.sunDirection = new THREE.Vector3(0, 1, 0);
     this.sunScreen = { x: SCREEN_HIDDEN, y: SCREEN_HIDDEN };
     this.sunRwScreen = null;
+    this.lastVisibleSunScreen = { x: SCREEN_HIDDEN, y: SCREEN_HIDDEN };
+    this.lastVisibleSunRwScreen = null;
     this.lastOcclusionCheckAt = -Infinity;
     this.occlusionRaycaster = new THREE.Raycaster();
     this.occlusionRaycaster.firstHitOnly = false;
@@ -269,16 +289,23 @@ export class RWSunPipeline {
       TMP_NDC.x >= -1 && TMP_NDC.x <= 1
       && TMP_NDC.y >= -1 && TMP_NDC.y <= 1
     );
-    this.sunVisible = this.sunAboveHorizon && inClipSpace && onScreen;
+    const rwScreen = this.sunAboveHorizon && inClipSpace
+      ? calcScreenCoorsLikeRw(camera, this.sunWorldPosition, this.viewportWidth, this.viewportHeight)
+      : null;
+    this.sunVisible = this.sunAboveHorizon && rwScreen !== null;
+    this.sunOnScreen = this.sunVisible && onScreen;
     if (this.sunVisible) {
       this.sunScreen = rwScreenFromNdc(TMP_NDC, this.viewportWidth, this.viewportHeight);
-      this.sunRwScreen = calcScreenCoorsLikeRw(camera, this.sunWorldPosition, this.viewportWidth, this.viewportHeight);
+      this.sunRwScreen = rwScreen;
+      this.lastVisibleSunScreen = { x: this.sunScreen.x, y: this.sunScreen.y };
+      this.lastVisibleSunRwScreen = cloneRwScreen(this.sunRwScreen);
     } else {
       this.sunScreen = { x: SCREEN_HIDDEN, y: SCREEN_HIDDEN };
       this.sunRwScreen = null;
     }
     return {
       visible: this.sunVisible,
+      onScreen: this.sunOnScreen,
       aboveHorizon: this.sunAboveHorizon,
       coronaVisible: this.sunCoronaVisible,
       screenX: this.sunScreen.x,
@@ -290,11 +317,11 @@ export class RWSunPipeline {
     };
   }
 
-  update(camera, worldRoot, timecycleSample, settings = RW_SUN_DEBUG_DEFAULTS, dt = 0, timeMs = 0, sunBlockedByClouds = false) {
-    const metrics = this.updateSunMetrics(camera, timecycleSample, settings);
+  update(camera, worldRoot, timecycleSample, settings = RW_SUN_DEBUG_DEFAULTS, dt = 0, timeMs = 0, sunBlockedByClouds = false, metrics = null) {
+    const sunMetrics = metrics || this.updateSunMetrics(camera, timecycleSample, settings);
     const shouldCheckOcclusion = (
       settings.useWorldOcclusion
-      && metrics.visible
+      && sunMetrics.visible
       && (timeMs - this.lastOcclusionCheckAt) >= settings.occlusionCheckIntervalMs
     );
 
@@ -308,41 +335,87 @@ export class RWSunPipeline {
     }
 
     const blockedByClouds = settings.useCloudOcclusion && sunBlockedByClouds;
+    const values = timecycleSample?.values || {};
+    const spriteSize = Math.max(0, Number(values.spriteSize) || 0);
+    const spriteBrightness = Math.max(0, Number(values.spriteBrightness) || 0);
+    const centerX = this.viewportWidth * 0.5;
+    const centerY = this.viewportHeight * 0.5;
+    const centerDistance = sunMetrics.visible
+      ? Math.hypot(sunMetrics.screenX - centerX, sunMetrics.screenY - centerY)
+      : Number.POSITIVE_INFINITY;
+    const minViewport = Math.max(1, Math.min(this.viewportWidth, this.viewportHeight));
+    const bloomRadius = minViewport * THREE.MathUtils.clamp(
+      0.18 + (spriteSize * 0.08),
+      SUN_BLOOM_MIN_RADIUS,
+      SUN_BLOOM_MAX_RADIUS,
+    );
+    const centerBloomFactor = clamp01(1 - (centerDistance / Math.max(1, bloomRadius)));
+    const brightnessBloomFactor = clamp01(spriteBrightness / 10);
+    const bloomEligible = (
+      settings.enabled
+      && sunMetrics.onScreen
+      && sunMetrics.coronaVisible
+      && sunMetrics.rwScreen
+      && this.occlusionAlpha > 0.5
+      && !blockedByClouds
+      && centerBloomFactor > 0.001
+      && brightnessBloomFactor > 0.001
+    );
     const coreTargetAlpha = (
       settings.enabled
-      && metrics.aboveHorizon
-      && metrics.visible
-      && metrics.rwScreen
+      && sunMetrics.aboveHorizon
+      && sunMetrics.visible
+      && sunMetrics.rwScreen
       && this.occlusionAlpha > 0.5
     ) ? 255 : 0;
     const coronaTargetAlpha = (
       settings.enabled
-      && metrics.coronaVisible
-      && metrics.visible
-      && metrics.rwScreen
+      && sunMetrics.coronaVisible
+      && sunMetrics.visible
+      && sunMetrics.rwScreen
       && this.occlusionAlpha > 0.5
       && !blockedByClouds
     ) ? 255 : 0;
+    const bloomTargetAlpha = bloomEligible ? (255 * centerBloomFactor * brightnessBloomFactor) : 0;
+    const bloomTargetScale = bloomEligible
+      ? (1 + (centerBloomFactor * brightnessBloomFactor * Math.max(0.5, spriteSize)))
+      : 1;
     const fadeStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 30;
+    const scaleStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 0.12;
     if (settings.debugBypassFade) {
       this.coreFadeAlpha = coreTargetAlpha;
       this.coronaFadeAlpha = coronaTargetAlpha;
+      this.bigBloomFadeAlpha = bloomTargetAlpha;
+      this.bigBloomScale = bloomTargetScale;
     } else {
       if (this.coreFadeAlpha < coreTargetAlpha) this.coreFadeAlpha = Math.min(this.coreFadeAlpha + fadeStep, coreTargetAlpha);
       else if (this.coreFadeAlpha > coreTargetAlpha) this.coreFadeAlpha = Math.max(this.coreFadeAlpha - fadeStep, coreTargetAlpha);
 
       if (this.coronaFadeAlpha < coronaTargetAlpha) this.coronaFadeAlpha = Math.min(this.coronaFadeAlpha + fadeStep, coronaTargetAlpha);
       else if (this.coronaFadeAlpha > coronaTargetAlpha) this.coronaFadeAlpha = Math.max(this.coronaFadeAlpha - fadeStep, coronaTargetAlpha);
+
+      if (!bloomEligible) {
+        this.bigBloomFadeAlpha = 0;
+        this.bigBloomScale = 1;
+      } else {
+        if (this.bigBloomFadeAlpha < bloomTargetAlpha) this.bigBloomFadeAlpha = Math.min(this.bigBloomFadeAlpha + fadeStep, bloomTargetAlpha);
+        else if (this.bigBloomFadeAlpha > bloomTargetAlpha) this.bigBloomFadeAlpha = Math.max(this.bigBloomFadeAlpha - fadeStep, bloomTargetAlpha);
+
+        if (this.bigBloomScale < bloomTargetScale) this.bigBloomScale = Math.min(this.bigBloomScale + scaleStep, bloomTargetScale);
+        else if (this.bigBloomScale > bloomTargetScale) this.bigBloomScale = Math.max(this.bigBloomScale - scaleStep, bloomTargetScale);
+      }
     }
 
     this.applySpriteState(camera, timecycleSample, settings, timeMs);
 
     return {
-      ...metrics,
+      ...sunMetrics,
       blockedByClouds,
       occludedByWorld: this.occludedByWorld,
       fadeAlpha: this.coronaFadeAlpha / 255,
       coreFadeAlpha: this.coreFadeAlpha / 255,
+      bigBloomFadeAlpha: this.bigBloomFadeAlpha / 255,
+      bigBloomScale: this.bigBloomScale,
     };
   }
 
@@ -363,7 +436,13 @@ export class RWSunPipeline {
   }
 
   applySpriteState(camera, timecycleSample, settings, timeMs) {
-    if (!settings.enabled || !this.sunVisible || !this.sunRwScreen) {
+    if (!settings.enabled) {
+      this.setVisible(false);
+      return;
+    }
+
+    const displayScreen = this.sunRwScreen || this.lastVisibleSunRwScreen;
+    if (!displayScreen) {
       this.setVisible(false);
       return;
     }
@@ -381,7 +460,9 @@ export class RWSunPipeline {
     const values = timecycleSample?.values || {};
     const coreColor = values.sunCore || { r: 255, g: 255, b: 255 };
     const coronaColor = values.sunCorona || { r: 255, g: 255, b: 255 };
-    const screen = this.sunRwScreen;
+    const spriteSize = Math.max(0.25, Number(values.spriteSize) || 1);
+    const spriteBrightness = Math.max(0, Number(values.spriteBrightness) || 1);
+    const screen = displayScreen;
     const randomTerm = (((Math.floor(timeMs / (1000 / 30)) * 1103515245) + 12345) >>> 16) & 0xFF;
     const jitter = randomTerm * 0.005 * settings.coreJitterAmplitude;
     const coreWorldSize = (settings.coreSizeBias + jitter) * (values.sunSize || 1) * settings.coreSizeScale;
@@ -408,8 +489,8 @@ export class RWSunPipeline {
     for (let index = 0; index < this.flareSprites.length; index += 1) {
       const sprite = this.flareSprites[index];
       const definition = RW_SUN_FLARE_DEFS[index];
-      const flareHalfWidthPx = Math.max(1, 4 * definition.size * (screen.spriteW / screen.spriteH) * settings.flareScale);
-      const flareHalfHeightPx = Math.max(1, 4 * definition.size * settings.flareScale);
+      const flareHalfWidthPx = Math.max(1, 4 * definition.size * spriteSize * (screen.spriteW / screen.spriteH) * settings.flareScale);
+      const flareHalfHeightPx = Math.max(1, 4 * definition.size * spriteSize * settings.flareScale);
       const flareX = centerX + ((screen.x - centerX) * definition.position * settings.flareOffsetScale);
       const flareY = centerY + ((screen.y - centerY) * definition.position * settings.flareOffsetScale);
       sprite.material.color.setRGB(
@@ -419,12 +500,64 @@ export class RWSunPipeline {
         THREE.SRGBColorSpace,
       );
       sprite.material.rotation = 0;
-      sprite.material.opacity = clamp01((this.coronaFadeAlpha / 255) * (definition.alpha / 255) * settings.flareAlphaScale);
+      sprite.material.opacity = clamp01((this.coronaFadeAlpha / 255) * (definition.alpha / 255) * settings.flareAlphaScale * Math.max(0.25, spriteBrightness / 10));
       setRwSpriteScreenPosition(sprite, flareX, flareY, this.viewportWidth, this.viewportHeight, flareHalfWidthPx * 2, flareHalfHeightPx * 2);
     }
   }
 
-  render(renderer) {
+  render(renderer, options = {}) {
+    const mode = options?.mode === 'bloom' ? 'bloom' : 'full';
+    if (mode === 'bloom') {
+      if (!this.sunOnScreen || this.bigBloomFadeAlpha <= 0.0001 || this.coronaFadeAlpha <= 0.0001) return;
+
+      const previousAutoClear = renderer.autoClear;
+      const previousCoreVisible = this.coreSprite.visible;
+      const previousCoronaVisible = this.coronaSprite.visible;
+      const previousCoreOpacity = this.coreSprite.material.opacity;
+      const previousCoronaOpacity = this.coronaSprite.material.opacity;
+      const previousCoreScale = this.coreSprite.scale.clone();
+      const previousCoronaScale = this.coronaSprite.scale.clone();
+      const previousFlareStates = this.flareSprites.map((sprite) => ({
+        visible: sprite.visible,
+        opacity: sprite.material.opacity,
+        scale: sprite.scale.clone(),
+      }));
+
+      const bloomScale = this.bigBloomFadeAlpha / 255;
+      this.coreSprite.visible = previousCoreVisible;
+      this.coronaSprite.visible = previousCoronaVisible;
+      this.coreSprite.material.opacity = clamp01(previousCoreOpacity * bloomScale * SUN_BLOOM_CORE_SCALE);
+      this.coronaSprite.material.opacity = clamp01(previousCoronaOpacity * bloomScale);
+      this.coreSprite.scale.copy(previousCoreScale).multiplyScalar(Math.max(1, this.bigBloomScale * 0.85));
+      this.coronaSprite.scale.copy(previousCoronaScale).multiplyScalar(Math.max(1, this.bigBloomScale));
+      for (let index = 0; index < this.flareSprites.length; index += 1) {
+        const sprite = this.flareSprites[index];
+        const previous = previousFlareStates[index];
+        sprite.visible = previous.visible;
+        sprite.material.opacity = clamp01(previous.opacity * bloomScale);
+        sprite.scale.copy(previous.scale).multiplyScalar(Math.max(1, 0.8 + (this.bigBloomScale * 0.6)));
+      }
+
+      renderer.autoClear = false;
+      renderer.render(this.scene, this.camera);
+      renderer.autoClear = previousAutoClear;
+
+      this.coreSprite.visible = previousCoreVisible;
+      this.coronaSprite.visible = previousCoronaVisible;
+      this.coreSprite.material.opacity = previousCoreOpacity;
+      this.coronaSprite.material.opacity = previousCoronaOpacity;
+      this.coreSprite.scale.copy(previousCoreScale);
+      this.coronaSprite.scale.copy(previousCoronaScale);
+      for (let index = 0; index < this.flareSprites.length; index += 1) {
+        const sprite = this.flareSprites[index];
+        const previous = previousFlareStates[index];
+        sprite.visible = previous.visible;
+        sprite.material.opacity = previous.opacity;
+        sprite.scale.copy(previous.scale);
+      }
+      return;
+    }
+
     if (this.coreFadeAlpha <= 0.0001 && this.coronaFadeAlpha <= 0.0001) return;
     const previousAutoClear = renderer.autoClear;
     renderer.autoClear = false;
