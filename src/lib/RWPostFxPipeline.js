@@ -298,8 +298,13 @@ void main() {
       enableRadiosity: true,
       enableBlur: true,
       debugView: POSTFX_DEBUG_VIEW.FINAL,
+      debugCapture: false,
     };
     this.setConfig(options);
+  }
+
+  shouldCaptureDebug() {
+    return this.runtime.debugCapture || this.runtime.debugView !== POSTFX_DEBUG_VIEW.FINAL;
   }
 
   setEnabled(enabled) {
@@ -421,6 +426,7 @@ void main() {
     this.runtime.enableRadiosity = this.configRuntime.enableRadiosity;
     this.runtime.enableBlur = this.configRuntime.enableBlur;
     this.runtime.debugView = this.configRuntime.debugView;
+    this.runtime.debugCapture = Boolean(runtimeContext?.postFxDebugCapture);
 
     const values = runtimeContext?.timecycleCurrent?.values;
     if (!values || !values.blur) {
@@ -498,7 +504,7 @@ void main() {
   }
 
   captureDebugStage(renderer, source, destination) {
-    if (!source || !destination) return;
+    if (!this.shouldCaptureDebug() || !source || !destination) return;
     this.copyTarget(renderer, source, destination, true);
   }
 
@@ -542,18 +548,16 @@ void main() {
     if (!this.runtime.enableBlur) return;
 
     // VCSPC BlurOverlay always samples the original captured current frame.
-    this.copyTarget(renderer, this.frontBufferTarget, this.blurCurrentTarget, true);
-
-    this.accumulationMaterial.uniforms.uTex.value = this.blurCurrentTarget.texture;
+    this.accumulationMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
     this.accumulationMaterial.uniforms.uColor.value.set(1, 1, 1);
     this.accumulationMaterial.uniforms.uOpacity.value = 1;
     setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
 
     const blurOffset = this.runtime.blurOffset;
     const offsets = [
-      new THREE.Vector2(blurOffset / this.blurCurrentTarget.width, 0),
-      new THREE.Vector2(blurOffset / this.blurCurrentTarget.width, blurOffset / this.blurCurrentTarget.height),
-      new THREE.Vector2(0, blurOffset / this.blurCurrentTarget.height),
+      new THREE.Vector2(blurOffset / this.frontBufferTarget.width, 0),
+      new THREE.Vector2(blurOffset / this.frontBufferTarget.width, blurOffset / this.frontBufferTarget.height),
+      new THREE.Vector2(0, blurOffset / this.frontBufferTarget.height),
     ];
     setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
     for (const offset of offsets) {
@@ -594,7 +598,7 @@ void main() {
         this.presentTarget(renderer, this.debugRadiosityTarget, true);
         return;
       case POSTFX_DEBUG_VIEW.BLUR_SOURCE:
-        this.presentTarget(renderer, this.blurCurrentTarget, true);
+        this.presentTarget(renderer, this.frontBufferTarget, true);
         return;
       case POSTFX_DEBUG_VIEW.HISTORY:
         this.presentTarget(renderer, this.blurHistoryTarget, true);
@@ -632,7 +636,7 @@ void main() {
 
   endFrame(renderer) {
     if (!this.enabled || !renderer?.setRenderTarget || !this.composeTarget || !this.blurHistoryTarget) return;
-    if (!this.runtime.enableBlur) {
+    if (!this.runtime.enableBlur || !this.runtime.enableTrails) {
       this.resetHistory();
       return;
     }

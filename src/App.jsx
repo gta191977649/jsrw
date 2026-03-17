@@ -3539,6 +3539,7 @@ function App() {
       const pipelineRuntimeContext = {
         activeBackend,
         worldGameVersion: worldGameVersionRef.current,
+        postFxDebugCapture: isWindowOpen('rendering'),
         timecycleCurrent,
         ambientColor: timecycleCurrent?.values?.ambient
           ? toThreeColorFromTimecycleValue(timecycleCurrent.values.ambient)
