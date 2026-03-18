@@ -18,6 +18,7 @@ const TMP_CAMERA_DIR = new THREE.Vector3();
 const TMP_CAMERA_FORWARD = new THREE.Vector3();
 const SUN_BLOOM_MIN_RADIUS = 0.18;
 const SUN_BLOOM_MAX_RADIUS = 0.65;
+const FADE_SCREEN_MARGIN = 0.3;
 const SUN_BLOOM_CORE_SCALE = 0.55;
 
 function clamp01(value) {
@@ -205,11 +206,14 @@ export class RWSunPipeline {
     this.coronaSprite = new THREE.Sprite(createRwSpriteMaterial(this.textures.star));
     this.coreSprite.renderOrder = 80;
     this.coronaSprite.renderOrder = 79;
+    this.coreSprite.frustumCulled = false;
+    this.coronaSprite.frustumCulled = false;
     this.scene.add(this.coronaSprite, this.coreSprite);
 
     this.flareSprites = RW_SUN_FLARE_DEFS.map((definition) => {
       const sprite = new THREE.Sprite(createRwSpriteMaterial(this.textures[definition.texture]));
       sprite.renderOrder = 78;
+      sprite.frustumCulled = false;
       this.scene.add(sprite);
       return sprite;
     });
@@ -223,6 +227,7 @@ export class RWSunPipeline {
     this.occludedByWorld = false;
     this.sunVisible = false;
     this.sunOnScreen = false;
+    this.sunNdcExtent = 0;
     this.sunAboveHorizon = false;
     this.sunCoronaVisible = false;
     this.sunWorldPosition = new THREE.Vector3();
@@ -288,6 +293,7 @@ export class RWSunPipeline {
       TMP_NDC.x >= -1 && TMP_NDC.x <= 1
       && TMP_NDC.y >= -1 && TMP_NDC.y <= 1
     );
+    this.sunNdcExtent = Math.max(Math.abs(TMP_NDC.x), Math.abs(TMP_NDC.y));
     const rwScreen = this.sunAboveHorizon && inClipSpace
       ? calcScreenCoorsLikeRw(camera, this.sunWorldPosition, this.viewportWidth, this.viewportHeight)
       : null;
@@ -305,6 +311,7 @@ export class RWSunPipeline {
     return {
       visible: this.sunVisible,
       onScreen: this.sunOnScreen,
+      ndcExtent: this.sunNdcExtent,
       aboveHorizon: this.sunAboveHorizon,
       coronaVisible: this.sunCoronaVisible,
       screenX: this.sunScreen.x,
@@ -363,18 +370,18 @@ export class RWSunPipeline {
       !blockedByWorld &&
       !blockedByClouds
     );
+    const ndcExtent = Number(sunMetrics.ndcExtent) || 0;
+    const fadeOnScreen = sunMetrics.visible && sunMetrics.rwScreen && (ndcExtent <= 1 + FADE_SCREEN_MARGIN);
     const coreTargetAlpha = (
       settings.enabled
       && sunMetrics.aboveHorizon
-      && sunMetrics.visible
-      && sunMetrics.rwScreen
+      && fadeOnScreen
       && !blockedByWorld
     ) ? 255 : 0;
     const coronaTargetAlpha = (
       settings.enabled
       && sunMetrics.coronaVisible
-      && sunMetrics.visible
-      && sunMetrics.rwScreen
+      && fadeOnScreen
       && !blockedByWorld
       && !blockedByClouds
     ) ? 255 : 0;
