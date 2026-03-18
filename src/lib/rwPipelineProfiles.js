@@ -50,6 +50,7 @@ export const RW_PIPELINE_SELECTION_DEFAULTS = Object.freeze({
     config: Object.freeze({
       trailsLimit: 80,
       trailsIntensity: 38,
+      radiosityResolutionDivisor: 4,
       blurOffset: 2.1,
       blurIntensity: (39.0 * 0.8) / 255.0,
       historyIntensity: 32 / 255.0,

@@ -10,6 +10,7 @@ const VCS_TRAILS_LIMIT = 80;
 const VCS_TRAILS_INTENSITY = 38;
 const VCS_RADIOSITY_PING_PONG_PASSES = 4;
 const VCS_RADIOSITY_SPREAD_WEIGHT = 36 / 255;
+const DEFAULT_RADIOSITY_RESOLUTION_DIVISOR = 4;
 const POSTFX_DEBUG_VIEW = Object.freeze({
   FINAL: 'final',
   SCENE: 'scene',
@@ -43,10 +44,11 @@ function createRenderTarget(width, height, options = {}) {
   return target;
 }
 
-function computeRadiositySize(width, height) {
+function computeRadiositySize(width, height, divisor = DEFAULT_RADIOSITY_RESOLUTION_DIVISOR) {
+  const safeDivisor = THREE.MathUtils.clamp(Math.round(getFiniteOrDefault(divisor, DEFAULT_RADIOSITY_RESOLUTION_DIVISOR)), 2, 6);
   return {
-    width: Math.max(1, Math.round(Math.max(1, width) * 0.25)),
-    height: Math.max(1, Math.round(Math.max(1, height) * 0.25)),
+    width: Math.max(1, Math.round(Math.max(1, width) / safeDivisor)),
+    height: Math.max(1, Math.round(Math.max(1, height) / safeDivisor)),
   };
 }
 
@@ -285,6 +287,7 @@ void main() {
       blurColor: new THREE.Color(0, 0, 0),
       radiosityLimit: VCS_TRAILS_LIMIT,
       radiosityIntensity: SKYGFX_RADIOSITY_INTENSITY,
+      radiosityResolutionDivisor: DEFAULT_RADIOSITY_RESOLUTION_DIVISOR,
       blurOffset: VCS_BLUR_OFFSET,
       blurIntensity: VCS_BLUR_INTENSITY,
       historyIntensity: VCS_HISTORY_INTENSITY,
@@ -298,6 +301,7 @@ void main() {
       blurColor: new THREE.Color(0, 0, 0),
       radiosityLimit: VCS_TRAILS_LIMIT,
       radiosityIntensity: SKYGFX_RADIOSITY_INTENSITY,
+      radiosityResolutionDivisor: DEFAULT_RADIOSITY_RESOLUTION_DIVISOR,
       blurOffset: VCS_BLUR_OFFSET,
       blurIntensity: VCS_BLUR_INTENSITY,
       historyIntensity: VCS_HISTORY_INTENSITY,
@@ -327,6 +331,11 @@ void main() {
   setConfig(config = {}) {
     const nextRadiosityLimit = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsLimit, VCS_TRAILS_LIMIT), 0, 255);
     const nextRadiosityIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsIntensity, SKYGFX_RADIOSITY_INTENSITY), 0, 63);
+    const nextRadiosityResolutionDivisor = THREE.MathUtils.clamp(
+      Math.round(getFiniteOrDefault(config.radiosityResolutionDivisor, DEFAULT_RADIOSITY_RESOLUTION_DIVISOR)),
+      2,
+      6,
+    );
     const nextBlurOffset = Math.max(0, getFiniteOrDefault(config.blurOffset, VCS_BLUR_OFFSET));
     const nextBlurIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.blurIntensity, VCS_BLUR_INTENSITY), 0, 1);
     const nextHistoryIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.historyIntensity, VCS_HISTORY_INTENSITY), 0, 1);
@@ -338,6 +347,7 @@ void main() {
     const configChanged = (
       this.configRuntime.radiosityLimit !== nextRadiosityLimit
       || this.configRuntime.radiosityIntensity !== nextRadiosityIntensity
+      || this.configRuntime.radiosityResolutionDivisor !== nextRadiosityResolutionDivisor
       || this.configRuntime.blurOffset !== nextBlurOffset
       || this.configRuntime.blurIntensity !== nextBlurIntensity
       || this.configRuntime.historyIntensity !== nextHistoryIntensity
@@ -350,6 +360,7 @@ void main() {
 
     this.configRuntime.radiosityLimit = nextRadiosityLimit;
     this.configRuntime.radiosityIntensity = nextRadiosityIntensity;
+    this.configRuntime.radiosityResolutionDivisor = nextRadiosityResolutionDivisor;
     this.configRuntime.blurOffset = nextBlurOffset;
     this.configRuntime.blurIntensity = nextBlurIntensity;
     this.configRuntime.historyIntensity = nextHistoryIntensity;
@@ -362,6 +373,7 @@ void main() {
     this.runtime.blurColor.copy(this.configRuntime.blurColor);
     this.runtime.radiosityLimit = this.configRuntime.radiosityLimit;
     this.runtime.radiosityIntensity = this.configRuntime.radiosityIntensity;
+    this.runtime.radiosityResolutionDivisor = this.configRuntime.radiosityResolutionDivisor;
     this.runtime.blurOffset = this.configRuntime.blurOffset;
     this.runtime.blurIntensity = this.configRuntime.blurIntensity;
     this.runtime.historyIntensity = this.configRuntime.historyIntensity;
@@ -377,7 +389,11 @@ void main() {
   ensureSize(width, height) {
     const nextWidth = Math.max(1, Math.floor(width || 1));
     const nextHeight = Math.max(1, Math.floor(height || 1));
-    const nextRadiositySize = computeRadiositySize(nextWidth, nextHeight);
+    const nextRadiositySize = computeRadiositySize(
+      nextWidth,
+      nextHeight,
+      this.runtime.radiosityResolutionDivisor,
+    );
     if (
       this.viewportWidth === nextWidth
       && this.viewportHeight === nextHeight
@@ -431,6 +447,7 @@ void main() {
   updateRuntime(runtimeContext = {}) {
     this.runtime.radiosityLimit = this.configRuntime.radiosityLimit;
     this.runtime.radiosityIntensity = this.configRuntime.radiosityIntensity;
+    this.runtime.radiosityResolutionDivisor = this.configRuntime.radiosityResolutionDivisor;
     this.runtime.blurOffset = this.configRuntime.blurOffset;
     this.runtime.blurIntensity = this.configRuntime.blurIntensity;
     this.runtime.historyIntensity = this.configRuntime.historyIntensity;

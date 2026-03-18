@@ -4517,6 +4517,27 @@ function App() {
                   ImGui.Columns(1);
                   ImGui.PopID();
                 };
+                const renderPostFxSliderIntRow = (id, label, getter, setter, min, max) => {
+                  ImGui.PushID(id);
+                  ImGui.Columns(2, `postfx-row-${id}`, false);
+                  ImGui.SetColumnWidth(0, 170);
+                  ImGui.PushItemWidth(-1);
+                  ImGui.SliderInt(
+                    '##value',
+                    (value = getter()) => {
+                      setter(value);
+                      return value;
+                    },
+                    min,
+                    max,
+                  );
+                  ImGui.PopItemWidth();
+                  ImGui.NextColumn();
+                  ImGui.AlignTextToFramePadding();
+                  ImGui.TextUnformatted(label);
+                  ImGui.Columns(1);
+                  ImGui.PopID();
+                };
                 const renderPipelineDebugSection = (category, label, description) => {
                   const selection = pipelineDebug[category];
                   const status = rwPipelineControllerRef.current.describeSelection(category, {
@@ -4604,6 +4625,7 @@ function App() {
                     if (hasLiveTimecyclePostFx) ImGui.BeginDisabled();
                     renderPostFxSliderRow(`postfx-${category}-trails-limit`, 'Radiosity Limit', () => liveRadiosityLimit, (value) => { selection.config.trailsLimit = Math.round(value); }, 0, 255, '%.0f');
                     renderPostFxSliderRow(`postfx-${category}-trails-intensity`, 'Radiosity Intensity', () => liveRadiosityIntensity, (value) => { selection.config.trailsIntensity = Math.round(value); }, 0, 63, '%.0f');
+                    renderPostFxSliderIntRow(`postfx-${category}-radiosity-resolution-divisor`, 'Radiosity Res Div', () => selection.config.radiosityResolutionDivisor ?? 4, (value) => { selection.config.radiosityResolutionDivisor = value; }, 2, 6);
                     renderPostFxSliderRow(`postfx-${category}-blur-offset`, 'Blur Offset', () => liveBlurOffset, (value) => { selection.config.blurOffset = value; }, 0, 8, '%.2f');
                     renderPostFxSliderRow(`postfx-${category}-blur-intensity`, 'Blur Intensity', () => liveBlurIntensity, (value) => { selection.config.blurIntensity = value; }, 0, 1, '%.3f');
                     if (hasLiveTimecyclePostFx) ImGui.EndDisabled();
