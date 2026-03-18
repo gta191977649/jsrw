@@ -44,6 +44,7 @@ import { RW_STARS_DEBUG_DEFAULTS } from './lib/RWStarsConstants';
 import { RWStarsPipeline } from './lib/RWStarsPipeline';
 import { RW_SUN_DEBUG_DEFAULTS } from './lib/RWSunConstants';
 import { RWSunPipeline } from './lib/RWSunPipeline';
+import { calcScreenCoorsLikeRw } from './lib/RWSkySpriteUtils';
 import { applyRwIdeFlagsToInstance, decodeRwIdeFlags } from './lib/rwFlags';
 import {
   applyGlobalBackfaceCulling,
@@ -3180,11 +3181,13 @@ function App() {
           camera.position.z + (localX * cloudRotSin) - (localZ * cloudRotCos),
         );
         sprite.material.color.copy(fluffyBottomColor).lerp(fluffyTopColor, 0.4);
-        if (sunMetrics?.onScreen && sunSettings.enabled) {
-          const spriteNdc = sprite.position.clone().project(camera);
-          const spriteScreenX = (spriteNdc.x * 0.5 + 0.5) * viewportWidth;
-          const spriteScreenY = (-spriteNdc.y * 0.5 + 0.5) * viewportHeight;
-          const distanceToSun = Math.hypot(spriteScreenX - sunMetrics.screenX, spriteScreenY - sunMetrics.screenY);
+        if (sunMetrics?.onScreen && sunSettings.enabled && sunMetrics.rwScreen) {
+          const spriteRwScreen = calcScreenCoorsLikeRw(camera, sprite.position, viewportWidth, viewportHeight, false);
+          if (spriteRwScreen) {
+            const distanceToSun = Math.hypot(
+              spriteRwScreen.x - sunMetrics.rwScreen.x,
+              spriteRwScreen.y - sunMetrics.rwScreen.y,
+            );
           const highlight = (
             (1 - Math.max(foggyness, cloudCoverage))
             * THREE.MathUtils.clamp(1 - (distanceToSun / (viewportWidth * sunSettings.cloudHighlightRadius)), 0, 1)
@@ -3197,11 +3200,15 @@ function App() {
               highlightSprite.position.copy(sprite.position);
               highlightSprite.material.color.setRGB((200 / 255) * highlight, 0, 0, THREE.SRGBColorSpace);
               highlightSprite.material.opacity = THREE.MathUtils.clamp(highlight, 0, 1);
-              highlightSprite.material.rotation = 1.7 - Math.atan2(spriteScreenX - sunMetrics.screenX, spriteScreenY - sunMetrics.screenY);
+              highlightSprite.material.rotation = 1.7 - Math.atan2(
+                spriteRwScreen.x - sunMetrics.rwScreen.x,
+                spriteRwScreen.y - sunMetrics.rwScreen.y,
+              );
             }
           }
           if (distanceToSun < viewportWidth * sunSettings.cloudBlockRadius) {
             sunBlockedByClouds = true;
+          }
           }
         }
         sprite.material.opacity = fluffyCloudAlpha;
@@ -4770,7 +4777,6 @@ function App() {
               renderSunSliderRow('core-alpha', 'Core Alpha', () => sunSettings.coreAlpha, (value) => { sunSettings.coreAlpha = value; }, 0, 2);
               renderSunSliderRow('corona-alpha', 'Corona Alpha', () => sunSettings.coronaAlpha, (value) => { sunSettings.coronaAlpha = value; }, 0, 2);
               renderSunSliderRow('fade-speed', 'Fade Speed', () => sunSettings.fadeSpeed, (value) => { sunSettings.fadeSpeed = value; }, 0, 8);
-              renderSunSliderRow('occlusion-interval', 'Occlusion Interval ms', () => sunSettings.occlusionCheckIntervalMs, (value) => { sunSettings.occlusionCheckIntervalMs = value; }, 16, 2000, '%.0f');
               renderSunSliderRow('cloud-highlight-radius', 'Cloud Highlight Radius', () => sunSettings.cloudHighlightRadius, (value) => { sunSettings.cloudHighlightRadius = value; }, 0.01, 1);
               renderSunSliderRow('cloud-highlight-strength', 'Cloud Highlight Strength', () => sunSettings.cloudHighlightStrength, (value) => { sunSettings.cloudHighlightStrength = value; }, 0, 2);
               renderSunSliderRow('cloud-block-radius', 'Cloud Block Radius', () => sunSettings.cloudBlockRadius, (value) => { sunSettings.cloudBlockRadius = value; }, 0.01, 0.5);

@@ -220,7 +220,6 @@ export class RWSunPipeline {
     this.coronaFadeAlpha = 0;
     this.bigBloomFadeAlpha = 0;
     this.bigBloomScale = 1;
-    this.occlusionAlpha = 1;
     this.occludedByWorld = false;
     this.sunVisible = false;
     this.sunOnScreen = false;
@@ -232,7 +231,6 @@ export class RWSunPipeline {
     this.sunRwScreen = null;
     this.lastVisibleSunScreen = { x: SCREEN_HIDDEN, y: SCREEN_HIDDEN };
     this.lastVisibleSunRwScreen = null;
-    this.lastOcclusionCheckAt = -Infinity;
     this.occlusionRaycaster = new THREE.Raycaster();
     this.occlusionRaycaster.firstHitOnly = false;
     this.setVisible(false);
@@ -323,19 +321,18 @@ export class RWSunPipeline {
     const shouldCheckOcclusion = (
       settings.useWorldOcclusion
       && sunMetrics.visible
-      && (timeMs - this.lastOcclusionCheckAt) >= settings.occlusionCheckIntervalMs
+      && sunMetrics.coronaVisible
+      && sunMetrics.rwScreen
     );
 
     if (shouldCheckOcclusion) {
-      this.lastOcclusionCheckAt = timeMs;
       this.occludedByWorld = this.computeWorldOcclusion(camera, worldRoot);
-      this.occlusionAlpha = this.occludedByWorld ? 0 : 1;
-    } else if (!settings.useWorldOcclusion) {
+    } else {
       this.occludedByWorld = false;
-      this.occlusionAlpha = 1;
     }
 
     const blockedByClouds = settings.useCloudOcclusion && sunBlockedByClouds;
+    const blockedByWorld = settings.useWorldOcclusion && this.occludedByWorld;
     const values = timecycleSample?.values || {};
     const spriteSize = Math.max(0, Number(values.spriteSize) || 0);
     const spriteBrightness = Math.max(0, Number(values.spriteBrightness) || 0);
@@ -363,7 +360,7 @@ export class RWSunPipeline {
       sunMetrics.onScreen &&
       sunMetrics.coronaVisible &&
       sunMetrics.rwScreen &&
-      this.occlusionAlpha > 0.5 &&
+      !blockedByWorld &&
       !blockedByClouds
     );
     const coreTargetAlpha = (
@@ -371,14 +368,14 @@ export class RWSunPipeline {
       && sunMetrics.aboveHorizon
       && sunMetrics.visible
       && sunMetrics.rwScreen
-      && this.occlusionAlpha > 0.5
+      && !blockedByWorld
     ) ? 255 : 0;
     const coronaTargetAlpha = (
       settings.enabled
       && sunMetrics.coronaVisible
       && sunMetrics.visible
       && sunMetrics.rwScreen
-      && this.occlusionAlpha > 0.5
+      && !blockedByWorld
       && !blockedByClouds
     ) ? 255 : 0;
     const bloomTargetAlpha = bloomEligible ? (255 * bloomBrightnessScale) : 0;
@@ -386,8 +383,7 @@ export class RWSunPipeline {
       ? (1 + (bloomBrightnessScale * Math.max(0.5, spriteSize)))
       : 1;
     const fadeStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 30;
-    const bigBloomFadeStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 18;
-    const bigBloomScaleStep = Math.max(0, settings.fadeSpeed) * Math.max(0, dt) * 0.08;
+    const bigBloomFadeStep = fadeStep;
     if (settings.debugBypassFade) {
       this.coreFadeAlpha = coreTargetAlpha;
       this.coronaFadeAlpha = coronaTargetAlpha;
@@ -402,10 +398,13 @@ export class RWSunPipeline {
 
       if (this.bigBloomFadeAlpha < bloomTargetAlpha) this.bigBloomFadeAlpha = Math.min(this.bigBloomFadeAlpha + bigBloomFadeStep, bloomTargetAlpha);
       else if (this.bigBloomFadeAlpha > bloomTargetAlpha) this.bigBloomFadeAlpha = Math.max(this.bigBloomFadeAlpha - bigBloomFadeStep, bloomTargetAlpha);
-
-      if (this.bigBloomScale < bloomTargetScale) this.bigBloomScale = Math.min(this.bigBloomScale + bigBloomScaleStep, bloomTargetScale);
-      else if (this.bigBloomScale > bloomTargetScale) this.bigBloomScale = Math.max(this.bigBloomScale - bigBloomScaleStep, bloomTargetScale);
     }
+
+    const bloomFullAlpha = Math.max(1, 255 * bloomBrightnessScale);
+    const bloomFadeEnvelope = clamp01(this.bigBloomFadeAlpha / bloomFullAlpha);
+    const coronaFadeEnvelope = clamp01(this.coronaFadeAlpha / 255);
+    const bloomVisibility = Math.min(bloomFadeEnvelope, coronaFadeEnvelope);
+    this.bigBloomScale = 1 + ((bloomTargetScale - 1) * bloomVisibility);
 
     this.applySpriteState(camera, timecycleSample, settings, timeMs);
 
@@ -457,8 +456,10 @@ export class RWSunPipeline {
       return;
     }
 
-    const showCore = this.coreFadeAlpha > 0.001 && this.sunAboveHorizon;
-    const showCorona = this.coronaFadeAlpha > 0.001 && this.sunCoronaVisible;
+    const coreFadeVisibility = Math.pow(clamp01(this.coreFadeAlpha / 255), 2.6);
+    const coronaFadeVisibility = clamp01(this.coronaFadeAlpha / 255);
+    const showCore = coreFadeVisibility > 0.001 && this.sunAboveHorizon;
+    const showCorona = coronaFadeVisibility > 0.001 && this.sunCoronaVisible;
     this.coreSprite.visible = showCore;
     this.coronaSprite.visible = showCorona;
     for (const sprite of this.flareSprites) {
@@ -488,10 +489,19 @@ export class RWSunPipeline {
     this.coronaSprite.material.color.setRGB(coronaColor.r / 255, coronaColor.g / 255, coronaColor.b / 255, THREE.SRGBColorSpace);
     this.coreSprite.material.rotation = rotation;
     this.coronaSprite.material.rotation = rotation;
-    this.coreSprite.material.opacity = clamp01((this.coreFadeAlpha / 255) * settings.coreAlpha);
-    this.coronaSprite.material.opacity = clamp01((this.coronaFadeAlpha / 255) * settings.coronaAlpha);
+    const coreScaleVisibility = THREE.MathUtils.lerp(0.58, 1.0, coreFadeVisibility);
+    this.coreSprite.material.opacity = clamp01(coreFadeVisibility * settings.coreAlpha);
+    this.coronaSprite.material.opacity = clamp01(coronaFadeVisibility * settings.coronaAlpha);
 
-    setRwSpriteScreenPosition(this.coreSprite, screen.x, screen.y, this.viewportWidth, this.viewportHeight, coreWidthPx, coreHeightPx);
+    setRwSpriteScreenPosition(
+      this.coreSprite,
+      screen.x,
+      screen.y,
+      this.viewportWidth,
+      this.viewportHeight,
+      coreWidthPx * coreScaleVisibility,
+      coreHeightPx * coreScaleVisibility,
+    );
     setRwSpriteScreenPosition(this.coronaSprite, screen.x, screen.y, this.viewportWidth, this.viewportHeight, coronaWidthPx, coronaHeightPx);
 
     const centerX = this.viewportWidth * 0.5;
@@ -510,7 +520,7 @@ export class RWSunPipeline {
         THREE.SRGBColorSpace,
       );
       sprite.material.rotation = 0;
-      sprite.material.opacity = clamp01((this.coronaFadeAlpha / 255) * (definition.alpha / 255) * settings.flareAlphaScale * Math.max(0.25, spriteBrightness / 10));
+      sprite.material.opacity = clamp01(coronaFadeVisibility * (definition.alpha / 255) * settings.flareAlphaScale * Math.max(0.25, spriteBrightness / 10));
       setRwSpriteScreenPosition(sprite, flareX, flareY, this.viewportWidth, this.viewportHeight, flareHalfWidthPx * 2, flareHalfHeightPx * 2);
     }
   }

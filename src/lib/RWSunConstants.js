@@ -23,7 +23,6 @@ export const RW_SUN_DEBUG_DEFAULTS = Object.freeze({
   coreAlpha: 1,
   coronaAlpha: 1,
   fadeSpeed: 15,
-  occlusionCheckIntervalMs: 250,
   cloudHighlightRadius: 0.5,
   cloudHighlightStrength: 1,
   cloudBlockRadius: 0.1,
