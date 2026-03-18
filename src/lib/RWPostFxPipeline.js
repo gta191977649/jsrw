@@ -8,11 +8,6 @@ const VCS_BLUR_INTENSITY = (39.0 * 0.8) / 255.0;
 const VCS_HISTORY_INTENSITY = 32 / 255.0;
 const VCS_TRAILS_LIMIT = 80;
 const VCS_TRAILS_INTENSITY = 38;
-const VCS_RADIOSITY_MIN_WIDTH = 256;
-const VCS_RADIOSITY_MIN_HEIGHT = 128;
-const VCS_RADIOSITY_MAX_WIDTH = 512;
-const VCS_RADIOSITY_MAX_HEIGHT = 256;
-const VCS_RADIOSITY_SCALE = 0.2;
 const VCS_RADIOSITY_PING_PONG_PASSES = 4;
 const VCS_RADIOSITY_SPREAD_WEIGHT = 36 / 255;
 const POSTFX_DEBUG_VIEW = Object.freeze({
@@ -49,11 +44,9 @@ function createRenderTarget(width, height, options = {}) {
 }
 
 function computeRadiositySize(width, height) {
-  const scaledWidth = Math.round(Math.max(1, width) * VCS_RADIOSITY_SCALE);
-  const scaledHeight = Math.round(Math.max(1, height) * VCS_RADIOSITY_SCALE);
   return {
-    width: THREE.MathUtils.clamp(scaledWidth, VCS_RADIOSITY_MIN_WIDTH, VCS_RADIOSITY_MAX_WIDTH),
-    height: THREE.MathUtils.clamp(scaledHeight, VCS_RADIOSITY_MIN_HEIGHT, VCS_RADIOSITY_MAX_HEIGHT),
+    width: Math.max(1, Math.round(Math.max(1, width) * 0.5)),
+    height: Math.max(1, Math.round(Math.max(1, height) * 0.5)),
   };
 }
 
@@ -90,8 +83,8 @@ export class RWPostFxPipeline {
     this.enabled = true;
     this.viewportWidth = 1;
     this.viewportHeight = 1;
-    this.radiosityWidth = VCS_RADIOSITY_MIN_WIDTH;
-    this.radiosityHeight = VCS_RADIOSITY_MIN_HEIGHT;
+    this.radiosityWidth = 1;
+    this.radiosityHeight = 1;
     this.hasHistory = false;
 
     this.sceneTarget = null;
@@ -148,7 +141,7 @@ export class RWPostFxPipeline {
     this.radiosityBlurMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uTex: { value: null },
-        uTexelSize: { value: new THREE.Vector2(1 / VCS_RADIOSITY_MIN_WIDTH, 1 / VCS_RADIOSITY_MIN_HEIGHT) },
+        uTexelSize: { value: new THREE.Vector2(1, 1) },
         uOffsetSet: { value: 0 },
         uWeight: { value: VCS_RADIOSITY_SPREAD_WEIGHT },
       },
