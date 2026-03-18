@@ -201,6 +201,22 @@ function computeSkyLightMultFromLightsMult(lightsMult) {
   return (1 / safeLightsMult + 3) * 0.25;
 }
 
+function getTimecyclePostFxControlValues(values) {
+  if (!values?.blur) return null;
+  return {
+    trailsLimit: Math.round(THREE.MathUtils.clamp(Number(values.radiosityLimit) || 0, 0, 255)),
+    trailsIntensity: Math.round(THREE.MathUtils.clamp(Number(values.radiosityIntensity) || 0, 0, 63)),
+    blurOffset: THREE.MathUtils.clamp(Number(values.blurOffset) || 0, 0, 32),
+    blurIntensity: THREE.MathUtils.clamp(((Number(values.postfx1?.a ?? values.blurAlpha) || 0) * 0.8) / 255, 0, 1),
+  };
+}
+
+function getTimecyclePostFxControlSignature(values) {
+  const postFx = getTimecyclePostFxControlValues(values);
+  if (!postFx) return 'none';
+  return JSON.stringify(postFx);
+}
+
 function approachValue(current, target, delta) {
   if (current < target) return Math.min(current + delta, target);
   if (current > target) return Math.max(current - delta, target);
@@ -795,6 +811,7 @@ function App() {
     coronaFadeAlpha: 0,
     sunLightsMult: 1,
   });
+  const postFxTimecycleSyncSignatureRef = useRef('');
 
   const [status, setStatus] = useState('Select an extracted GTA folder to begin.');
   const [activeBackend, setActiveBackend] = useState('WebGL');
@@ -3127,6 +3144,23 @@ function App() {
         timecycleInfo.current = null;
       }
       const timecycleCurrent = timecycleInfo.current;
+      const livePostFxControlValues = getTimecyclePostFxControlValues(timecycleCurrent?.values);
+      const livePostFxControlSignature = getTimecyclePostFxControlSignature(timecycleCurrent?.values);
+      const postFxDebugSelection = uiStateRef.current.pipelineDebug?.[RW_PIPELINE_CATEGORY.POSTFX];
+      if (postFxDebugSelection) {
+        postFxDebugSelection.config ||= {
+          ...RW_PIPELINE_SELECTION_DEFAULTS[RW_PIPELINE_CATEGORY.POSTFX].config,
+        };
+        if (livePostFxControlValues && postFxTimecycleSyncSignatureRef.current !== livePostFxControlSignature) {
+          postFxDebugSelection.config.trailsLimit = livePostFxControlValues.trailsLimit;
+          postFxDebugSelection.config.trailsIntensity = livePostFxControlValues.trailsIntensity;
+          postFxDebugSelection.config.blurOffset = livePostFxControlValues.blurOffset;
+          postFxDebugSelection.config.blurIntensity = livePostFxControlValues.blurIntensity;
+          postFxTimecycleSyncSignatureRef.current = livePostFxControlSignature;
+        } else if (!livePostFxControlValues) {
+          postFxTimecycleSyncSignatureRef.current = 'none';
+        }
+      }
       const effectiveFarClip = Number.isFinite(timecycleCurrent?.values?.farClip)
         ? timecycleCurrent.values.farClip
         : uiStateRef.current.renderingDistance;
@@ -4700,7 +4734,7 @@ function App() {
                       format: '%.3f',
                     });
                     if (hasLiveTimecyclePostFx) {
-                      ImGui.TextDisabled('Timecycle postfx values are available for reference, but these sliders now override the runtime pipeline.');
+                      ImGui.TextDisabled('These values follow timecyc by default. Manual edits persist until Time/Weather changes and timecyc postfx values are resynced.');
                     }
                     ImGui.Checkbox(
                       `Enable Radiosity##${category}`,
