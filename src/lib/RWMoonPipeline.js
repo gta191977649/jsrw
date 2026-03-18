@@ -26,11 +26,14 @@ function createFallbackMoonTexture() {
 }
 
 function resolveMoonScale(settings) {
+  if (settings.smallMoon) {
+    return settings.smallMoonScale;
+  }
   const moonSizeIndex = Number(settings?.moonSizeIndex);
-  if (Number.isFinite(moonSizeIndex)) {
+  if (Number.isFinite(moonSizeIndex) && moonSizeIndex > 0) {
     return (THREE.MathUtils.clamp(moonSizeIndex, 0, 7) * 2) + 4;
   }
-  return settings.smallMoon ? settings.smallMoonScale : settings.baseScale;
+  return settings.baseScale;
 }
 
 export class RWMoonPipeline {
@@ -72,38 +75,27 @@ export class RWMoonPipeline {
     const hour = Number(timecycleSample?.hour) || 0;
     const minuteOfHour = Number(timecycleSample?.minute) || 0;
     const totalMinutes = (hour * 60) + minuteOfHour;
+    const fadeCenterMinutes = Number.isFinite(Number(settings.fadeCenterMinutes))
+      ? Number(settings.fadeCenterMinutes)
+      : RW_MOON_DEBUG_DEFAULTS.fadeCenterMinutes;
+    const fadeWindowMinutes = Math.max(
+      1,
+      Number.isFinite(Number(settings.fadeWindowMinutes))
+        ? Number(settings.fadeWindowMinutes)
+        : RW_MOON_DEBUG_DEFAULTS.fadeWindowMinutes,
+    );
+    const moonFadeOut = Math.abs(totalMinutes - fadeCenterMinutes);
 
-    const NIGHT_START = 18 * 60;
-    const NIGHT_END = 6 * 60;
-    const FADE_DURATION = 180;
-
-    const isEveningNight = totalMinutes >= NIGHT_START;
-    const isMorningNight = totalMinutes < NIGHT_END;
-    const isNight = isEveningNight || isMorningNight;
-
-    if (!isNight) {
+    if (moonFadeOut >= fadeWindowMinutes) {
       this.sprite.visible = false;
       return { visible: false, brightness: 0 };
-    }
-
-    let fadeFactor = 1;
-    if (isEveningNight) {
-      const minutesIntoNight = totalMinutes - NIGHT_START;
-      fadeFactor = minutesIntoNight < FADE_DURATION
-        ? minutesIntoNight / FADE_DURATION
-        : 1;
-    } else {
-      const minutesUntilDawn = NIGHT_END - totalMinutes;
-      fadeFactor = minutesUntilDawn < FADE_DURATION
-        ? minutesUntilDawn / FADE_DURATION
-        : 1;
     }
 
     const foggyness = THREE.MathUtils.clamp(timecycleSample?.foggyness ?? 0, 0, 1);
     const cloudCoverage = THREE.MathUtils.clamp(timecycleSample?.cloudCoverage ?? 0, 0, 1);
     const coverage = settings.coverageDimming ? Math.max(foggyness, cloudCoverage) : 0;
     const brightness = THREE.MathUtils.clamp(
-      (1 - coverage) * fadeFactor * 255 * settings.brightnessScale,
+      (1 - coverage) * (fadeWindowMinutes - Math.floor(moonFadeOut)) * settings.brightnessScale,
       0,
       255,
     );

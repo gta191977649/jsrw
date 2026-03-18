@@ -19,6 +19,7 @@ const TMP_CAMERA_FORWARD = new THREE.Vector3();
 const SUN_BLOOM_MIN_RADIUS = 0.18;
 const SUN_BLOOM_MAX_RADIUS = 0.65;
 const FADE_SCREEN_MARGIN = 0.3;
+const SUN_OCCLUSION_RECHECK_MS = 2000;
 const SUN_BLOOM_CORE_SCALE = 0.55;
 
 function clamp01(value) {
@@ -238,6 +239,8 @@ export class RWSunPipeline {
     this.lastVisibleSunRwScreen = null;
     this.occlusionRaycaster = new THREE.Raycaster();
     this.occlusionRaycaster.firstHitOnly = false;
+    this.lastOcclusionCheckMs = Number.NEGATIVE_INFINITY;
+    this.occlusionWasEligible = false;
     this.setVisible(false);
   }
 
@@ -333,9 +336,17 @@ export class RWSunPipeline {
     );
 
     if (shouldCheckOcclusion) {
-      this.occludedByWorld = this.computeWorldOcclusion(camera, worldRoot);
+      const nowMs = Number.isFinite(timeMs) ? timeMs : 0;
+      const needsOcclusionCheck = !this.occlusionWasEligible || nowMs >= (this.lastOcclusionCheckMs + SUN_OCCLUSION_RECHECK_MS);
+      if (needsOcclusionCheck) {
+        this.occludedByWorld = this.computeWorldOcclusion(camera, worldRoot);
+        this.lastOcclusionCheckMs = nowMs;
+      }
+      this.occlusionWasEligible = true;
     } else {
       this.occludedByWorld = false;
+      this.lastOcclusionCheckMs = Number.NEGATIVE_INFINITY;
+      this.occlusionWasEligible = false;
     }
 
     const blockedByClouds = settings.useCloudOcclusion && sunBlockedByClouds;

@@ -131,6 +131,59 @@ function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
 }
 
+function runImguiSlider(ImGui, {
+  type = 'float',
+  id,
+  value,
+  setValue,
+  min,
+  max,
+  format,
+}) {
+  let sliderValue = value;
+  const onChange = (nextValue = sliderValue) => {
+    sliderValue = nextValue;
+    return nextValue;
+  };
+  const changed = type === 'int'
+    ? ImGui.SliderInt(id, onChange, min, max, format)
+    : ImGui.SliderFloat(id, onChange, min, max, format);
+  if (changed) setValue(sliderValue);
+  return changed;
+}
+
+function renderImguiSliderRow(ImGui, {
+  id,
+  rowPrefix,
+  label,
+  value,
+  setValue,
+  min,
+  max,
+  format,
+  type = 'float',
+}) {
+  ImGui.PushID(id);
+  ImGui.Columns(2, `${rowPrefix}-${id}`, false);
+  ImGui.SetColumnWidth(0, 170);
+  ImGui.PushItemWidth(-1);
+  runImguiSlider(ImGui, {
+    type,
+    id: '##value',
+    value,
+    setValue,
+    min,
+    max,
+    format: format ?? (type === 'int' ? '%d' : '%.2f'),
+  });
+  ImGui.PopItemWidth();
+  ImGui.NextColumn();
+  ImGui.AlignTextToFramePadding();
+  ImGui.TextUnformatted(label);
+  ImGui.Columns(1);
+  ImGui.PopID();
+}
+
 function computeSunLightIntensityFromState(sunState) {
   const sunElevation = Number(sunState?.gtaDirection?.z);
   if (!Number.isFinite(sunElevation)) return 0.8;
@@ -139,8 +192,8 @@ function computeSunLightIntensityFromState(sunState) {
 }
 
 function computeSunLightsMultFromState(sunState) {
-  const bloomAlpha = clamp01(Number(sunState?.bigBloomFadeAlpha) || 0);
-  return THREE.MathUtils.lerp(1.0, 0.72, bloomAlpha);
+  const coronaAlpha = clamp01(Number(sunState?.fadeAlpha) || 0);
+  return THREE.MathUtils.lerp(1.0, 0.6, coronaAlpha);
 }
 
 function computeSkyLightMultFromLightsMult(lightsMult) {
@@ -768,6 +821,7 @@ function App() {
   const [loadedFiles, setLoadedFiles] = useState([]);
   const [selectedObject, setSelectedObject] = useState(null);
   const [selectedTextureDetail, setSelectedTextureDetail] = useState(null);
+  const [showMapPickerFallback, setShowMapPickerFallback] = useState(false);
   const statusRef = useRef(status);
   const statsRef = useRef(stats);
   const buildProgressRef = useRef(buildProgress);
@@ -2137,8 +2191,47 @@ function App() {
     pushConsoleLine('info', `Folder indexed: ${index.count} files`);
 
     setStats((prev) => ({ ...prev, files: index.count }));
+    setShowMapPickerFallback(false);
     setStatus(`Indexed ${index.count} files. Click Build World.`);
+    event.target.value = '';
   }, [pushConsoleLine]);
+
+  const openMapPicker = useCallback((source = 'dom') => {
+    const input = fileInputRef.current;
+    if (!input) return false;
+
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+    const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|FxiOS/i.test(ua);
+
+    input.value = '';
+
+    try {
+      if (typeof input.showPicker === 'function') {
+        input.showPicker();
+        setShowMapPickerFallback(false);
+        return true;
+      }
+    } catch {
+      // Safari may reject showPicker/click outside a trusted DOM gesture.
+    }
+
+    try {
+      input.click();
+      if (source !== 'imgui' || !isSafari) {
+        setShowMapPickerFallback(false);
+      } else {
+        setShowMapPickerFallback(true);
+        setStatus('Safari may block file dialogs from the ImGui menu. Click the HUD folder picker below.');
+      }
+      return true;
+    } catch {
+      if (isSafari) {
+        setShowMapPickerFallback(true);
+        setStatus('Safari blocked the ImGui file dialog. Click the HUD folder picker below.');
+      }
+      return false;
+    }
+  }, []);
 
   const setInstanceHandlesVisible = useCallback((handles, visible, dirtyBatches) => {
     if (!Array.isArray(handles) || handles.length === 0) return;
@@ -3738,7 +3831,7 @@ function App() {
         if (ImGui.BeginMainMenuBar()) {
           if (ImGui.BeginMenu('File')) {
             if (ImGui.MenuItem('Load map')) {
-              fileInputRef.current?.click();
+              openMapPicker('imgui');
             }
             ImGui.EndMenu();
           }
@@ -3869,39 +3962,48 @@ function App() {
         );
         ImGui.Text('draw dist: LOD switch distance (near model <-> LOD)');
         ImGui.PushItemWidth(-1);
-        ImGui.SliderInt(
+        let drawDistanceValue = Math.round(uiStateRef.current.drawDistance);
+        if (ImGui.SliderInt(
           'draw dist',
-          (value = Math.round(uiStateRef.current.drawDistance)) => {
-            uiStateRef.current.drawDistance = value;
+          (value = drawDistanceValue) => {
+            drawDistanceValue = value;
             return value;
           },
           20,
           3000,
-        );
+        )) {
+          uiStateRef.current.drawDistance = drawDistanceValue;
+        }
         const currentFarClip = timecycleStateRef.current?.current?.values?.farClip;
         ImGui.Text('far clip: max visible distance (timecyc-driven when loaded)');
         if (Number.isFinite(currentFarClip)) ImGui.BeginDisabled();
-        ImGui.SliderInt(
+        let farClipValue = Math.round(Number.isFinite(currentFarClip) ? currentFarClip : uiStateRef.current.renderingDistance);
+        if (ImGui.SliderInt(
           'Far Clip',
-          (value = Math.round(Number.isFinite(currentFarClip) ? currentFarClip : uiStateRef.current.renderingDistance)) => {
-            if (!Number.isFinite(currentFarClip)) uiStateRef.current.renderingDistance = value;
-            return Math.round(Number.isFinite(currentFarClip) ? currentFarClip : value);
+          (value = farClipValue) => {
+            farClipValue = value;
+            return value;
           },
           50,
           20000,
-        );
+        ) && !Number.isFinite(currentFarClip)) {
+          uiStateRef.current.renderingDistance = farClipValue;
+        }
         if (Number.isFinite(currentFarClip)) ImGui.EndDisabled();
         ImGui.Text('lod dist multiplier: VC horizon strip scale');
-        ImGui.SliderFloat(
+        let lodDistMultiplierValue = uiStateRef.current.lodDistMultiplier;
+        if (ImGui.SliderFloat(
           'LOD Dist Multiplier',
-          (value = uiStateRef.current.lodDistMultiplier) => {
-            uiStateRef.current.lodDistMultiplier = value;
+          (value = lodDistMultiplierValue) => {
+            lodDistMultiplierValue = value;
             return value;
           },
           0,
           4,
           '%.2f',
-        );
+        )) {
+          uiStateRef.current.lodDistMultiplier = lodDistMultiplierValue;
+        }
         ImGui.PopItemWidth();
         ImGui.Checkbox(
           'Show grid',
@@ -3995,18 +4097,21 @@ function App() {
             const defaultOpen = ImGui.TreeNodeFlags?.DefaultOpen ?? 0;
             if (ImGui.CollapsingHeader('Time Controls', defaultOpen)) {
               timecycleRow('Time Of Day', () => {
-                ImGui.SliderInt(
+                let totalMinutesValue = (tcControls.hour * 60) + tcControls.minute;
+                if (ImGui.SliderInt(
                   '##time-of-day',
-                  (value = ((tcControls.hour * 60) + tcControls.minute)) => {
-                    const totalMinutes = Math.max(0, Math.min(1439, Math.round(value)));
-                    tcControls.hour = Math.floor(totalMinutes / 60);
-                    tcControls.minute = totalMinutes % 60;
-                    return totalMinutes;
+                  (value = totalMinutesValue) => {
+                    totalMinutesValue = value;
+                    return value;
                   },
                   0,
                   1439,
                   `${String(tcControls.hour).padStart(2, '0')}:${String(tcControls.minute).padStart(2, '0')}`,
-                );
+                )) {
+                  const totalMinutes = Math.max(0, Math.min(1439, Math.round(totalMinutesValue)));
+                  tcControls.hour = Math.floor(totalMinutes / 60);
+                  tcControls.minute = totalMinutes % 60;
+                }
               });
               timecycleRow('Weather A', () => {
                 if (ImGui.BeginCombo('##weather-a', weatherNames[tcControls.weatherA] || 'UNKNOWN')) {
@@ -4029,29 +4134,35 @@ function App() {
                 }
               });
               timecycleRow('Weather Blend', () => {
-                ImGui.SliderFloat(
+                let weatherBlendValue = tcControls.weatherBlend;
+                if (ImGui.SliderFloat(
                   '##weather-blend',
-                  (value = tcControls.weatherBlend) => {
-                    tcControls.weatherBlend = Math.max(0, Math.min(1, value));
-                    return tcControls.weatherBlend;
+                  (value = weatherBlendValue) => {
+                    weatherBlendValue = value;
+                    return value;
                   },
                   0,
                   1,
                   '%.3f',
-                );
+                )) {
+                  tcControls.weatherBlend = Math.max(0, Math.min(1, weatherBlendValue));
+                }
               });
               if (tcData.extraColourCount > 0 && tcData.extraColourWeatherIndex >= 0) {
                 timecycleRow('Extra Colour', () => {
-                  ImGui.SliderInt(
+                  let extraColourValue = tcControls.extraColour;
+                  if (ImGui.SliderInt(
                     '##extra-colour',
-                    (value = tcControls.extraColour) => {
-                      tcControls.extraColour = Math.max(-1, Math.min((tcData.extraColourCount * tcData.hours) - 1, Math.round(value)));
-                      return tcControls.extraColour;
+                    (value = extraColourValue) => {
+                      extraColourValue = value;
+                      return value;
                     },
                     -1,
                     (tcData.extraColourCount * tcData.hours) - 1,
                     tcControls.extraColour < 0 ? 'Disabled' : `Hour ${tcControls.extraColour % tcData.hours}`,
-                  );
+                  )) {
+                    tcControls.extraColour = Math.max(-1, Math.min((tcData.extraColourCount * tcData.hours) - 1, Math.round(extraColourValue)));
+                  }
                 });
               }
               ImGui.TextWrapped(`Current Weather: ${tcCurrent.weatherNameA} -> ${tcCurrent.weatherNameB}`);
@@ -4411,133 +4522,50 @@ function App() {
                     return value;
                   },
                 );
-                const renderWaterSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
-                  ImGui.PushID(id);
-                  ImGui.Columns(2, `water-row-${id}`, false);
-                  ImGui.SetColumnWidth(0, 170);
-                  ImGui.PushItemWidth(-1);
-                  ImGui.SliderFloat(
-                    '##value',
-                    (value = getter()) => {
-                      setter(value);
-                      return value;
-                    },
-                    min,
-                    max,
-                    format,
-                  );
-                  ImGui.PopItemWidth();
-                  ImGui.NextColumn();
-                  ImGui.AlignTextToFramePadding();
-                  ImGui.TextUnformatted(label);
-                  ImGui.Columns(1);
-                  ImGui.PopID();
-                };
-                renderWaterSliderRow(
-                  'uv-speed',
-                  'Texture Scroll Speed',
-                  () => uiStateRef.current.waterUvSpeed,
-                  (value) => { uiStateRef.current.waterUvSpeed = value; },
-                  0,
-                  4,
-                );
-                renderWaterSliderRow(
-                  'wave-height',
-                  'Wave Height Scale',
-                  () => uiStateRef.current.waterWaveHeight,
-                  (value) => { uiStateRef.current.waterWaveHeight = value; },
-                  0,
-                  100,
-                  '%.0f',
-                );
-                renderWaterSliderRow(
-                  'water-alpha',
-                  'Fallback Alpha',
-                  () => uiStateRef.current.waterAlpha,
-                  (value) => { uiStateRef.current.waterAlpha = value; },
-                  0,
-                  1,
-                );
+                renderImguiSliderRow(ImGui, {
+                  id: 'uv-speed',
+                  rowPrefix: 'water-row',
+                  label: 'Texture Scroll Speed',
+                  value: uiStateRef.current.waterUvSpeed,
+                  setValue: (value) => { uiStateRef.current.waterUvSpeed = value; },
+                  min: 0,
+                  max: 4,
+                });
+                renderImguiSliderRow(ImGui, {
+                  id: 'wave-height',
+                  rowPrefix: 'water-row',
+                  label: 'Wave Height Scale',
+                  value: uiStateRef.current.waterWaveHeight,
+                  setValue: (value) => { uiStateRef.current.waterWaveHeight = value; },
+                  min: 0,
+                  max: 100,
+                  format: '%.0f',
+                });
+                renderImguiSliderRow(ImGui, {
+                  id: 'water-alpha',
+                  rowPrefix: 'water-row',
+                  label: 'Fallback Alpha',
+                  value: uiStateRef.current.waterAlpha,
+                  setValue: (value) => { uiStateRef.current.waterAlpha = value; },
+                  min: 0,
+                  max: 1,
+                });
                 ImGui.TextWrapped('RW alignment: wind is pinned to 0, so the default wave profile uses the original 0.3 baseline swell with no weather-driven boost.');
               }
               if (ImGui.CollapsingHeader('Sky', defaultOpen)) {
-                const renderSkySliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
-                  ImGui.PushID(id);
-                  ImGui.Columns(2, `sky-row-${id}`, false);
-                  ImGui.SetColumnWidth(0, 170);
-                  ImGui.PushItemWidth(-1);
-                  ImGui.SliderFloat(
-                    '##value',
-                    (value = getter()) => {
-                      setter(value);
-                      return value;
-                    },
-                    min,
-                    max,
-                    format,
-                  );
-                  ImGui.PopItemWidth();
-                  ImGui.NextColumn();
-                  ImGui.AlignTextToFramePadding();
-                  ImGui.TextUnformatted(label);
-                  ImGui.Columns(1);
-                  ImGui.PopID();
-                };
-                renderSkySliderRow(
-                  'lod-dist-multiplier',
-                  'LOD Dist Multiplier',
-                  () => uiStateRef.current.lodDistMultiplier,
-                  (value) => { uiStateRef.current.lodDistMultiplier = value; },
-                  0,
-                  4,
-                );
+                renderImguiSliderRow(ImGui, {
+                  id: 'lod-dist-multiplier',
+                  rowPrefix: 'sky-row',
+                  label: 'LOD Dist Multiplier',
+                  value: uiStateRef.current.lodDistMultiplier,
+                  setValue: (value) => { uiStateRef.current.lodDistMultiplier = value; },
+                  min: 0,
+                  max: 4,
+                });
               }
               {
                 const gameOptions = getRWPipelineGameOptions();
                 const pipelineDebug = uiStateRef.current.pipelineDebug;
-                const renderPostFxSliderRow = (id, label, getter, setter, min, max, format) => {
-                  ImGui.PushID(id);
-                  ImGui.Columns(2, `postfx-row-${id}`, false);
-                  ImGui.SetColumnWidth(0, 170);
-                  ImGui.PushItemWidth(-1);
-                  ImGui.SliderFloat(
-                    '##value',
-                    (value = getter()) => {
-                      setter(value);
-                      return value;
-                    },
-                    min,
-                    max,
-                    format,
-                  );
-                  ImGui.PopItemWidth();
-                  ImGui.NextColumn();
-                  ImGui.AlignTextToFramePadding();
-                  ImGui.TextUnformatted(label);
-                  ImGui.Columns(1);
-                  ImGui.PopID();
-                };
-                const renderPostFxSliderIntRow = (id, label, getter, setter, min, max) => {
-                  ImGui.PushID(id);
-                  ImGui.Columns(2, `postfx-row-${id}`, false);
-                  ImGui.SetColumnWidth(0, 170);
-                  ImGui.PushItemWidth(-1);
-                  ImGui.SliderInt(
-                    '##value',
-                    (value = getter()) => {
-                      setter(value);
-                      return value;
-                    },
-                    min,
-                    max,
-                  );
-                  ImGui.PopItemWidth();
-                  ImGui.NextColumn();
-                  ImGui.AlignTextToFramePadding();
-                  ImGui.TextUnformatted(label);
-                  ImGui.Columns(1);
-                  ImGui.PopID();
-                };
                 const renderPipelineDebugSection = (category, label, description) => {
                   const selection = pipelineDebug[category];
                   const status = rwPipelineControllerRef.current.describeSelection(category, {
@@ -4586,18 +4614,6 @@ function App() {
                   if (category === RW_PIPELINE_CATEGORY.POSTFX) {
                     const timecyclePostFxValues = timecycleStateRef.current?.current?.values || null;
                     const hasLiveTimecyclePostFx = Boolean(timecyclePostFxValues?.blur);
-                    const liveRadiosityLimit = hasLiveTimecyclePostFx
-                      ? Number(timecyclePostFxValues.radiosityLimit)
-                      : selection.config.trailsLimit;
-                    const liveRadiosityIntensity = hasLiveTimecyclePostFx
-                      ? Number(timecyclePostFxValues.radiosityIntensity)
-                      : selection.config.trailsIntensity;
-                    const liveBlurOffset = hasLiveTimecyclePostFx
-                      ? Number(timecyclePostFxValues.blurOffset)
-                      : selection.config.blurOffset;
-                    const liveBlurIntensity = hasLiveTimecyclePostFx
-                      ? ((Number(timecyclePostFxValues.postfx1?.a ?? timecyclePostFxValues.blurAlpha) || 0) * 0.8 / 255)
-                      : selection.config.blurIntensity;
                     const postFxDebugViewOptions = [
                       ['final', 'Final'],
                       ['scene', 'Scene'],
@@ -4622,16 +4638,69 @@ function App() {
                     }
                     selection.config.enableSunCorona = selection.config.enableBigBloomSunEffect;
                     ImGui.Separator();
-                    if (hasLiveTimecyclePostFx) ImGui.BeginDisabled();
-                    renderPostFxSliderRow(`postfx-${category}-trails-limit`, 'Radiosity Limit', () => liveRadiosityLimit, (value) => { selection.config.trailsLimit = Math.round(value); }, 0, 255, '%.0f');
-                    renderPostFxSliderRow(`postfx-${category}-trails-intensity`, 'Radiosity Intensity', () => liveRadiosityIntensity, (value) => { selection.config.trailsIntensity = Math.round(value); }, 0, 63, '%.0f');
-                    renderPostFxSliderIntRow(`postfx-${category}-radiosity-resolution-divisor`, 'Radiosity Res Div', () => selection.config.radiosityResolutionDivisor ?? 4, (value) => { selection.config.radiosityResolutionDivisor = value; }, 2, 6);
-                    renderPostFxSliderRow(`postfx-${category}-blur-offset`, 'Blur Offset', () => liveBlurOffset, (value) => { selection.config.blurOffset = value; }, 0, 8, '%.2f');
-                    renderPostFxSliderRow(`postfx-${category}-blur-intensity`, 'Blur Intensity', () => liveBlurIntensity, (value) => { selection.config.blurIntensity = value; }, 0, 1, '%.3f');
-                    if (hasLiveTimecyclePostFx) ImGui.EndDisabled();
-                    renderPostFxSliderRow(`postfx-${category}-history-intensity`, 'Trails Intensity', () => selection.config.historyIntensity, (value) => { selection.config.historyIntensity = value; }, 0, 1, '%.3f');
+                    renderImguiSliderRow(ImGui, {
+                      id: `postfx-${category}-trails-limit`,
+                      rowPrefix: 'postfx-row',
+                      label: 'Radiosity Limit',
+                      value: selection.config.trailsLimit,
+                      setValue: (value) => { selection.config.trailsLimit = Math.round(value); },
+                      min: 0,
+                      max: 255,
+                      format: '%.0f',
+                    });
+                    renderImguiSliderRow(ImGui, {
+                      id: `postfx-${category}-trails-intensity`,
+                      rowPrefix: 'postfx-row',
+                      label: 'Radiosity Intensity',
+                      value: selection.config.trailsIntensity,
+                      setValue: (value) => { selection.config.trailsIntensity = Math.round(value); },
+                      min: 0,
+                      max: 63,
+                      format: '%.0f',
+                    });
+                    renderImguiSliderRow(ImGui, {
+                      id: `postfx-${category}-radiosity-resolution-divisor`,
+                      rowPrefix: 'postfx-row',
+                      label: 'Radiosity Res Div',
+                      value: selection.config.radiosityResolutionDivisor ?? 4,
+                      setValue: (value) => { selection.config.radiosityResolutionDivisor = value; },
+                      min: 1,
+                      max: 8,
+                      type: 'int',
+                      format: '%d',
+                    });
+                    renderImguiSliderRow(ImGui, {
+                      id: `postfx-${category}-blur-offset`,
+                      rowPrefix: 'postfx-row',
+                      label: 'Blur Offset',
+                      value: selection.config.blurOffset,
+                      setValue: (value) => { selection.config.blurOffset = value; },
+                      min: 0,
+                      max: 8,
+                      format: '%.2f',
+                    });
+                    renderImguiSliderRow(ImGui, {
+                      id: `postfx-${category}-blur-intensity`,
+                      rowPrefix: 'postfx-row',
+                      label: 'Blur Intensity',
+                      value: selection.config.blurIntensity,
+                      setValue: (value) => { selection.config.blurIntensity = value; },
+                      min: 0,
+                      max: 1,
+                      format: '%.3f',
+                    });
+                    renderImguiSliderRow(ImGui, {
+                      id: `postfx-${category}-history-intensity`,
+                      rowPrefix: 'postfx-row',
+                      label: 'Trails Intensity',
+                      value: selection.config.historyIntensity,
+                      setValue: (value) => { selection.config.historyIntensity = value; },
+                      min: 0,
+                      max: 1,
+                      format: '%.3f',
+                    });
                     if (hasLiveTimecyclePostFx) {
-                      ImGui.TextDisabled('Radiosity/blur sliders are timecyc-driven and update live.');
+                      ImGui.TextDisabled('Timecycle postfx values are available for reference, but these sliders now override the runtime pipeline.');
                     }
                     ImGui.Checkbox(
                       `Enable Radiosity##${category}`,
@@ -4737,28 +4806,6 @@ function App() {
               ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem('SUN')) {
-              const renderSunSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
-                ImGui.PushID(id);
-                ImGui.Columns(2, `sun-row-${id}`, false);
-                ImGui.SetColumnWidth(0, 170);
-                ImGui.PushItemWidth(-1);
-                ImGui.SliderFloat(
-                  '##value',
-                  (value = getter()) => {
-                    setter(value);
-                    return value;
-                  },
-                  min,
-                  max,
-                  format,
-                );
-                ImGui.PopItemWidth();
-                ImGui.NextColumn();
-                ImGui.AlignTextToFramePadding();
-                ImGui.TextUnformatted(label);
-                ImGui.Columns(1);
-                ImGui.PopID();
-              };
               const sunSettings = uiStateRef.current.sun;
               ImGui.Checkbox(
                 'Enable RW Sun',
@@ -4788,46 +4835,24 @@ function App() {
                   return value;
                 },
               );
-              renderSunSliderRow('distance', 'Sun Distance', () => sunSettings.distance, (value) => { sunSettings.distance = value; }, 50, 1000, '%.0f');
-              renderSunSliderRow('core-size-scale', 'Core Size Scale', () => sunSettings.coreSizeScale, (value) => { sunSettings.coreSizeScale = value; }, 0, 4);
-              renderSunSliderRow('core-size-bias', 'Core Size Bias', () => sunSettings.coreSizeBias, (value) => { sunSettings.coreSizeBias = value; }, 0, 32);
-              renderSunSliderRow('core-jitter', 'Core Jitter', () => sunSettings.coreJitterAmplitude, (value) => { sunSettings.coreJitterAmplitude = value; }, 0, 8);
-              renderSunSliderRow('corona-size-scale', 'Corona Size Scale', () => sunSettings.coronaSizeScale, (value) => { sunSettings.coronaSizeScale = value; }, 0, 64);
-              renderSunSliderRow('flare-scale', 'Flare Scale', () => sunSettings.flareScale, (value) => { sunSettings.flareScale = value; }, 0, 4);
-              renderSunSliderRow('flare-offset-scale', 'Flare Offset Scale', () => sunSettings.flareOffsetScale, (value) => { sunSettings.flareOffsetScale = value; }, 0, 4);
-              renderSunSliderRow('flare-alpha-scale', 'Flare Alpha Scale', () => sunSettings.flareAlphaScale, (value) => { sunSettings.flareAlphaScale = value; }, 0, 4);
-              renderSunSliderRow('core-alpha', 'Core Alpha', () => sunSettings.coreAlpha, (value) => { sunSettings.coreAlpha = value; }, 0, 2);
-              renderSunSliderRow('corona-alpha', 'Corona Alpha', () => sunSettings.coronaAlpha, (value) => { sunSettings.coronaAlpha = value; }, 0, 2);
-              renderSunSliderRow('fade-speed', 'Fade Speed', () => sunSettings.fadeSpeed, (value) => { sunSettings.fadeSpeed = value; }, 0, 8);
-              renderSunSliderRow('cloud-highlight-radius', 'Cloud Highlight Radius', () => sunSettings.cloudHighlightRadius, (value) => { sunSettings.cloudHighlightRadius = value; }, 0.01, 1);
-              renderSunSliderRow('cloud-highlight-strength', 'Cloud Highlight Strength', () => sunSettings.cloudHighlightStrength, (value) => { sunSettings.cloudHighlightStrength = value; }, 0, 2);
-              renderSunSliderRow('cloud-block-radius', 'Cloud Block Radius', () => sunSettings.cloudBlockRadius, (value) => { sunSettings.cloudBlockRadius = value; }, 0.01, 0.5);
+              renderImguiSliderRow(ImGui, { id: 'distance', rowPrefix: 'sun-row', label: 'Sun Distance', value: sunSettings.distance, setValue: (value) => { sunSettings.distance = value; }, min: 50, max: 1000, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'core-size-scale', rowPrefix: 'sun-row', label: 'Core Size Scale', value: sunSettings.coreSizeScale, setValue: (value) => { sunSettings.coreSizeScale = value; }, min: 0, max: 4 });
+              renderImguiSliderRow(ImGui, { id: 'core-size-bias', rowPrefix: 'sun-row', label: 'Core Size Bias', value: sunSettings.coreSizeBias, setValue: (value) => { sunSettings.coreSizeBias = value; }, min: 0, max: 32 });
+              renderImguiSliderRow(ImGui, { id: 'core-jitter', rowPrefix: 'sun-row', label: 'Core Jitter', value: sunSettings.coreJitterAmplitude, setValue: (value) => { sunSettings.coreJitterAmplitude = value; }, min: 0, max: 8 });
+              renderImguiSliderRow(ImGui, { id: 'corona-size-scale', rowPrefix: 'sun-row', label: 'Corona Size Scale', value: sunSettings.coronaSizeScale, setValue: (value) => { sunSettings.coronaSizeScale = value; }, min: 0, max: 64 });
+              renderImguiSliderRow(ImGui, { id: 'flare-scale', rowPrefix: 'sun-row', label: 'Flare Scale', value: sunSettings.flareScale, setValue: (value) => { sunSettings.flareScale = value; }, min: 0, max: 4 });
+              renderImguiSliderRow(ImGui, { id: 'flare-offset-scale', rowPrefix: 'sun-row', label: 'Flare Offset Scale', value: sunSettings.flareOffsetScale, setValue: (value) => { sunSettings.flareOffsetScale = value; }, min: 0, max: 4 });
+              renderImguiSliderRow(ImGui, { id: 'flare-alpha-scale', rowPrefix: 'sun-row', label: 'Flare Alpha Scale', value: sunSettings.flareAlphaScale, setValue: (value) => { sunSettings.flareAlphaScale = value; }, min: 0, max: 4 });
+              renderImguiSliderRow(ImGui, { id: 'core-alpha', rowPrefix: 'sun-row', label: 'Core Alpha', value: sunSettings.coreAlpha, setValue: (value) => { sunSettings.coreAlpha = value; }, min: 0, max: 2 });
+              renderImguiSliderRow(ImGui, { id: 'corona-alpha', rowPrefix: 'sun-row', label: 'Corona Alpha', value: sunSettings.coronaAlpha, setValue: (value) => { sunSettings.coronaAlpha = value; }, min: 0, max: 2 });
+              renderImguiSliderRow(ImGui, { id: 'fade-speed', rowPrefix: 'sun-row', label: 'Fade Speed', value: sunSettings.fadeSpeed, setValue: (value) => { sunSettings.fadeSpeed = value; }, min: 0, max: 8 });
+              renderImguiSliderRow(ImGui, { id: 'cloud-highlight-radius', rowPrefix: 'sun-row', label: 'Cloud Highlight Radius', value: sunSettings.cloudHighlightRadius, setValue: (value) => { sunSettings.cloudHighlightRadius = value; }, min: 0.01, max: 1 });
+              renderImguiSliderRow(ImGui, { id: 'cloud-highlight-strength', rowPrefix: 'sun-row', label: 'Cloud Highlight Strength', value: sunSettings.cloudHighlightStrength, setValue: (value) => { sunSettings.cloudHighlightStrength = value; }, min: 0, max: 2 });
+              renderImguiSliderRow(ImGui, { id: 'cloud-block-radius', rowPrefix: 'sun-row', label: 'Cloud Block Radius', value: sunSettings.cloudBlockRadius, setValue: (value) => { sunSettings.cloudBlockRadius = value; }, min: 0.01, max: 0.5 });
               ImGui.TextWrapped('RW mapping: core/corona sizes come from timecycle sun size, flares follow RW corona positions, and cloud blocking fades the corona path instead of using postprocess god rays.');
               ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem('MOON')) {
-              const renderMoonSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
-                ImGui.PushID(id);
-                ImGui.Columns(2, `moon-row-${id}`, false);
-                ImGui.SetColumnWidth(0, 170);
-                ImGui.PushItemWidth(-1);
-                ImGui.SliderFloat(
-                  '##value',
-                  (value = getter()) => {
-                    setter(value);
-                    return value;
-                  },
-                  min,
-                  max,
-                  format,
-                );
-                ImGui.PopItemWidth();
-                ImGui.NextColumn();
-                ImGui.AlignTextToFramePadding();
-                ImGui.TextUnformatted(label);
-                ImGui.Columns(1);
-                ImGui.PopID();
-              };
               const moonSettings = uiStateRef.current.moon;
               ImGui.Checkbox(
                 'Enable RW Moon',
@@ -4850,41 +4875,19 @@ function App() {
                   return value;
                 },
               );
-              renderMoonSliderRow('offset-x', 'Offset X', () => moonSettings.offsetX, (value) => { moonSettings.offsetX = value; }, -300, 300, '%.0f');
-              renderMoonSliderRow('offset-y', 'Offset Y', () => moonSettings.offsetY, (value) => { moonSettings.offsetY = value; }, -300, 300, '%.0f');
-              renderMoonSliderRow('offset-z', 'Offset Z', () => moonSettings.offsetZ, (value) => { moonSettings.offsetZ = value; }, -100, 100, '%.0f');
-              renderMoonSliderRow('moon-size-index', 'Moon Size Index', () => moonSettings.moonSizeIndex, (value) => { moonSettings.moonSizeIndex = value; }, 0, 7, '%.0f');
-              renderMoonSliderRow('base-scale', 'Base Scale', () => moonSettings.baseScale, (value) => { moonSettings.baseScale = value; }, 0, 32);
-              renderMoonSliderRow('small-scale', 'Small Moon Scale', () => moonSettings.smallMoonScale, (value) => { moonSettings.smallMoonScale = value; }, 0, 16);
-              renderMoonSliderRow('brightness-scale', 'Brightness Scale', () => moonSettings.brightnessScale, (value) => { moonSettings.brightnessScale = value; }, 0, 4);
-              renderMoonSliderRow('fade-center', 'Fade Center Minutes', () => moonSettings.fadeCenterMinutes, (value) => { moonSettings.fadeCenterMinutes = value; }, 0, 1440, '%.0f');
-              renderMoonSliderRow('fade-window', 'Fade Window Minutes', () => moonSettings.fadeWindowMinutes, (value) => { moonSettings.fadeWindowMinutes = value; }, 1, 720, '%.0f');
-              ImGui.TextWrapped('RW mapping: moon is rendered in the clouds pass with particle/coronamoon, a camera-relative offset, weather coverage dimming, and the original 3AM-centered fade window.');
+              renderImguiSliderRow(ImGui, { id: 'offset-x', rowPrefix: 'moon-row', label: 'Offset X', value: moonSettings.offsetX, setValue: (value) => { moonSettings.offsetX = value; }, min: -300, max: 300, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'offset-y', rowPrefix: 'moon-row', label: 'Offset Y', value: moonSettings.offsetY, setValue: (value) => { moonSettings.offsetY = value; }, min: -300, max: 300, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'offset-z', rowPrefix: 'moon-row', label: 'Offset Z', value: moonSettings.offsetZ, setValue: (value) => { moonSettings.offsetZ = value; }, min: -100, max: 100, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'moon-size-index', rowPrefix: 'moon-row', label: 'Moon Size Index', value: moonSettings.moonSizeIndex, setValue: (value) => { moonSettings.moonSizeIndex = value; }, min: 0, max: 7, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'base-scale', rowPrefix: 'moon-row', label: 'Base Scale', value: moonSettings.baseScale, setValue: (value) => { moonSettings.baseScale = value; }, min: 0, max: 32 });
+              renderImguiSliderRow(ImGui, { id: 'small-scale', rowPrefix: 'moon-row', label: 'Small Moon Scale', value: moonSettings.smallMoonScale, setValue: (value) => { moonSettings.smallMoonScale = value; }, min: 0, max: 16 });
+              renderImguiSliderRow(ImGui, { id: 'brightness-scale', rowPrefix: 'moon-row', label: 'Brightness Scale', value: moonSettings.brightnessScale, setValue: (value) => { moonSettings.brightnessScale = value; }, min: 0, max: 4 });
+              renderImguiSliderRow(ImGui, { id: 'fade-center', rowPrefix: 'moon-row', label: 'Fade Center Minutes', value: moonSettings.fadeCenterMinutes, setValue: (value) => { moonSettings.fadeCenterMinutes = value; }, min: 0, max: 1440, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'fade-window', rowPrefix: 'moon-row', label: 'Fade Window Minutes', value: moonSettings.fadeWindowMinutes, setValue: (value) => { moonSettings.fadeWindowMinutes = value; }, min: 1, max: 720, format: '%.0f' });
+              ImGui.TextWrapped('RW mapping: moon is rendered in the clouds pass with particle/coronamoon, a fixed world-space offset from the camera, weather coverage dimming, and the original 3AM-centered fade window.');
               ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem('STARS')) {
-              const renderStarsSliderRow = (id, label, getter, setter, min, max, format = '%.2f') => {
-                ImGui.PushID(id);
-                ImGui.Columns(2, `stars-row-${id}`, false);
-                ImGui.SetColumnWidth(0, 170);
-                ImGui.PushItemWidth(-1);
-                ImGui.SliderFloat(
-                  '##value',
-                  (value = getter()) => {
-                    setter(value);
-                    return value;
-                  },
-                  min,
-                  max,
-                  format,
-                );
-                ImGui.PopItemWidth();
-                ImGui.NextColumn();
-                ImGui.AlignTextToFramePadding();
-                ImGui.TextUnformatted(label);
-                ImGui.Columns(1);
-                ImGui.PopID();
-              };
               const starsSettings = uiStateRef.current.stars;
               ImGui.Checkbox(
                 'Enable RW Stars',
@@ -4900,17 +4903,17 @@ function App() {
                   return value;
                 },
               );
-              renderStarsSliderRow('brightness-scale', 'Brightness Scale', () => starsSettings.brightnessScale, (value) => { starsSettings.brightnessScale = value; }, 0, 4);
-              renderStarsSliderRow('logo-offset-x', 'Logo Offset X', () => starsSettings.logoOffsetX, (value) => { starsSettings.logoOffsetX = value; }, -300, 300, '%.0f');
-              renderStarsSliderRow('logo-offset-y', 'Logo Offset Y', () => starsSettings.logoOffsetY, (value) => { starsSettings.logoOffsetY = value; }, -300, 300, '%.0f');
-              renderStarsSliderRow('logo-offset-z', 'Logo Offset Z', () => starsSettings.logoOffsetZ, (value) => { starsSettings.logoOffsetZ = value; }, -100, 100, '%.0f');
-              renderStarsSliderRow('logo-span-y', 'Logo Span Y', () => starsSettings.logoSpanY, (value) => { starsSettings.logoSpanY = value; }, 0, 180, '%.0f');
-              renderStarsSliderRow('logo-span-z', 'Logo Span Z', () => starsSettings.logoSpanZ, (value) => { starsSettings.logoSpanZ = value; }, 0, 180, '%.0f');
-              renderStarsSliderRow('star-scale', 'Star Scale', () => starsSettings.starScale, (value) => { starsSettings.starScale = value; }, 0, 4);
-              renderStarsSliderRow('sparkle-offset-y', 'Sparkle Offset Y', () => starsSettings.sparkleOffsetY, (value) => { starsSettings.sparkleOffsetY = value; }, -180, 180, '%.0f');
-              renderStarsSliderRow('sparkle-scale', 'Sparkle Scale', () => starsSettings.sparkleScale, (value) => { starsSettings.sparkleScale = value; }, 0, 16);
-              renderStarsSliderRow('sparkle-min', 'Sparkle Min Flicker', () => starsSettings.sparkleMinFlicker, (value) => { starsSettings.sparkleMinFlicker = value; }, 0, 1);
-              renderStarsSliderRow('sparkle-range', 'Sparkle Flicker Range', () => starsSettings.sparkleFlickerRange, (value) => { starsSettings.sparkleFlickerRange = value; }, 0, 1);
+              renderImguiSliderRow(ImGui, { id: 'brightness-scale', rowPrefix: 'stars-row', label: 'Brightness Scale', value: starsSettings.brightnessScale, setValue: (value) => { starsSettings.brightnessScale = value; }, min: 0, max: 4 });
+              renderImguiSliderRow(ImGui, { id: 'logo-offset-x', rowPrefix: 'stars-row', label: 'Logo Offset X', value: starsSettings.logoOffsetX, setValue: (value) => { starsSettings.logoOffsetX = value; }, min: -300, max: 300, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'logo-offset-y', rowPrefix: 'stars-row', label: 'Logo Offset Y', value: starsSettings.logoOffsetY, setValue: (value) => { starsSettings.logoOffsetY = value; }, min: -300, max: 300, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'logo-offset-z', rowPrefix: 'stars-row', label: 'Logo Offset Z', value: starsSettings.logoOffsetZ, setValue: (value) => { starsSettings.logoOffsetZ = value; }, min: -100, max: 100, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'logo-span-y', rowPrefix: 'stars-row', label: 'Logo Span Y', value: starsSettings.logoSpanY, setValue: (value) => { starsSettings.logoSpanY = value; }, min: 0, max: 180, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'logo-span-z', rowPrefix: 'stars-row', label: 'Logo Span Z', value: starsSettings.logoSpanZ, setValue: (value) => { starsSettings.logoSpanZ = value; }, min: 0, max: 180, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'star-scale', rowPrefix: 'stars-row', label: 'Star Scale', value: starsSettings.starScale, setValue: (value) => { starsSettings.starScale = value; }, min: 0, max: 4 });
+              renderImguiSliderRow(ImGui, { id: 'sparkle-offset-y', rowPrefix: 'stars-row', label: 'Sparkle Offset Y', value: starsSettings.sparkleOffsetY, setValue: (value) => { starsSettings.sparkleOffsetY = value; }, min: -180, max: 180, format: '%.0f' });
+              renderImguiSliderRow(ImGui, { id: 'sparkle-scale', rowPrefix: 'stars-row', label: 'Sparkle Scale', value: starsSettings.sparkleScale, setValue: (value) => { starsSettings.sparkleScale = value; }, min: 0, max: 16 });
+              renderImguiSliderRow(ImGui, { id: 'sparkle-min', rowPrefix: 'stars-row', label: 'Sparkle Min Flicker', value: starsSettings.sparkleMinFlicker, setValue: (value) => { starsSettings.sparkleMinFlicker = value; }, min: 0, max: 1 });
+              renderImguiSliderRow(ImGui, { id: 'sparkle-range', rowPrefix: 'stars-row', label: 'Sparkle Flicker Range', value: starsSettings.sparkleFlickerRange, setValue: (value) => { starsSettings.sparkleFlickerRange = value; }, min: 0, max: 1 });
               ImGui.TextWrapped('RW mapping: stars are the fixed Rockstar-logo sprite pattern from Clouds.cpp plus the flickering star, using particle/coronastar and the original night visibility curve with weather coverage dimming.');
               ImGui.EndTabItem();
             }
@@ -5151,11 +5154,14 @@ function App() {
             ref={fileInputRef}
             type="file"
             multiple
-            webkitdirectory="true"
-            directory="true"
+            webkitdirectory=""
+            directory=""
             onChange={onPickFolder}
           />
         </label>
+        {showMapPickerFallback ? (
+          <button type="button" onClick={() => openMapPicker('dom')}>Open map picker</button>
+        ) : null}
 
         <button type="button" onClick={rebuildWorld}>Build World</button>
         <button type="button" onClick={clearWorld}>Clear</button>

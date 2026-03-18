@@ -46,7 +46,7 @@ function createRenderTarget(width, height, options = {}) {
 }
 
 function computeRadiositySize(width, height, divisor = DEFAULT_RADIOSITY_RESOLUTION_DIVISOR) {
-  const safeDivisor = THREE.MathUtils.clamp(Math.round(getFiniteOrDefault(divisor, DEFAULT_RADIOSITY_RESOLUTION_DIVISOR)), 2, 6);
+  const safeDivisor = THREE.MathUtils.clamp(Math.round(getFiniteOrDefault(divisor, DEFAULT_RADIOSITY_RESOLUTION_DIVISOR)), 1, 8);
   return {
     width: Math.max(1, Math.round(Math.max(1, width) / safeDivisor)),
     height: Math.max(1, Math.round(Math.max(1, height) / safeDivisor)),
@@ -334,8 +334,8 @@ void main() {
     const nextRadiosityIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.trailsIntensity, SKYGFX_RADIOSITY_INTENSITY), 0, 63);
     const nextRadiosityResolutionDivisor = THREE.MathUtils.clamp(
       Math.round(getFiniteOrDefault(config.radiosityResolutionDivisor, DEFAULT_RADIOSITY_RESOLUTION_DIVISOR)),
-      2,
-      6,
+      1,
+      8,
     );
     const nextBlurOffset = Math.max(0, getFiniteOrDefault(config.blurOffset, VCS_BLUR_OFFSET));
     const nextBlurIntensity = THREE.MathUtils.clamp(getFiniteOrDefault(config.blurIntensity, VCS_BLUR_INTENSITY), 0, 1);
@@ -465,26 +465,11 @@ void main() {
       return;
     }
 
-    this.runtime.radiosityLimit = getClampedScalar(
-      values.radiosityLimit,
-      0,
-      255,
-      this.configRuntime.radiosityLimit,
-    );
-    this.runtime.radiosityIntensity = getClampedScalar(
-      values.radiosityIntensity,
-      0,
-      255,
-      this.configRuntime.radiosityIntensity,
-    );
-
     const blurSource = values.postfx2 || values.blur;
     const blurR = getClampedScalar(blurSource.r, 0, 255, 0) / 255;
     const blurG = getClampedScalar(blurSource.g, 0, 255, 0) / 255;
     const blurB = getClampedScalar(blurSource.b, 0, 255, 0) / 255;
     this.runtime.blurColor.setRGB(blurR, blurG, blurB);
-    this.runtime.blurIntensity = getClampedScalar(values.postfx1?.a ?? values.blurAlpha, 0, 255, this.configRuntime.blurIntensity * 255) * 0.8 / 255;
-    this.runtime.blurOffset = getClampedScalar(values.blurOffset, 0, 32, this.configRuntime.blurOffset);
   }
 
   beginSceneCapture(runtimeContext = {}) {
