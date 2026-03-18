@@ -112,10 +112,9 @@ export class RWMoonPipeline {
       return { visible: false, brightness: 0 };
     }
 
-    // Keep moon offset relative to current camera orientation.
-    const cameraRelativeOffset = gtaPositionToThree(settings.offsetX, settings.offsetY, settings.offsetZ)
-      .applyQuaternion(camera.quaternion);
-    const worldPosition = camera.position.clone().add(cameraRelativeOffset);
+    // revc places the moon at a fixed world-space offset from the camera.
+    const worldOffset = gtaPositionToThree(settings.offsetX, settings.offsetY, settings.offsetZ);
+    const worldPosition = camera.position.clone().add(worldOffset);
     const screen = calcScreenCoorsLikeRw(camera, worldPosition, this.viewportWidth, this.viewportHeight, false);
     if (!screen) {
       this.sprite.visible = false;
