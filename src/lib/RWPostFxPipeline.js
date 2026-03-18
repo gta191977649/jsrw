@@ -11,6 +11,7 @@ const VCS_TRAILS_INTENSITY = 38;
 const VCS_RADIOSITY_PING_PONG_PASSES = 4;
 const VCS_RADIOSITY_SPREAD_WEIGHT = 36 / 255;
 const DEFAULT_RADIOSITY_RESOLUTION_DIVISOR = 4;
+const FULL_RES_POSTFX_TARGET_TYPE = THREE.HalfFloatType;
 const POSTFX_DEBUG_VIEW = Object.freeze({
   FINAL: 'final',
   SCENE: 'scene',
@@ -430,17 +431,17 @@ void main() {
     this.debugRadiosityTarget?.dispose();
     this.debugBlurTarget?.dispose();
 
-    this.sceneTarget = createRenderTarget(nextWidth, nextHeight, { depthBuffer: true });
-    this.composeTarget = createRenderTarget(nextWidth, nextHeight);
-    this.frontBufferTarget = createRenderTarget(nextWidth, nextHeight);
-    this.lastFrameTarget = createRenderTarget(nextWidth, nextHeight);
+    this.sceneTarget = createRenderTarget(nextWidth, nextHeight, { depthBuffer: true, type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.composeTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.frontBufferTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.lastFrameTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
     this.radiosityTargetA = createRenderTarget(this.radiosityWidth, this.radiosityHeight, { type: THREE.HalfFloatType });
     this.radiosityTargetB = createRenderTarget(this.radiosityWidth, this.radiosityHeight, { type: THREE.HalfFloatType });
-    this.blurCurrentTarget = createRenderTarget(nextWidth, nextHeight);
-    this.blurHistoryTarget = createRenderTarget(nextWidth, nextHeight);
-    this.debugCurrentFrameTarget = createRenderTarget(nextWidth, nextHeight);
-    this.debugRadiosityTarget = createRenderTarget(nextWidth, nextHeight);
-    this.debugBlurTarget = createRenderTarget(nextWidth, nextHeight);
+    this.blurCurrentTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.blurHistoryTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.debugCurrentFrameTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.debugRadiosityTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.debugBlurTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
     this.resetHistory();
   }
 
