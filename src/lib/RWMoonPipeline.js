@@ -41,6 +41,7 @@ export class RWMoonPipeline {
     this.fallbackTexture = createFallbackMoonTexture();
     this.sprite = new THREE.Sprite(createRwSpriteMaterial(this.fallbackTexture));
     this.sprite.renderOrder = 70;
+    this.sprite.frustumCulled = false;
     this.scene.add(this.sprite);
     this.viewportWidth = 1;
     this.viewportHeight = 1;
@@ -71,17 +72,38 @@ export class RWMoonPipeline {
     const hour = Number(timecycleSample?.hour) || 0;
     const minuteOfHour = Number(timecycleSample?.minute) || 0;
     const totalMinutes = (hour * 60) + minuteOfHour;
-    const moonFadeOut = Math.abs(totalMinutes - settings.fadeCenterMinutes);
-    if (moonFadeOut >= settings.fadeWindowMinutes) {
+
+    const NIGHT_START = 18 * 60;
+    const NIGHT_END = 6 * 60;
+    const FADE_DURATION = 180;
+
+    const isEveningNight = totalMinutes >= NIGHT_START;
+    const isMorningNight = totalMinutes < NIGHT_END;
+    const isNight = isEveningNight || isMorningNight;
+
+    if (!isNight) {
       this.sprite.visible = false;
       return { visible: false, brightness: 0 };
+    }
+
+    let fadeFactor = 1;
+    if (isEveningNight) {
+      const minutesIntoNight = totalMinutes - NIGHT_START;
+      fadeFactor = minutesIntoNight < FADE_DURATION
+        ? minutesIntoNight / FADE_DURATION
+        : 1;
+    } else {
+      const minutesUntilDawn = NIGHT_END - totalMinutes;
+      fadeFactor = minutesUntilDawn < FADE_DURATION
+        ? minutesUntilDawn / FADE_DURATION
+        : 1;
     }
 
     const foggyness = THREE.MathUtils.clamp(timecycleSample?.foggyness ?? 0, 0, 1);
     const cloudCoverage = THREE.MathUtils.clamp(timecycleSample?.cloudCoverage ?? 0, 0, 1);
     const coverage = settings.coverageDimming ? Math.max(foggyness, cloudCoverage) : 0;
     const brightness = THREE.MathUtils.clamp(
-      (1 - coverage) * (settings.fadeWindowMinutes - moonFadeOut) * settings.brightnessScale,
+      (1 - coverage) * fadeFactor * 255 * settings.brightnessScale,
       0,
       255,
     );
