@@ -45,8 +45,8 @@ function createRenderTarget(width, height, options = {}) {
 
 function computeRadiositySize(width, height) {
   return {
-    width: Math.max(1, Math.round(Math.max(1, width) * 0.5)),
-    height: Math.max(1, Math.round(Math.max(1, height) * 0.5)),
+    width: Math.max(1, Math.round(Math.max(1, width) * 0.25)),
+    height: Math.max(1, Math.round(Math.max(1, height) * 0.25)),
   };
 }
 
