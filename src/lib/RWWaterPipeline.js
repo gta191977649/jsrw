@@ -239,6 +239,9 @@ transformed.y += ((windFactorA * waveA) + (windFactorB * waveB)) * uWaveHeight;`
 
 export class RWWaterPipeline {
   constructor(options) {
+    // #region agent log
+    fetch('http://127.0.0.1:7300/ingest/657c7c95-cd7f-40f5-879d-537e6099f3dd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6d1737'},body:JSON.stringify({sessionId:'6d1737',runId:'safari-build',hypothesisId:'H3',location:'RWWaterPipeline.js:constructor',message:'RWWaterPipeline ctor: enter',data:{wireframe:Boolean(options?.wireframe),enabled:options?.enabled!==false},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     this.waterConfig = options.waterConfig;
     this.parsed = options.parsed;
     this.enabled = options.enabled !== false;
@@ -274,10 +277,16 @@ export class RWWaterPipeline {
     const cellSizeX = (bounds.end.x - bounds.start.x) / 128;
     const cellSizeY = (bounds.end.y - bounds.start.y) / 128;
     const sectorGeometry = buildRwSectorPatchGeometry(options.toThreePosition, cellSizeX, cellSizeY, 8);
+    // #region agent log
+    fetch('http://127.0.0.1:7300/ingest/657c7c95-cd7f-40f5-879d-537e6099f3dd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6d1737'},body:JSON.stringify({sessionId:'6d1737',runId:'safari-build',hypothesisId:'H3',location:'RWWaterPipeline.js:constructor',message:'RWWaterPipeline ctor: sector geometry built',data:{posCount:sectorGeometry?.getAttribute?.('position')?.count ?? null},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     const sectorCount = countValidFineSectors(this.parsed);
     this.farMesh = new THREE.InstancedMesh(sectorGeometry, this.farMaterial, sectorCount);
     this.farMesh.frustumCulled = false;
     populateSectorInstances(this.farMesh, this.parsed, bounds, options.toThreePosition);
+    // #region agent log
+    fetch('http://127.0.0.1:7300/ingest/657c7c95-cd7f-40f5-879d-537e6099f3dd',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'6d1737'},body:JSON.stringify({sessionId:'6d1737',runId:'safari-build',hypothesisId:'H3',location:'RWWaterPipeline.js:constructor',message:'RWWaterPipeline ctor: instances populated',data:{instanceCount:this.farMesh?.count ?? null},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     this.farScene.add(this.farMesh);
 
     this.nearMesh = new THREE.Mesh(createEmptyGeometry(), new THREE.MeshBasicMaterial({ visible: false }));

@@ -345,6 +345,22 @@ function yieldToBrowser() {
   });
 }
 
+function yieldToNextTask() {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
+
+// #region agent log helpers
+function dbgLog(payload) {
+  fetch('http://127.0.0.1:7300/ingest/657c7c95-cd7f-40f5-879d-537e6099f3dd', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '6d1737' },
+    body: JSON.stringify({ sessionId: '6d1737', timestamp: Date.now(), ...payload }),
+  }).catch(() => {});
+}
+// #endregion
+
 function cloneTimecycleValue(value, type) {
   if (type === 'rgb') return { r: value.r, g: value.g, b: value.b };
   if (type === 'rgba') return { r: value.r, g: value.g, b: value.b, a: value.a };
@@ -1091,6 +1107,9 @@ function App() {
     buildActiveRef.current = true;
 
     try {
+      // #region agent log
+      dbgLog({ runId: 'safari-build', hypothesisId: 'H0', location: 'App.jsx:rebuildWorld', message: 'Build start', data: { token, buildGameVersion, files: fileIndex?.count ?? null } });
+      // #endregion
       clearWorld();
       worldGameVersionRef.current = buildGameVersion;
       setLoadedFiles([]);
@@ -1411,11 +1430,23 @@ function App() {
 
       try {
         setStatus('Building water...');
+        // #region agent log
+        dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: start', data: { token, waterPath: waterRecord?.resolvedPath ?? null } });
+        // #endregion
         await yieldToBrowser();
         const waterStartTime = performance.now();
+        // #region agent log
+        dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: before arrayBuffer', data: { token } });
+        // #endregion
         const parsed = parseWaterproDat(await waterRecord.file.arrayBuffer());
+        // #region agent log
+        dbgLog({ runId: 'safari-build', hypothesisId: 'H2', location: 'App.jsx:tryBuildWater', message: 'Building water: parsed waterpro.dat', data: { token, levelCount: parsed?.levelCount ?? null, fineBlocks: parsed?.fineBlockList?.length ?? null } });
+        // #endregion
         const waterTextureName = String(waterConfig.textureName || '').toLowerCase();
 
+        // #region agent log
+        dbgLog({ runId: 'safari-build', hypothesisId: 'H3', location: 'App.jsx:tryBuildWater', message: 'Building water: before RWWaterPipeline', data: { token, renderWater: uiStateRef.current.renderWater } });
+        // #endregion
         const pipeline = new RWWaterPipeline({
           parsed,
           waterConfig,
@@ -1439,6 +1470,9 @@ function App() {
             farAlpha: uiStateRef.current.waterAlpha,
           },
         });
+        // #region agent log
+        dbgLog({ runId: 'safari-build', hypothesisId: 'H3', location: 'App.jsx:tryBuildWater', message: 'Building water: after RWWaterPipeline', data: { token, ms: Number((performance.now() - waterStartTime).toFixed(1)) } });
+        // #endregion
         pendingWaterPipeline?.dispose();
         pendingWaterPipeline = pipeline;
         pipeline.setTimecycleProvider(() => {
@@ -1475,7 +1509,16 @@ function App() {
         pushConsoleLine('info', `Water pipeline built in ${(performance.now() - waterStartTime).toFixed(1)} ms`);
 
         void (async () => {
+          // Safari can appear stuck on "Building water..." if the heavy particle.txd
+          // parse starts before the browser paints the next status update.
+          await yieldToNextTask();
+          // #region agent log
+          dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:water-textures', message: 'Water textures: start getTextureDict(particle)', data: { token } });
+          // #endregion
           const particleTxd = await getTextureDict('particle');
+          // #region agent log
+          dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:water-textures', message: 'Water textures: got particle txd', data: { token, ok: Boolean(particleTxd) } });
+          // #endregion
           if (buildTokenRef.current !== token) return;
           const waterTextureEntry = particleTxd?.get?.(waterTextureName) || null;
           const waterTexture = waterTextureEntry?.texture || waterTextureEntry || null;
@@ -1678,6 +1721,7 @@ function App() {
       const effectivePlacements = placements;
 
       setStatus(`Loading ${effectivePlacements.length} placements...`);
+      await yieldToNextTask();
       await yieldToBrowser();
       const placementStartTime = performance.now();
 
