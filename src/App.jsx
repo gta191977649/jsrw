@@ -124,6 +124,52 @@ function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
 }
 
+function getTextureSizeFromSource(textureSource) {
+  const image = textureSource?.image ?? textureSource;
+  return {
+    width: Number(image?.videoWidth ?? image?.width ?? 0),
+    height: Number(image?.videoHeight ?? image?.height ?? 0),
+  };
+}
+
+function describeTextureSourceForLog(name, textureSource, entry = null) {
+  if (!textureSource?.isTexture) return `${name}: invalid texture`;
+  const { width, height } = getTextureSizeFromSource(textureSource);
+  const compressionMethod = String(
+    entry?.compressionMethod
+    || textureSource?.userData?.rwCompressionMethod
+    || 'UNKNOWN',
+  );
+  const pixelFormat = String(
+    entry?.pixelFormat
+    || textureSource?.userData?.rwPixelFormat
+    || 'UNKNOWN',
+  );
+  const d3dFormat = Number(entry?.d3dFormat ?? textureSource?.userData?.rwD3dFormat ?? 0);
+  const rasterFormat = Number(entry?.rasterFormat ?? textureSource?.userData?.rwRasterFormat ?? 0);
+  const image = textureSource.image;
+  const data = image?.data;
+  if (!data || !ArrayBuffer.isView(data) || data.length === 0) {
+    return `${name}: ${width}x${height} comp=${compressionMethod} pix=${pixelFormat} d3d=${d3dFormat} raster=${rasterFormat} data=unavailable`;
+  }
+
+  let rgbTotal = 0;
+  let alphaTotal = 0;
+  let nonZeroAlphaCount = 0;
+  const pixelCount = Math.max(1, Math.floor(data.length / 4));
+  for (let i = 0; i < pixelCount; i += 1) {
+    const offset = i * 4;
+    rgbTotal += data[offset + 0] + data[offset + 1] + data[offset + 2];
+    alphaTotal += data[offset + 3];
+    if (data[offset + 3] > 0) nonZeroAlphaCount += 1;
+  }
+  const avgRgb = (rgbTotal / (pixelCount * 3)).toFixed(1);
+  const avgAlpha = (alphaTotal / pixelCount).toFixed(1);
+  const alphaCoverage = ((nonZeroAlphaCount / pixelCount) * 100).toFixed(1);
+  const sample = Array.from(data.slice(0, Math.min(16, data.length))).join(',');
+  return `${name}: ${width}x${height} comp=${compressionMethod} pix=${pixelFormat} d3d=${d3dFormat} raster=${rasterFormat} avgRGB=${avgRgb} avgA=${avgAlpha} alpha>0=${alphaCoverage}% sample=${sample}`;
+}
+
 function runImguiSlider(ImGui, {
   type = 'float',
   id,
@@ -738,6 +784,7 @@ function App() {
   const worldGameVersionRef = useRef('VCS');
   const buildTokenRef = useRef(0);
   const buildActiveRef = useRef(false);
+  const renderResourcesReadyRef = useRef(false);
   const resourceCacheRef = useRef(createResourceCacheState());
   const streamingBuildRef = useRef({
     token: 0,
@@ -909,23 +956,48 @@ function App() {
 
   const pushLoadedFile = useCallback((kind, path, detail = '') => {
     const normalizedKind = String(kind || '').trim().toUpperCase();
-    const normalizedPath = normalizePath(String(path || '').trim());
+    const rawPath = String(path || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
+    const normalizedPath = normalizePath(rawPath);
     const normalizedDetail = String(detail || '').trim();
     if (!normalizedKind || !normalizedPath) return;
     setLoadedFiles((prev) => {
       const index = prev.findIndex((entry) => (
         entry.kind === normalizedKind
-        && entry.path === normalizedPath
+        && entry.normalizedPath === normalizedPath
       ));
       if (index === -1) {
-        return [...prev, { kind: normalizedKind, path: normalizedPath, detail: normalizedDetail }];
+        return [...prev, {
+          kind: normalizedKind,
+          path: rawPath,
+          normalizedPath,
+          detail: normalizedDetail,
+        }];
       }
       if (prev[index].detail === normalizedDetail) return prev;
       const next = [...prev];
-      next[index] = { ...next[index], detail: normalizedDetail };
+      next[index] = {
+        ...next[index],
+        path: rawPath || next[index].path,
+        normalizedPath,
+        detail: normalizedDetail,
+      };
       return next;
     });
   }, []);
+
+  const pushLoadedFileConsoleEvent = useCallback((kind, path, detail = '') => {
+    const normalizedKind = String(kind || '').trim().toUpperCase();
+    const rawPath = String(path || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
+    const normalizedPath = normalizePath(rawPath);
+    const normalizedDetail = String(detail || '').trim().toLowerCase();
+    if (!normalizedKind || !normalizedPath) return;
+    if (normalizedDetail === 'declared' || normalizedDetail === 'optional') return;
+
+    const isMissing = normalizedDetail.includes('missing');
+    const level = isMissing ? 'warn' : 'info';
+    const detailLabel = detail ? ` (${detail})` : '';
+    pushConsoleLine(level, `File ${normalizedKind}: ${rawPath}${detailLabel}`, 'files');
+  }, [pushConsoleLine]);
 
   const pushFailedModel = useCallback((text) => {
     const line = String(text || '').trim();
@@ -1066,6 +1138,7 @@ function App() {
     lodUpdateStateRef.current.lastCameraNear = Number.NaN;
     lodUpdateStateRef.current.lastCameraFar = Number.NaN;
     setShowGameIcon(false);
+    renderResourcesReadyRef.current = false;
     setBuildProgress({ active: false, current: 0, total: 0 });
     setStats((prev) => ({
       ...prev,
@@ -1095,6 +1168,7 @@ function App() {
     const token = ++buildTokenRef.current;
     const buildGameVersion = String(uiStateRef.current.gameVersion || 'VCS').toUpperCase();
     buildActiveRef.current = true;
+    renderResourcesReadyRef.current = false;
 
     try {
       // #region agent log
@@ -1116,7 +1190,10 @@ function App() {
           fileSystem: new BrowserFileSystem(fileIndex),
           gameVersion: uiStateRef.current.gameVersion,
           onLog: (level, message) => pushConsoleLine(level, message),
-          onFileEvent: (kind, path, detail) => pushLoadedFile(kind, path, detail),
+          onFileEvent: (kind, path, detail) => {
+            pushLoadedFile(kind, path, detail);
+            pushLoadedFileConsoleEvent(kind, path, detail);
+          },
         });
         worldLoadResult = await worldLoader.load({
           extraImgPaths: ['models/gta3.img'],
@@ -1213,6 +1290,14 @@ function App() {
       const modelCache = new Map();
       const textureLogCache = new Set();
       let pendingWaterPipeline = null;
+      const pushRuntimeMapLog = (label, texture, matches) => {
+        const runtimePath = `${label}: ${texture?.name || 'unnamed'}`;
+        const detail = `match=${matches ? 'yes' : 'no'}`;
+        pushConsoleLine('info', `${runtimePath} / ${detail}`, 'runtime');
+        pushConsoleLine('info', `[RUNTIME_MAP] ${runtimePath} / ${detail}`, 'console');
+        console.log(`[RUNTIME_MAP] ${runtimePath} / ${detail}`);
+        pushLoadedFile('RUNTIME_MAP', runtimePath, detail);
+      };
 
       const getTextureDict = async (txdName) => {
         if (!txdName) return null;
@@ -1229,6 +1314,151 @@ function App() {
           pushConsoleLine('error', `TXD parse failed: ${txdName}.txd`);
           return null;
         }
+      };
+
+      const applyParticleTextures = async () => {
+        pushConsoleLine('info', '[RUNTIME_MAP] applyParticleTextures invoked', 'runtime');
+        console.log('[RUNTIME_MAP] applyParticleTextures invoked');
+        await yieldToNextTask();
+        dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:particle-textures', message: 'Particle textures: start getTextureDict(particle)', data: { token } });
+        setStatus('Loading particle.txd...');
+        const particleTxd = await getTextureDict('particle');
+        const particleSource = worldContext.textureResolver.getSource('particle');
+        dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:particle-textures', message: 'Particle textures: got particle txd', data: { token, ok: Boolean(particleTxd), source: particleSource || '' } });
+        if (buildTokenRef.current !== token) return;
+
+        const waterTextureName = String(worldBuild.water?.config?.textureName || 'waterclear256').toLowerCase();
+        const waterTextureEntry = particleTxd?.get?.(waterTextureName) || null;
+        const waterTexture = waterTextureEntry?.texture || waterTextureEntry || null;
+        const lowCloudTextures = ['cloud1', 'cloud2', 'cloud3']
+          .map((name) => particleTxd?.get?.(name)?.texture || particleTxd?.get?.(name) || null)
+          .filter(Boolean);
+        const fluffyCloudTexture = particleTxd?.get?.('cloudmasked')?.texture || particleTxd?.get?.('cloudmasked') || null;
+        const fluffyHighlightTexture = particleTxd?.get?.('cloudhilit')?.texture || particleTxd?.get?.('cloudhilit') || null;
+
+        if (particleTxd?.size || particleSource) {
+          const particleKeys = particleTxd ? Array.from(particleTxd.keys()) : [];
+          const requiredParticleKeys = [
+            waterTextureName,
+            'cloud1',
+            'cloud2',
+            'cloud3',
+            'cloudmasked',
+            'cloudhilit',
+            'coronamoon',
+            'coronastar',
+            'coronahex',
+            'coronacircle',
+            'coronaringa',
+          ];
+          const availability = requiredParticleKeys
+            .map((name) => `${name}:${particleTxd?.has?.(name) ? 'ok' : 'missing'}`)
+            .join(', ');
+          pushConsoleLine('info', `particle.txd source: ${particleSource || 'unknown'} | entries=${particleKeys.length}`, 'files');
+          pushConsoleLine('info', `particle.txd check: ${availability}`, 'files');
+          if (particleKeys.length > 0) {
+            pushConsoleLine('info', `particle.txd sample: ${particleKeys.slice(0, 24).join(', ')}`, 'files');
+          }
+        }
+
+        if (!pendingWaterPipeline) {
+          pushConsoleLine('warn', 'Water runtime unavailable when applying particle textures.', 'runtime');
+        } else if (!waterTexture) {
+          pushConsoleLine('warn', `Water texture missing: particle/${waterTextureName}. Using flat color water.`);
+        } else {
+          pendingWaterPipeline.setTexture(waterTexture);
+          pushConsoleLine('info', `Water texture applied: particle/${waterTextureName}`);
+          const appliedWaterMap = pendingWaterPipeline?.raw?.farMaterial?.map;
+          pushRuntimeMapLog('Water runtime map', appliedWaterMap, appliedWaterMap === waterTexture);
+        }
+
+        if (lowCloudTextures.length > 0) {
+          for (let index = 0; index < lowCloudSpritesRef.current.length; index += 1) {
+            const sprite = lowCloudSpritesRef.current[index];
+            if (!sprite?.material) continue;
+            const texture = lowCloudTextures[index % lowCloudTextures.length];
+            if (!texture) continue;
+            texture.wrapS = THREE.ClampToEdgeWrapping;
+            texture.wrapT = THREE.ClampToEdgeWrapping;
+            texture.magFilter = THREE.LinearFilter;
+            texture.minFilter = THREE.LinearMipmapLinearFilter;
+            texture.needsUpdate = true;
+            sprite.material.map = texture;
+            sprite.material.needsUpdate = true;
+          }
+          pushConsoleLine('info', `Cloud textures applied: particle/${lowCloudTextures.length >= 3 ? 'cloud1-3' : 'cloud*'}`);
+          const lowCloudMap = lowCloudSpritesRef.current[0]?.material?.map || null;
+          pushRuntimeMapLog('Low cloud runtime map', lowCloudMap, lowCloudTextures.includes(lowCloudMap));
+        } else {
+          pushConsoleLine('warn', 'Low cloud textures missing: particle/cloud1-3. Using fallback sprites.');
+        }
+
+        if (fluffyCloudTexture) {
+          configureFluffyCloudTexture(fluffyCloudTexture);
+          fluffyCloudTextureRef.current = fluffyCloudTexture;
+          for (const sprite of fluffyCloudSpritesRef.current) {
+            if (!sprite?.material) continue;
+            sprite.material.map = fluffyCloudTexture;
+            sprite.material.premultipliedAlpha = true;
+            sprite.material.needsUpdate = true;
+          }
+          pushConsoleLine('info', 'Cloud texture applied: particle/cloudmasked');
+          const fluffyMap = fluffyCloudSpritesRef.current[0]?.material?.map || null;
+          pushRuntimeMapLog('Fluffy cloud runtime map', fluffyMap, fluffyMap === fluffyCloudTexture);
+        } else {
+          pushConsoleLine('warn', 'Fluffy cloud texture missing: particle/cloudmasked. Using fallback sprite.');
+        }
+
+        if (fluffyHighlightTexture) {
+          configureFluffyHighlightTexture(fluffyHighlightTexture);
+          fluffyHighlightTextureRef.current = fluffyHighlightTexture;
+          for (const sprite of fluffyHighlightSpritesRef.current) {
+            if (!sprite?.material) continue;
+            sprite.material.map = fluffyHighlightTexture;
+            sprite.material.premultipliedAlpha = true;
+            sprite.material.needsUpdate = true;
+          }
+          pushConsoleLine('info', 'Cloud highlight texture applied: particle/cloudhilit');
+          const fluffyHighlightMap = fluffyHighlightSpritesRef.current[0]?.material?.map || null;
+          pushRuntimeMapLog('Fluffy highlight runtime map', fluffyHighlightMap, fluffyHighlightMap === fluffyHighlightTexture);
+        } else {
+          pushConsoleLine('warn', 'Cloud highlight texture missing: particle/cloudhilit. Using fallback sprite.');
+        }
+
+        const sunTextures = {
+          star: particleTxd?.get?.('coronastar')?.texture || particleTxd?.get?.('coronastar') || null,
+          hex: particleTxd?.get?.('coronahex')?.texture || particleTxd?.get?.('coronahex') || null,
+          circle: particleTxd?.get?.('coronacircle')?.texture || particleTxd?.get?.('coronacircle') || null,
+          ring: particleTxd?.get?.('coronaringa')?.texture || particleTxd?.get?.('coronaringa') || null,
+        };
+        const starTexture = sunTextures.star;
+        const moonTexture = particleTxd?.get?.('coronamoon')?.texture || particleTxd?.get?.('coronamoon') || null;
+        skyFeatureRef.current?.setParticleTextures({
+          moonTexture,
+          starTexture,
+          sunTextures,
+        });
+        if (moonTexture) {
+          pushConsoleLine('info', 'Moon texture applied: particle/coronamoon');
+        } else {
+          pushConsoleLine('warn', 'Moon texture missing: particle/coronamoon. Using fallback sprite.');
+        }
+        if (starTexture) {
+          pushConsoleLine('info', 'Stars texture applied: particle/coronastar');
+        } else {
+          pushConsoleLine('warn', 'Stars texture missing: particle/coronastar. Using fallback sprite.');
+        }
+        if (sunTextures.star && sunTextures.hex && sunTextures.circle && sunTextures.ring) {
+          pushConsoleLine('info', 'Sun textures applied: particle/coronastar, coronahex, coronacircle, coronaringa');
+        } else {
+          pushConsoleLine('warn', 'Some sun textures are missing in particle.txd. Fallback procedural sprites remain in use for missing entries.');
+        }
+        const moonRuntimeMap = skyFeatureRef.current?.moon?.sprite?.material?.map || null;
+        const starsRuntimeMap = skyFeatureRef.current?.stars?.logoSprites?.[0]?.material?.map || null;
+        const sunCoreRuntimeMap = skyFeatureRef.current?.sun?.coreSprite?.material?.map || null;
+        pushRuntimeMapLog('Moon runtime map', moonRuntimeMap, moonRuntimeMap === moonTexture);
+        pushRuntimeMapLog('Stars runtime map', starsRuntimeMap, starsRuntimeMap === starTexture);
+        pushRuntimeMapLog('Sun runtime map', sunCoreRuntimeMap, sunCoreRuntimeMap === sunTextures.star);
       };
 
       const tryBuildWater = async () => {
@@ -1334,118 +1564,13 @@ function App() {
           `waterpro.dat loaded: ${parsed.levelCount} levels, ${waterCells} cells`,
         );
         pushConsoleLine('info', `Water pipeline built in ${(performance.now() - waterStartTime).toFixed(1)} ms`);
-
-        void (async () => {
-          // Safari can appear stuck on "Building water..." if the heavy particle.txd
-          // parse starts before the browser paints the next status update.
-          await yieldToNextTask();
-          // #region agent log
-          dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:water-textures', message: 'Water textures: start getTextureDict(particle)', data: { token } });
-          // #endregion
-          setStatus('Building water... (stage 5/6: loading particle.txd)');
-          const particleTxd = await getTextureDict('particle');
-          // #region agent log
-          dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:water-textures', message: 'Water textures: got particle txd', data: { token, ok: Boolean(particleTxd) } });
-          // #endregion
-          setStatus('Building water... (stage 6/6: applying textures)');
-          if (buildTokenRef.current !== token) return;
-          const waterTextureEntry = particleTxd?.get?.(waterTextureName) || null;
-          const waterTexture = waterTextureEntry?.texture || waterTextureEntry || null;
-          const lowCloudTextures = ['cloud1', 'cloud2', 'cloud3']
-            .map((name) => particleTxd?.get?.(name)?.texture || particleTxd?.get?.(name) || null)
-            .filter(Boolean);
-          const fluffyCloudTexture = particleTxd?.get?.('cloudmasked')?.texture || particleTxd?.get?.('cloudmasked') || null;
-          const fluffyHighlightTexture = particleTxd?.get?.('cloudhilit')?.texture || particleTxd?.get?.('cloudhilit') || null;
-
-          if (!waterTexture) {
-            pushConsoleLine('warn', `Water texture missing: particle/${waterConfig.textureName}. Using flat color water.`);
-          } else {
-            pendingWaterPipeline?.setTexture(waterTexture);
-            pushConsoleLine('info', `Water texture applied: particle/${waterConfig.textureName}`);
-          }
-
-          if (lowCloudTextures.length > 0) {
-            for (let index = 0; index < lowCloudSpritesRef.current.length; index += 1) {
-              const sprite = lowCloudSpritesRef.current[index];
-              if (!sprite?.material) continue;
-              const texture = lowCloudTextures[index % lowCloudTextures.length];
-              if (!texture) continue;
-              texture.wrapS = THREE.ClampToEdgeWrapping;
-              texture.wrapT = THREE.ClampToEdgeWrapping;
-              texture.magFilter = THREE.LinearFilter;
-              texture.minFilter = THREE.LinearMipmapLinearFilter;
-              texture.needsUpdate = true;
-              sprite.material.map = texture;
-              sprite.material.needsUpdate = true;
-            }
-            pushConsoleLine('info', `Cloud textures applied: particle/${lowCloudTextures.length >= 3 ? 'cloud1-3' : 'cloud*'}`);
-          } else {
-            pushConsoleLine('warn', 'Low cloud textures missing: particle/cloud1-3. Using fallback sprites.');
-          }
-
-          if (fluffyCloudTexture) {
-            configureFluffyCloudTexture(fluffyCloudTexture);
-            fluffyCloudTextureRef.current = fluffyCloudTexture;
-            for (const sprite of fluffyCloudSpritesRef.current) {
-              if (!sprite?.material) continue;
-              sprite.material.map = fluffyCloudTexture;
-              sprite.material.premultipliedAlpha = true;
-              sprite.material.needsUpdate = true;
-            }
-            pushConsoleLine('info', 'Cloud texture applied: particle/cloudmasked');
-          } else {
-            pushConsoleLine('warn', 'Fluffy cloud texture missing: particle/cloudmasked. Using fallback sprite.');
-          }
-
-          if (fluffyHighlightTexture) {
-            configureFluffyHighlightTexture(fluffyHighlightTexture);
-            fluffyHighlightTextureRef.current = fluffyHighlightTexture;
-            for (const sprite of fluffyHighlightSpritesRef.current) {
-              if (!sprite?.material) continue;
-              sprite.material.map = fluffyHighlightTexture;
-              sprite.material.premultipliedAlpha = true;
-              sprite.material.needsUpdate = true;
-            }
-            pushConsoleLine('info', 'Cloud highlight texture applied: particle/cloudhilit');
-          } else {
-            pushConsoleLine('warn', 'Cloud highlight texture missing: particle/cloudhilit. Using fallback sprite.');
-          }
-
-          const sunTextures = {
-            star: particleTxd?.get?.('coronastar')?.texture || particleTxd?.get?.('coronastar') || null,
-            hex: particleTxd?.get?.('coronahex')?.texture || particleTxd?.get?.('coronahex') || null,
-            circle: particleTxd?.get?.('coronacircle')?.texture || particleTxd?.get?.('coronacircle') || null,
-            ring: particleTxd?.get?.('coronaringa')?.texture || particleTxd?.get?.('coronaringa') || null,
-          };
-          const starTexture = sunTextures.star;
-          const moonTexture = particleTxd?.get?.('coronamoon')?.texture || particleTxd?.get?.('coronamoon') || null;
-          skyFeatureRef.current?.setParticleTextures({
-            moonTexture,
-            starTexture,
-            sunTextures,
-          });
-          if (moonTexture) {
-            pushConsoleLine('info', 'Moon texture applied: particle/coronamoon');
-          } else {
-            pushConsoleLine('warn', 'Moon texture missing: particle/coronamoon. Using fallback sprite.');
-          }
-          if (starTexture) {
-            pushConsoleLine('info', 'Stars texture applied: particle/coronastar');
-          } else {
-            pushConsoleLine('warn', 'Stars texture missing: particle/coronastar. Using fallback sprite.');
-          }
-          if (sunTextures.star && sunTextures.hex && sunTextures.circle && sunTextures.ring) {
-            pushConsoleLine('info', 'Sun textures applied: particle/coronastar, coronahex, coronacircle, coronaringa');
-          } else {
-            pushConsoleLine('warn', 'Some sun textures are missing in particle.txd. Fallback procedural sprites remain in use for missing entries.');
-          }
-        })();
       } catch (error) {
         pushConsoleLine('error', `waterpro.dat parse failed: ${formatConsoleArg(error)}`);
       }
       };
 
       await tryBuildWater();
+      await applyParticleTextures();
 
       const getModelTemplate = async (modelName, txdName) => {
       const key = makeAssetKey(modelName, txdName);
@@ -2041,6 +2166,7 @@ function App() {
       setBuildProgress({ active: false, current: buildTotal, total: buildTotal });
       setStatus(`Done. Loaded ${loaded} placements.`);
       setShowGameIcon(true);
+      renderResourcesReadyRef.current = true;
       setStats((prev) => ({
         ...prev,
         loaded,
@@ -3051,8 +3177,9 @@ function App() {
       const cloudCoverage = THREE.MathUtils.clamp(timecycleCurrent?.cloudCoverage ?? 0, 0, 1);
       const foggyness = THREE.MathUtils.clamp(timecycleCurrent?.foggyness ?? 0, 0, 1);
       const extraSunnyness = THREE.MathUtils.clamp(timecycleCurrent?.extraSunnyness ?? 0, 0, 1);
-      const lowCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(cloudCoverage, foggyness, extraSunnyness), 0, 1) * 0.42;
-      const fluffyCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(foggyness, extraSunnyness), 0, 1) * 0.5;
+      const lowCloudIntensity = THREE.MathUtils.clamp(1 - Math.max(cloudCoverage, foggyness, extraSunnyness), 0, 1);
+      const lowCloudAlpha = 1;
+      const fluffyCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(foggyness, extraSunnyness), 0, 1) * (160 / 255);
       const skyFeature = skyFeatureRef.current;
       const sunPipeline = skyFeature?.sun || null;
       const cloudMotion = cloudMotionRef.current;
@@ -3136,7 +3263,7 @@ function App() {
           (60 * LOW_CLOUD_HEIGHTS[index]) + 40,
           camera.position.z + (800 * LOW_CLOUD_OFFSETS_Z[index]),
         );
-        sprite.material.color.copy(lowCloudColor);
+        sprite.material.color.copy(lowCloudColor).multiplyScalar(lowCloudIntensity);
         sprite.material.opacity = lowCloudAlpha;
       }
       const fluffyCloudSprites = fluffyCloudSpritesRef.current;
@@ -3181,7 +3308,7 @@ function App() {
               highlightSprite.visible = true;
               highlightSprite.position.copy(sprite.position);
               highlightSprite.material.color.setRGB((200 / 255) * highlight, 0, 0, THREE.SRGBColorSpace);
-              highlightSprite.material.opacity = THREE.MathUtils.clamp(highlight, 0, 1);
+              highlightSprite.material.opacity = 1;
               highlightSprite.material.rotation = 1.7 - Math.atan2(
                 spriteRwScreen.x - sunMetrics.rwScreen.x,
                 spriteRwScreen.y - sunMetrics.rwScreen.y,
@@ -3560,148 +3687,157 @@ function App() {
         jsrwSessionRef.current.updateRuntime(pipelineRuntimeContext);
       }
 
-      const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
-      waterPipeline?.applySettings({
-        uvSpeed: uiStateRef.current.waterUvSpeed,
-        waveHeight: uiStateRef.current.waterWaveHeight,
-        farAlpha: uiStateRef.current.waterAlpha,
-      });
-      const skyScene = skySceneRef.current;
-      const skyCamera = skyCameraRef.current;
-      const skyCloudScene = skyCloudSceneRef.current;
-      const farBackgroundColor = skyBottomColor;
-      try {
-        const rwRenderQueue = rwRenderQueueRef.current;
-        const postFxSceneTarget = jsrwSessionRef.current.beginPostFxSceneCapture({
-          ...pipelineRuntimeContext,
-          viewportWidth,
-          viewportHeight,
-        });
-        rwRenderQueue?.prepareFrame(camera);
-        renderer.setRenderTarget(postFxSceneTarget);
+      if (!renderResourcesReadyRef.current) {
+        renderer.setRenderTarget(null);
         renderer.autoClear = true;
-        if (skyScene && skyCamera) {
-          renderer.render(skyScene, skyCamera);
-        } else {
-          renderer.setClearColor(farBackgroundColor, 1);
-          renderer.clear(true, true, true);
-        }
-        renderer.autoClear = false;
-        renderer.clearDepth();
-        skyFeature?.renderBackground(renderer);
-        if (skyCloudScene) {
-          renderer.render(skyCloudScene, camera);
+        renderer.setClearColor(DEFAULT_SCENE_BACKGROUND, 1);
+        renderer.clear(true, true, true);
+        renderer.autoClear = true;
+      } else {
+
+        const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
+        waterPipeline?.applySettings({
+          uvSpeed: uiStateRef.current.waterUvSpeed,
+          waveHeight: uiStateRef.current.waterWaveHeight,
+          farAlpha: uiStateRef.current.waterAlpha,
+        });
+        const skyScene = skySceneRef.current;
+        const skyCamera = skyCameraRef.current;
+        const skyCloudScene = skyCloudSceneRef.current;
+        const farBackgroundColor = skyBottomColor;
+        try {
+          const rwRenderQueue = rwRenderQueueRef.current;
+          const postFxSceneTarget = jsrwSessionRef.current.beginPostFxSceneCapture({
+            ...pipelineRuntimeContext,
+            viewportWidth,
+            viewportHeight,
+          });
+          rwRenderQueue?.prepareFrame(camera);
+          renderer.setRenderTarget(postFxSceneTarget);
+          renderer.autoClear = true;
+          if (skyScene && skyCamera) {
+            renderer.render(skyScene, skyCamera);
+          } else {
+            renderer.setClearColor(farBackgroundColor, 1);
+            renderer.clear(true, true, true);
+          }
+          renderer.autoClear = false;
           renderer.clearDepth();
-        }
-        if (waterPipeline?.hasRenderableWater() && uiStateRef.current.renderWater) {
-          let waterStage = 'update';
-          try {
-            waterPipeline.update(camera, time, dt);
+          skyFeature?.renderBackground(renderer);
+          if (skyCloudScene) {
+            renderer.render(skyCloudScene, camera);
+            renderer.clearDepth();
+          }
+          if (waterPipeline?.hasRenderableWater() && uiStateRef.current.renderWater) {
+            let waterStage = 'update';
+            try {
+              waterPipeline.update(camera, time, dt);
 
-            waterStage = 'renderSceneOpaque';
-            rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout']);
-            renderer.render(scene, camera);
-            rwRenderQueue?.popCameraBucketMask(camera);
+              waterStage = 'renderSceneOpaque';
+              rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout']);
+              renderer.render(scene, camera);
+              rwRenderQueue?.popCameraBucketMask(camera);
 
-            waterStage = 'renderFar';
-            waterPipeline.renderFar(renderer, camera, null);
+              waterStage = 'renderFar';
+              waterPipeline.renderFar(renderer, camera, null);
 
-            waterStage = 'renderNear';
-            waterPipeline.renderNear(renderer, camera);
+              waterStage = 'renderNear';
+              waterPipeline.renderNear(renderer, camera);
 
-            waterStage = 'renderWavy';
-            waterPipeline.renderWavy(renderer, camera);
+              waterStage = 'renderWavy';
+              waterPipeline.renderWavy(renderer, camera);
 
-            waterStage = 'renderWake';
-            waterPipeline.renderWake(renderer, camera);
+              waterStage = 'renderWake';
+              waterPipeline.renderWake(renderer, camera);
 
-            waterStage = 'renderSceneTransparent';
-            rwRenderQueue?.pushCameraBucketMask(camera, ['transparent', 'additive', 'overlay']);
-            renderer.render(scene, camera);
-            rwRenderQueue?.popCameraBucketMask(camera);
-            renderer.autoClear = true;
-          } catch (waterError) {
-            rwRenderQueue?.popCameraBucketMask(camera);
-            rwRenderQueue?.popCameraBucketMask(camera);
-            console.error('Water pipeline runtime error:', waterError);
-            const farPos = waterPipeline?.farMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
-            const farUv = waterPipeline?.farMesh?.geometry?.getAttribute?.('uv')?.array?.byteLength ?? 'missing';
-            const farIndex = waterPipeline?.farMesh?.geometry?.index?.array?.byteLength ?? 'missing';
-            const nearPos = waterPipeline?.nearMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
-            const nearUv = waterPipeline?.nearMesh?.geometry?.getAttribute?.('uv')?.array?.byteLength ?? 'missing';
-            const nearIndex = waterPipeline?.nearMesh?.geometry?.index?.array?.byteLength ?? 'missing';
-            const nearNormal = waterPipeline?.nearMesh?.geometry?.getAttribute?.('normal')?.array?.byteLength ?? 'missing';
-            const wakePos = waterPipeline?.wakeMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
-            pushConsoleLine('error', `Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}`);
-            pushConsoleLine(
-              'error',
-              `Water buffers: far.pos=${farPos} far.uv=${farUv} far.idx=${farIndex} near.pos=${nearPos} near.uv=${nearUv} near.idx=${nearIndex} near.normal=${nearNormal} wake.pos=${wakePos}`,
-            );
-            setStatus(`Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}. Water disabled.`);
-            jsrwSessionRef.current.disposeWaterRuntime();
+              waterStage = 'renderSceneTransparent';
+              rwRenderQueue?.pushCameraBucketMask(camera, ['transparent', 'additive', 'overlay']);
+              renderer.render(scene, camera);
+              rwRenderQueue?.popCameraBucketMask(camera);
+              renderer.autoClear = true;
+            } catch (waterError) {
+              rwRenderQueue?.popCameraBucketMask(camera);
+              rwRenderQueue?.popCameraBucketMask(camera);
+              console.error('Water pipeline runtime error:', waterError);
+              const farPos = waterPipeline?.farMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
+              const farUv = waterPipeline?.farMesh?.geometry?.getAttribute?.('uv')?.array?.byteLength ?? 'missing';
+              const farIndex = waterPipeline?.farMesh?.geometry?.index?.array?.byteLength ?? 'missing';
+              const nearPos = waterPipeline?.nearMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
+              const nearUv = waterPipeline?.nearMesh?.geometry?.getAttribute?.('uv')?.array?.byteLength ?? 'missing';
+              const nearIndex = waterPipeline?.nearMesh?.geometry?.index?.array?.byteLength ?? 'missing';
+              const nearNormal = waterPipeline?.nearMesh?.geometry?.getAttribute?.('normal')?.array?.byteLength ?? 'missing';
+              const wakePos = waterPipeline?.wakeMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
+              pushConsoleLine('error', `Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}`);
+              pushConsoleLine(
+                'error',
+                `Water buffers: far.pos=${farPos} far.uv=${farUv} far.idx=${farIndex} near.pos=${nearPos} near.uv=${nearUv} near.idx=${nearIndex} near.normal=${nearNormal} wake.pos=${wakePos}`,
+              );
+              setStatus(`Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}. Water disabled.`);
+              jsrwSessionRef.current.disposeWaterRuntime();
+              renderer.autoClear = false;
+              rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
+              renderer.render(scene, camera);
+              rwRenderQueue?.popCameraBucketMask(camera);
+            }
+          } else {
             renderer.autoClear = false;
             rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
             renderer.render(scene, camera);
             rwRenderQueue?.popCameraBucketMask(camera);
           }
-        } else {
-          renderer.autoClear = false;
-          rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
-          renderer.render(scene, camera);
-          rwRenderQueue?.popCameraBucketMask(camera);
-        }
-        if (postFxSceneTarget && postFxSunCoronaEnabled) {
-          renderer.clearDepth();
-          skyFeature?.renderSun(renderer, { mode: 'bloom' });
-        }
-        renderer.setRenderTarget(null);
-        if (postFxSceneTarget) {
-          jsrwSessionRef.current.renderPostFx(renderer, {
-            ...pipelineRuntimeContext,
-            viewportWidth,
-            viewportHeight,
-          });
-        }
-        renderer.clearDepth();
-        skyFeature?.renderSun(renderer, { mode: 'full' });
-
-        const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
-        gameIconSprite.material.map = iconTextures[activeIcon];
-        gameIconSprite.visible = showGameIconRef.current;
-        const iconPx = 80;
-        const padXPx = 20;
-        const padYPx = 56;
-        gameIconSprite.position.set(
-          1 - ((2 * padXPx) / viewportWidth),
-          1 - ((2 * padYPx) / viewportHeight),
-          0,
-        );
-        gameIconSprite.scale.set(
-          (2 * iconPx) / viewportWidth,
-          (2 * iconPx) / viewportHeight,
-          1,
-        );
-        renderer.autoClear = false;
-        renderer.clearDepth();
-        renderer.render(hudScene, hudCamera);
-        renderer.autoClear = true;
-      } catch (error) {
-        console.error('Renderer runtime error:', error);
-        if (!backendRuntimeFailed) {
-          backendRuntimeFailed = true;
-          pushConsoleLine('error', `Renderer runtime error: ${formatConsoleArg(error)}`);
-          if (activeBackend !== 'WebGL') {
-            setStatus('Renderer backend failed at runtime. Switched to WebGL.');
-            uiStateRef.current.backendSelection = 'WebGL';
-            backendSwitchingRef.current = true;
-            setActiveBackend('WebGL');
-          } else {
-            setStatus(`Renderer runtime error: ${formatConsoleArg(error)}`);
-            backendSwitchingRef.current = false;
+          if (postFxSceneTarget && postFxSunCoronaEnabled) {
+            renderer.clearDepth();
+            skyFeature?.renderSun(renderer, { mode: 'bloom' });
           }
+          renderer.setRenderTarget(null);
+          if (postFxSceneTarget) {
+            jsrwSessionRef.current.renderPostFx(renderer, {
+              ...pipelineRuntimeContext,
+              viewportWidth,
+              viewportHeight,
+            });
+          }
+          renderer.clearDepth();
+          skyFeature?.renderSun(renderer, { mode: 'full' });
+
+          const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
+          gameIconSprite.material.map = iconTextures[activeIcon];
+          gameIconSprite.visible = showGameIconRef.current;
+          const iconPx = 80;
+          const padXPx = 20;
+          const padYPx = 56;
+          gameIconSprite.position.set(
+            1 - ((2 * padXPx) / viewportWidth),
+            1 - ((2 * padYPx) / viewportHeight),
+            0,
+          );
+          gameIconSprite.scale.set(
+            (2 * iconPx) / viewportWidth,
+            (2 * iconPx) / viewportHeight,
+            1,
+          );
+          renderer.autoClear = false;
+          renderer.clearDepth();
+          renderer.render(hudScene, hudCamera);
+          renderer.autoClear = true;
+        } catch (error) {
+          console.error('Renderer runtime error:', error);
+          if (!backendRuntimeFailed) {
+            backendRuntimeFailed = true;
+            pushConsoleLine('error', `Renderer runtime error: ${formatConsoleArg(error)}`);
+            if (activeBackend !== 'WebGL') {
+              setStatus('Renderer backend failed at runtime. Switched to WebGL.');
+              uiStateRef.current.backendSelection = 'WebGL';
+              backendSwitchingRef.current = true;
+              setActiveBackend('WebGL');
+            } else {
+              setStatus(`Renderer runtime error: ${formatConsoleArg(error)}`);
+              backendSwitchingRef.current = false;
+            }
+          }
+          rafId = window.requestAnimationFrame(animate);
+          return;
         }
-        rafId = window.requestAnimationFrame(animate);
-        return;
       }
 
       const { ImGui, ImGui_Impl, ready } = imguiRef.current;
@@ -4322,12 +4458,19 @@ function App() {
               const files = loadedFilesRef.current.filter((entry) => {
                 const detail = String(entry.detail || '').trim().toLowerCase();
                 if (!detail) return false;
-                if (detail === 'declared' || detail === 'required' || detail === 'found') return false;
-                if (detail.includes('missing')) return false;
+                if (detail === 'declared' || detail === 'required' || detail === 'optional') return false;
                 return true;
               });
-              const start = Math.max(0, files.length - 1000);
-              let text = files
+              const prioritizedFiles = files
+                .slice()
+                .sort((a, b) => {
+                  const aPriority = a.kind === 'RUNTIME_MAP' ? 0 : 1;
+                  const bPriority = b.kind === 'RUNTIME_MAP' ? 0 : 1;
+                  if (aPriority !== bPriority) return aPriority - bPriority;
+                  return 0;
+                });
+              const start = Math.max(0, prioritizedFiles.length - 1000);
+              let text = prioritizedFiles
                 .slice(start)
                 .map((entry) => {
                   const detail = entry.detail ? ` (${entry.detail})` : '';

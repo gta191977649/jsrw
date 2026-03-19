@@ -1,13 +1,16 @@
 import { normalizeName, normalizePath } from '../resources/ResourceLocator';
 
-function toResolvedRecord(file, requestedPath) {
-  if (!file) return null;
+function toResolvedRecord(entry, requestedPath) {
+  if (!entry?.file) return null;
+  const file = entry.file;
+  const rawResolvedPath = String(entry.path || file.webkitRelativePath || file.name || requestedPath || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
 
   return {
     file,
     requestedPath: normalizePath(requestedPath || file.webkitRelativePath || file.name || ''),
-    resolvedPath: normalizePath(file.webkitRelativePath || file.name || requestedPath || ''),
-    basename: normalizeName(file.webkitRelativePath || file.name || requestedPath || ''),
+    resolvedPath: rawResolvedPath,
+    normalizedResolvedPath: normalizePath(rawResolvedPath),
+    basename: normalizeName(rawResolvedPath),
   };
 }
 
@@ -34,7 +37,7 @@ export class BrowserFileSystem {
     if (!this.fileIndex?.listByPathPrefix) return [];
     return this.fileIndex
       .listByPathPrefix(pathPrefix)
-      .map(({ path, file }) => toResolvedRecord(file, path))
+      .map((entry) => toResolvedRecord(entry, entry.path))
       .filter(Boolean);
   }
 
@@ -42,7 +45,7 @@ export class BrowserFileSystem {
     if (!this.fileIndex?.listByExtension) return [];
     return this.fileIndex
       .listByExtension(extension)
-      .map(({ path, file }) => toResolvedRecord(file, path))
+      .map((entry) => toResolvedRecord(entry, entry.path))
       .filter(Boolean);
   }
 }

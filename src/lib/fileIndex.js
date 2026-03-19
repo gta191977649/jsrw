@@ -8,14 +8,22 @@ function basename(path) {
 export function buildFileIndex(fileList) {
   const byPath = new Map();
   const byBasename = new Map();
+  const entries = [];
 
   for (const file of fileList) {
-    const rel = normalizePath(file.webkitRelativePath || file.name);
-    byPath.set(rel, file);
+    const rawPath = String(file.webkitRelativePath || file.name || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
+    const rel = normalizePath(rawPath);
+    const entry = {
+      file,
+      path: rawPath,
+      normalizedPath: rel,
+    };
+    byPath.set(rel, entry);
+    entries.push(entry);
 
     const base = basename(rel);
     if (!byBasename.has(base)) byBasename.set(base, []);
-    byBasename.get(base).push(rel);
+    byBasename.get(base).push(entry);
   }
 
   function findByPathHint(inputPath) {
@@ -25,9 +33,10 @@ export function buildFileIndex(fileList) {
     const withDataPrefix = normalized.startsWith('data/') ? normalized : `data/${normalized}`;
     if (byPath.has(withDataPrefix)) return byPath.get(withDataPrefix);
 
-    for (const [path, file] of byPath.entries()) {
+    for (const entry of entries) {
+      const path = entry.normalizedPath;
       if (path.endsWith(`/${normalized}`) || path.endsWith(`/${withDataPrefix}`)) {
-        return file;
+        return entry;
       }
     }
 
@@ -38,7 +47,7 @@ export function buildFileIndex(fileList) {
     const normalized = normalizePath(name);
     const candidates = byBasename.get(normalized);
     if (!candidates || candidates.length === 0) return null;
-    return byPath.get(candidates[0]);
+    return candidates[0];
   }
 
   function listByPathPrefix(pathPrefix) {
@@ -46,12 +55,13 @@ export function buildFileIndex(fileList) {
     if (!normalizedPrefix) return [];
     const prefixWithSlash = `${normalizedPrefix}/`;
     const matches = [];
-    for (const [path, file] of byPath.entries()) {
+    for (const entry of entries) {
+      const path = entry.normalizedPath;
       if (path === normalizedPrefix || path.startsWith(prefixWithSlash)) {
-        matches.push({ path, file });
+        matches.push(entry);
       }
     }
-    matches.sort((a, b) => a.path.localeCompare(b.path));
+    matches.sort((a, b) => a.normalizedPath.localeCompare(b.normalizedPath));
     return matches;
   }
 
@@ -60,10 +70,10 @@ export function buildFileIndex(fileList) {
     if (!normalizedExtension) return [];
     const suffix = `.${normalizedExtension}`;
     const matches = [];
-    for (const [path, file] of byPath.entries()) {
-      if (path.endsWith(suffix)) matches.push({ path, file });
+    for (const entry of entries) {
+      if (entry.normalizedPath.endsWith(suffix)) matches.push(entry);
     }
-    matches.sort((a, b) => a.path.localeCompare(b.path));
+    matches.sort((a, b) => a.normalizedPath.localeCompare(b.normalizedPath));
     return matches;
   }
 

@@ -176,11 +176,12 @@ export class WorldLoader {
       missingDetail = 'missing',
       warnOnMissing = true,
     } = options;
+    const requestedPath = String(pathHint || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
     const normalizedPath = normalizePath(pathHint);
-    if (declaredDetail) this.onFileEvent?.(kind, normalizedPath, declaredDetail);
+    if (declaredDetail) this.onFileEvent?.(kind, requestedPath || normalizedPath, declaredDetail);
     const record = this.fileSystem.findByPath(normalizedPath);
     if (!record) {
-      this.onFileEvent?.(kind, normalizedPath, missingDetail);
+      this.onFileEvent?.(kind, requestedPath || normalizedPath, missingDetail);
       if (warnOnMissing) this.onLog?.('warn', `${kind} missing: ${normalizedPath}`);
       return null;
     }
@@ -265,11 +266,29 @@ export class WorldLoader {
   buildTextureSourceIndex(texturePaths = [], imgArchives) {
     const index = new Map();
     const requestedPaths = new Set(texturePaths.map((path) => normalizePath(path)));
+    const explicitTextureRecords = [];
     const fileRecords = this.fileSystem?.listByExtension?.('txd') || [];
     const sortKey = (record) => {
       const path = normalizePath(record?.resolvedPath || '');
       return requestedPaths.has(path) ? 1 : 2;
     };
+
+    for (const texturePath of texturePaths) {
+      const record = this.resolveByPath('TXD', texturePath, {
+        foundDetail: 'loaded',
+        missingDetail: 'missing',
+        warnOnMissing: false,
+      });
+      if (!record) continue;
+      explicitTextureRecords.push(record);
+      const normalizedName = stripExtension(record.basename || record.resolvedPath || '');
+      if (!normalizedName) continue;
+      index.set(normalizedName, {
+        kind: 'file',
+        record,
+        sourcePath: record.resolvedPath || '',
+      });
+    }
 
     const imgAssetNames = imgArchives?.listAssets?.('txd') || [];
     for (const assetName of imgAssetNames) {
@@ -292,6 +311,7 @@ export class WorldLoader {
       .forEach((record) => {
         const normalizedName = stripExtension(record.basename || record.resolvedPath || '');
         if (!normalizedName) return;
+        if (index.has(normalizedName)) return;
         index.set(normalizedName, {
           kind: 'file',
           record,
