@@ -9,6 +9,7 @@ export function createWorldContext(input = {}) {
     ideRegistry: input.ideRegistry || null,
     iplRegistry: input.iplRegistry || null,
     colRegistry: input.colRegistry || null,
+    defaultResources: input.defaultResources || null,
     mapZoneRegistry: input.mapZoneRegistry || null,
     timecyc: input.timecyc || null,
     timecycSourcePath: input.timecycSourcePath || '',

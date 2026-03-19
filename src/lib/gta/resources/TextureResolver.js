@@ -44,6 +44,7 @@ export class TextureResolver {
     this.imgArchives = options.imgArchives;
     this.registry = options.registry;
     this.imagePaths = Array.isArray(options.imagePaths) ? options.imagePaths : [];
+    this.sourceIndex = options.sourceIndex || null;
     this.onLog = typeof options.onLog === 'function' ? options.onLog : null;
     const patchedLoader = createMetadataPatchedLoader();
     this.loader = patchedLoader.loader;
@@ -72,15 +73,34 @@ export class TextureResolver {
   }
 
   async loadTextureDictionary(name) {
-    const txdFileName = normalizeAssetName(name, 'txd');
-    const directFile = this.fileSystem.findByBasename(txdFileName);
-    const imagePathFile = directFile || this.findFromImagePaths(txdFileName);
-
-    if (imagePathFile) {
-      const dict = normalizeTextureDictionary(this.loader.parse(await imagePathFile.file.arrayBuffer()), {
+    const normalizedName = stripExtension(name);
+    const indexedSource = this.sourceIndex?.get?.(normalizedName) || null;
+    if (indexedSource?.kind === 'file' && indexedSource.record) {
+      const dict = normalizeTextureDictionary(this.loader.parse(await indexedSource.record.file.arrayBuffer()), {
         metadataByName: this.metadataByNameRef.current,
       });
-      this.sources.set(name, imagePathFile.resolvedPath);
+      this.sources.set(name, indexedSource.record.resolvedPath);
+      return dict;
+    }
+
+    if (indexedSource?.kind === 'img') {
+      const txdFromImg = this.imgArchives.readBytes(indexedSource.name, 'txd');
+      if (txdFromImg) {
+        const dict = normalizeTextureDictionary(this.loader.parse(toArrayBuffer(txdFromImg)), {
+          metadataByName: this.metadataByNameRef.current,
+        });
+        this.sources.set(name, indexedSource.sourcePath || this.imgArchives.getAssetSource(indexedSource.name, 'txd') || 'unknown IMG');
+        return dict;
+      }
+    }
+
+    const txdFileName = normalizeAssetName(name, 'txd');
+    const directFile = this.fileSystem.findByBasename(txdFileName) || this.findFromImagePaths(txdFileName);
+    if (directFile) {
+      const dict = normalizeTextureDictionary(this.loader.parse(await directFile.file.arrayBuffer()), {
+        metadataByName: this.metadataByNameRef.current,
+      });
+      this.sources.set(name, directFile.resolvedPath);
       return dict;
     }
 

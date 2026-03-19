@@ -21,4 +21,8 @@ export class ImgArchiveManager {
   getAssetSource(name, extension = '') {
     return this.parser.getAssetSource(normalizeAssetName(name, extension));
   }
+
+  listAssets(extension = '') {
+    return this.parser.listAssetNames(extension);
+  }
 }

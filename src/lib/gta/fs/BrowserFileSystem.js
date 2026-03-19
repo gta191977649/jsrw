@@ -29,4 +29,20 @@ export class BrowserFileSystem {
     if (!this.fileIndex) return null;
     return toResolvedRecord(this.fileIndex.findByBasename(name), name);
   }
+
+  listByPathPrefix(pathPrefix) {
+    if (!this.fileIndex?.listByPathPrefix) return [];
+    return this.fileIndex
+      .listByPathPrefix(pathPrefix)
+      .map(({ path, file }) => toResolvedRecord(file, path))
+      .filter(Boolean);
+  }
+
+  listByExtension(extension) {
+    if (!this.fileIndex?.listByExtension) return [];
+    return this.fileIndex
+      .listByExtension(extension)
+      .map(({ path, file }) => toResolvedRecord(file, path))
+      .filter(Boolean);
+  }
 }

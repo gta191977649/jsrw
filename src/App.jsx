@@ -1130,11 +1130,18 @@ function App() {
       const worldContext = worldLoadResult.context;
       const worldBuild = worldLoadResult.build;
       const worldLoadStats = worldLoadResult.stats;
+      const defaultResources = worldLoadStats.defaultResources || worldContext.defaultResources || null;
       const ideById = worldContext.ideRegistry?.byId || new Map();
       const ideByModel = worldContext.ideRegistry?.byModel || new Map();
       const placements = worldContext.iplRegistry?.getAll?.() || [];
 
       pushConsoleLine('info', `IDE/IPL parsed in ${(performance.now() - parseStartTime).toFixed(1)} ms`);
+      if (defaultResources) {
+        pushConsoleLine(
+          'info',
+          `Static defaults: IMG ${defaultResources.counts.imgMounted}/${defaultResources.counts.imgRequested}, TXD ${defaultResources.counts.textureFound}/${defaultResources.counts.textureRequested}, COL ${defaultResources.counts.collisionFound}`,
+        );
+      }
 
       const previousControls = timecycleStateRef.current?.controls || {};
       const parsedTimecycle = worldBuild.weather?.data || null;
@@ -1193,6 +1200,7 @@ function App() {
         iplFiles: worldLoadStats.iplFiles,
         ideDefs: ideByModel.size,
         iplInst: placements.length,
+        defaultResources,
         loaded: 0,
         failed: 0,
         unresolved: 0,

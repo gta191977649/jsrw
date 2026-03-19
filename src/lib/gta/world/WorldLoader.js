@@ -19,12 +19,26 @@ import { WeatherBuilder } from './builders/WeatherBuilder';
 import { WaterBuilder } from './builders/WaterBuilder';
 import { WorldBuilder } from './builders/WorldBuilder';
 import { createWorldContext } from './WorldContext';
-import { normalizePath } from '../resources/ResourceLocator';
+import { normalizePath, stripExtension } from '../resources/ResourceLocator';
 
 const DEFAULT_DAT_PATH = 'data/gta.dat';
 const DEFAULT_OBJECT_DAT_PATH = 'data/object.dat';
 const DEFAULT_TIMECYC_PATH = 'data/timecyc.dat';
 const DEFAULT_WATERPRO_PATH = 'data/waterpro.dat';
+const DEFAULT_IMG_PATHS = Object.freeze([
+  'models/gta3.img',
+  'models/gta_int.img',
+  'models/player.img',
+]);
+const OPTIONAL_DEFAULT_IMG_PATHS = new Set([
+  'models/gta_int.img',
+  'models/player.img',
+]);
+const DEFAULT_TEXTURE_PATHS = Object.freeze([
+  'models/generic.txd',
+  'models/particle.txd',
+]);
+const DEFAULT_COL_DIR = 'models/coll';
 
 function sanitizeImgList(content) {
   return String(content || '')
@@ -32,6 +46,10 @@ function sanitizeImgList(content) {
     .map((line) => line.replace(/(#|;|\/\/).*$/g, '').trim())
     .filter(Boolean)
     .map((line) => normalizePath(line));
+}
+
+function countLoadedEntries(entries = []) {
+  return entries.filter((entry) => entry?.found).length;
 }
 
 export class WorldLoader {
@@ -73,12 +91,15 @@ export class WorldLoader {
     );
 
     const expandedImgPaths = await this.collectImgPaths(manifest, options.extraImgPaths || []);
+    const texturePaths = this.collectTexturePaths(manifest);
+    const staticColPaths = this.discoverStaticColPaths();
     const imgArchives = new ImgArchiveManager();
     await this.mountArchives(expandedImgPaths, imgArchives);
+    const textureSourceIndex = this.buildTextureSourceIndex(texturePaths, imgArchives);
 
     const ideRegistry = await this.loadIdeDefinitions(manifest);
     const iplRegistry = await this.loadIplDefinitions(manifest);
-    const colRegistry = await this.loadColDefinitions(manifest);
+    const colRegistry = await this.loadColDefinitions(manifest, staticColPaths);
     const mapZoneRegistry = await this.loadMapZones(manifest);
     const timecyc = await this.loadOptionalTimecyc(options.timecycPath || DEFAULT_TIMECYC_PATH);
     const water = await this.loadOptionalWater(options.waterPath || DEFAULT_WATERPRO_PATH);
@@ -88,7 +109,8 @@ export class WorldLoader {
       fileSystem: this.fileSystem,
       imgArchives,
       registry: new TxdRegistry(),
-      imagePaths: manifest.imagePaths,
+      imagePaths: texturePaths,
+      sourceIndex: textureSourceIndex,
       onLog: this.onLog,
     });
     const modelResolver = new ModelResolver({
@@ -97,6 +119,15 @@ export class WorldLoader {
       textureResolver,
       registry: new DffRegistry(),
     });
+
+    const defaultResources = this.buildDefaultResourceSummary({
+      manifest,
+      imgPaths: expandedImgPaths,
+      texturePaths,
+      staticColPaths,
+      textureSourceIndex,
+    });
+    this.logDefaultResourceSummary(defaultResources);
 
     const context = createWorldContext({
       gameVersion: this.gameVersion,
@@ -108,6 +139,7 @@ export class WorldLoader {
       ideRegistry,
       iplRegistry,
       colRegistry,
+      defaultResources,
       mapZoneRegistry,
       timecyc: timecyc?.data || null,
       timecycSourcePath: timecyc?.sourcePath || '',
@@ -132,6 +164,7 @@ export class WorldLoader {
         iplFiles: iplRegistry.files.length,
         ideDefs: ideRegistry.size,
         iplInst: iplRegistry.size,
+        defaultResources,
       },
     };
   }
@@ -165,7 +198,7 @@ export class WorldLoader {
       orderedPaths.push(normalizedPath);
     };
 
-    registerPath('models/gta3.img');
+    DEFAULT_IMG_PATHS.forEach(registerPath);
     extraImgPaths.forEach(registerPath);
     manifest.cdImages.forEach(registerPath);
     manifest.imgs.forEach(registerPath);
@@ -184,11 +217,29 @@ export class WorldLoader {
     return orderedPaths;
   }
 
+  collectTexturePaths(manifest) {
+    const orderedPaths = [];
+    const knownPaths = new Set();
+    const registerPath = (pathHint) => {
+      const normalizedPath = normalizePath(pathHint);
+      if (!normalizedPath || knownPaths.has(normalizedPath)) return;
+      knownPaths.add(normalizedPath);
+      orderedPaths.push(normalizedPath);
+    };
+
+    DEFAULT_TEXTURE_PATHS.forEach(registerPath);
+    manifest.imagePaths.forEach(registerPath);
+    return orderedPaths;
+  }
+
   async mountArchives(imgPaths, imgArchives) {
     for (const imgPath of imgPaths) {
+      const normalizedImgPath = normalizePath(imgPath);
+      const isOptionalDefaultArchive = OPTIONAL_DEFAULT_IMG_PATHS.has(normalizedImgPath);
       const imgRecord = this.resolveByPath('IMG', imgPath, {
         foundDetail: 'found',
         missingDetail: 'missing img',
+        warnOnMissing: !isOptionalDefaultArchive,
       });
       if (!imgRecord) continue;
 
@@ -207,6 +258,134 @@ export class WorldLoader {
       this.onLog?.(
         'info',
         `IMG loaded: ${imgPath} (${parsed.total} entries${parsed.overridden > 0 ? `, override ${parsed.overridden}` : ''})`,
+      );
+    }
+  }
+
+  buildTextureSourceIndex(texturePaths = [], imgArchives) {
+    const index = new Map();
+    const requestedPaths = new Set(texturePaths.map((path) => normalizePath(path)));
+    const fileRecords = this.fileSystem?.listByExtension?.('txd') || [];
+    const sortKey = (record) => {
+      const path = normalizePath(record?.resolvedPath || '');
+      return requestedPaths.has(path) ? 1 : 2;
+    };
+
+    const imgAssetNames = imgArchives?.listAssets?.('txd') || [];
+    for (const assetName of imgAssetNames) {
+      const normalizedName = stripExtension(assetName);
+      if (!normalizedName) continue;
+      index.set(normalizedName, {
+        kind: 'img',
+        name: normalizedName,
+        sourcePath: imgArchives.getAssetSource(normalizedName, 'txd') || '',
+      });
+    }
+
+    fileRecords
+      .slice()
+      .sort((a, b) => {
+        const keyDiff = sortKey(a) - sortKey(b);
+        if (keyDiff !== 0) return keyDiff;
+        return String(a.resolvedPath || '').localeCompare(String(b.resolvedPath || ''));
+      })
+      .forEach((record) => {
+        const normalizedName = stripExtension(record.basename || record.resolvedPath || '');
+        if (!normalizedName) return;
+        index.set(normalizedName, {
+          kind: 'file',
+          record,
+          sourcePath: record.resolvedPath || '',
+        });
+      });
+
+    return index;
+  }
+
+  buildDefaultResourceSummary({ manifest, imgPaths = [], texturePaths = [], staticColPaths = [], textureSourceIndex = null }) {
+    const defaultImgEntries = DEFAULT_IMG_PATHS.map((pathHint) => {
+      const record = this.fileSystem?.findByPath?.(pathHint) || null;
+      const dirPath = pathHint.replace(/\.img$/i, '.dir');
+      const dirRecord = this.fileSystem?.findByPath?.(dirPath) || null;
+      return {
+        path: normalizePath(pathHint),
+        kind: 'img',
+        optional: OPTIONAL_DEFAULT_IMG_PATHS.has(normalizePath(pathHint)),
+        declaredInManifest: manifest.cdImages.includes(pathHint) || manifest.imgs.includes(pathHint),
+        requested: imgPaths.includes(normalizePath(pathHint)),
+        found: Boolean(record),
+        hasDirectory: Boolean(dirRecord),
+        mounted: Boolean(record && dirRecord),
+        sourcePath: record?.resolvedPath || '',
+        directoryPath: dirRecord?.resolvedPath || '',
+      };
+    });
+
+    const defaultTextureEntries = DEFAULT_TEXTURE_PATHS.map((pathHint) => {
+      const record = this.fileSystem?.findByPath?.(pathHint) || null;
+      return {
+        path: normalizePath(pathHint),
+        kind: 'txd',
+        declaredInManifest: manifest.imagePaths.includes(pathHint),
+        requested: texturePaths.includes(normalizePath(pathHint)),
+        found: Boolean(record),
+        sourcePath: record?.resolvedPath || '',
+      };
+    });
+
+    const staticColEntries = staticColPaths.map((pathHint) => {
+      const record = this.fileSystem?.findByPath?.(pathHint) || null;
+      return {
+        path: normalizePath(pathHint),
+        kind: 'col',
+        found: Boolean(record),
+        sourcePath: record?.resolvedPath || '',
+      };
+    });
+
+    return {
+      imgArchives: defaultImgEntries,
+      textures: defaultTextureEntries,
+      collisionDirectory: {
+        path: DEFAULT_COL_DIR,
+        files: staticColEntries,
+        fileCount: staticColEntries.length,
+        loadedCount: countLoadedEntries(staticColEntries),
+      },
+      counts: {
+        imgRequested: defaultImgEntries.filter((entry) => entry.requested).length,
+        imgMounted: defaultImgEntries.filter((entry) => entry.mounted).length,
+        textureRequested: defaultTextureEntries.filter((entry) => entry.requested).length,
+        textureFound: countLoadedEntries(defaultTextureEntries),
+        collisionFound: countLoadedEntries(staticColEntries),
+        textureIndexed: textureSourceIndex?.size || 0,
+      },
+    };
+  }
+
+  logDefaultResourceSummary(defaultResources) {
+    if (!defaultResources) return;
+
+    for (const entry of defaultResources.imgArchives || []) {
+      if (entry.mounted) {
+        this.onLog?.('info', `Default IMG ready: ${entry.path}`);
+      } else if (!entry.optional) {
+        this.onLog?.('warn', `Default IMG unavailable: ${entry.path}`);
+      }
+    }
+
+    for (const entry of defaultResources.textures || []) {
+      if (entry.found) {
+        this.onLog?.('info', `Default TXD ready: ${entry.path}`);
+      } else {
+        this.onLog?.('warn', `Default TXD unavailable: ${entry.path}`);
+      }
+    }
+
+    if (defaultResources.collisionDirectory?.fileCount > 0) {
+      this.onLog?.(
+        'info',
+        `Default COL directory ready: ${defaultResources.collisionDirectory.path} (${defaultResources.collisionDirectory.loadedCount} files)`,
       );
     }
   }
@@ -247,10 +426,21 @@ export class WorldLoader {
     return registry;
   }
 
-  async loadColDefinitions(manifest) {
+  async loadColDefinitions(manifest, staticColPaths = []) {
     const registry = new ColRegistry();
+    const orderedPaths = [];
+    const knownPaths = new Set();
+    const registerPath = (pathHint) => {
+      const normalizedPath = normalizePath(pathHint);
+      if (!normalizedPath || knownPaths.has(normalizedPath)) return;
+      knownPaths.add(normalizedPath);
+      orderedPaths.push(normalizedPath);
+    };
 
-    for (const pathHint of manifest.colFiles) {
+    manifest.colFiles.forEach(registerPath);
+    staticColPaths.forEach(registerPath);
+
+    for (const pathHint of orderedPaths) {
       const record = this.resolveByPath('COLFILE', pathHint, {
         foundDetail: 'found',
         missingDetail: 'missing',
@@ -262,6 +452,19 @@ export class WorldLoader {
     }
 
     return registry;
+  }
+
+  discoverStaticColPaths() {
+    const records = this.fileSystem?.listByPathPrefix?.(DEFAULT_COL_DIR) || [];
+    const colPaths = records
+      .map((record) => record.resolvedPath)
+      .filter((path) => /\.col$/i.test(path));
+
+    if (colPaths.length > 0) {
+      this.onLog?.('info', `Static COL directory discovered: ${DEFAULT_COL_DIR} (${colPaths.length} files)`);
+    }
+
+    return colPaths;
   }
 
   async loadMapZones(manifest) {

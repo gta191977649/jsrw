@@ -112,4 +112,13 @@ export class IMGParser {
   getAssetSource(name) {
     return this.assetSources.get(normalizePath(name));
   }
+
+  listAssetNames(extension = '') {
+    const normalizedExtension = String(extension || '').trim().replace(/^\./, '').toLowerCase();
+    const suffix = normalizedExtension ? `.${normalizedExtension}` : '';
+    const names = Array.from(this.assets.keys());
+    const filtered = suffix ? names.filter((name) => name.endsWith(suffix)) : names;
+    filtered.sort((a, b) => a.localeCompare(b));
+    return filtered;
+  }
 }

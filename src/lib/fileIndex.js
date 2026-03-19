@@ -41,11 +41,39 @@ export function buildFileIndex(fileList) {
     return byPath.get(candidates[0]);
   }
 
+  function listByPathPrefix(pathPrefix) {
+    const normalizedPrefix = normalizePath(pathPrefix).replace(/\/+$/g, '');
+    if (!normalizedPrefix) return [];
+    const prefixWithSlash = `${normalizedPrefix}/`;
+    const matches = [];
+    for (const [path, file] of byPath.entries()) {
+      if (path === normalizedPrefix || path.startsWith(prefixWithSlash)) {
+        matches.push({ path, file });
+      }
+    }
+    matches.sort((a, b) => a.path.localeCompare(b.path));
+    return matches;
+  }
+
+  function listByExtension(extension) {
+    const normalizedExtension = String(extension || '').trim().replace(/^\./, '').toLowerCase();
+    if (!normalizedExtension) return [];
+    const suffix = `.${normalizedExtension}`;
+    const matches = [];
+    for (const [path, file] of byPath.entries()) {
+      if (path.endsWith(suffix)) matches.push({ path, file });
+    }
+    matches.sort((a, b) => a.path.localeCompare(b.path));
+    return matches;
+  }
+
   return {
     count: byPath.size,
     byPath,
     byBasename,
     findByPathHint,
     findByBasename,
+    listByPathPrefix,
+    listByExtension,
   };
 }
