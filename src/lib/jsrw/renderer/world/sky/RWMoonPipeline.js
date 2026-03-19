@@ -1,12 +1,12 @@
 import * as THREE from 'three';
-import { RW_MOON_DEBUG_DEFAULTS } from './RWMoonConstants';
+import { RW_MOON_DEBUG_DEFAULTS } from './constants/RWMoonConstants.js';
 import {
   calcScreenCoorsLikeRw,
   createRwSpriteMaterial,
   prepareRwSpriteTexture,
   setRwSpriteScreenPosition,
-} from './RWSkySpriteUtils';
-import { gtaPositionToThree } from './gtaTransforms';
+} from './RWSkySpriteUtils.js';
+import { gtaPositionToThree } from '../../../../gtaTransforms.js';
 
 function createFallbackMoonTexture() {
   const canvas = document.createElement('canvas');
@@ -104,7 +104,6 @@ export class RWMoonPipeline {
       return { visible: false, brightness: 0 };
     }
 
-    // revc places the moon at a fixed world-space offset from the camera.
     const worldOffset = gtaPositionToThree(settings.offsetX, settings.offsetY, settings.offsetZ);
     const worldPosition = camera.position.clone().add(worldOffset);
     const screen = calcScreenCoorsLikeRw(camera, worldPosition, this.viewportWidth, this.viewportHeight, false);

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getRWMaterialDescriptor } from './RWRender';
+import { getRWMaterialDescriptor } from './jsrw';
 
 export const WORLD_CHUNK_SIZE = 256;
 

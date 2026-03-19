@@ -14,36 +14,30 @@ import { buildLodMapping, isLodModel } from './lib/lod';
 import { PlayerControllerAdapter } from './lib/playerControllerAdapter';
 import { APP_MODE_EDITOR, APP_MODE_TEST, PlayerModeManager } from './lib/PlayerModeManager';
 import {
-  cloneRWMaterialDescriptor,
-  createThreeMaterialFromRW,
-  getRWMaterialDescriptor,
   applyDisableVertexColor,
-  normalizeTextureDictionary,
+  applyRwIdeFlagsToInstance,
+  calcScreenCoorsLikeRw,
+  cloneRWMaterialDescriptor,
+  cloneRWPipelineSelections,
+  createJsrwRenderer,
+  createRWPipelineMaterialForProfile,
+  createThreeMaterialFromRW,
+  decodeRwIdeFlags,
+  getRWMaterialDescriptor,
+  getRWPipelineGameOptions,
+  getRWPipelinePlatformOptions,
   prepareTobjInstanceMaterials,
-  toRWMaterial,
-  tuneTransparentMaterial,
-} from './lib/RWRender';
-import RWPipelineController from './lib/RWPipelineController';
-import {
+  resolveRWPipelineSelection,
+  RW_MOON_DEBUG_DEFAULTS,
   RW_PIPELINE_CATEGORY,
   RW_PIPELINE_PLATFORM,
   RW_PIPELINE_SELECTION_DEFAULTS,
-  cloneRWPipelineSelections,
-  createRWPipelineMaterialForProfile,
-  getRWPipelineGameOptions,
-  getRWPipelinePlatformOptions,
-  resolveRWPipelineSelection,
-} from './lib/rwPipelineProfiles';
-import { RWRenderQueue } from './lib/RWRenderQueue';
-import { RWWaterPipeline } from './lib/RWWaterPipeline';
-import { RW_MOON_DEBUG_DEFAULTS } from './lib/RWMoonConstants';
-import { RWMoonPipeline } from './lib/RWMoonPipeline';
-import { RW_STARS_DEBUG_DEFAULTS } from './lib/RWStarsConstants';
-import { RWStarsPipeline } from './lib/RWStarsPipeline';
-import { RW_SUN_DEBUG_DEFAULTS } from './lib/RWSunConstants';
-import { RWSunPipeline } from './lib/RWSunPipeline';
-import { calcScreenCoorsLikeRw } from './lib/RWSkySpriteUtils';
-import { applyRwIdeFlagsToInstance, decodeRwIdeFlags } from './lib/rwFlags';
+  RW_STARS_DEBUG_DEFAULTS,
+  RW_SUN_DEBUG_DEFAULTS,
+  SkyRendererBundle,
+  toRWMaterial,
+  tuneTransparentMaterial,
+} from './lib/jsrw';
 import {
   applyGlobalBackfaceCulling,
   applyWireframe,
@@ -661,14 +655,12 @@ function App() {
   const fluffyCloudTextureRef = useRef(null);
   const fluffyHighlightSpritesRef = useRef([]);
   const fluffyHighlightTextureRef = useRef(null);
-  const moonPipelineRef = useRef(null);
-  const starsPipelineRef = useRef(null);
-  const sunPipelineRef = useRef(null);
+  const skyFeatureRef = useRef(null);
   const sunLightRef = useRef(null);
   const hemiLightRef = useRef(null);
   const worldRootRef = useRef(new THREE.Group());
   const rwRenderQueueRef = useRef(null);
-  const rwWaterPipelineRef = useRef(null);
+  const jsrwSessionRef = useRef(createJsrwRenderer());
   const renderItemsRef = useRef([]);
   const renderChunksRef = useRef([]);
   const renderMetricsRef = useRef({
@@ -756,7 +748,6 @@ function App() {
     startedAt: 0,
     firstChunkReadyAt: 0,
   });
-  const rwPipelineControllerRef = useRef(new RWPipelineController());
   const lastPipelineSelectionSignatureRef = useRef('');
 
   const imguiRef = useRef({ ImGui: null, ImGui_Impl: null, ready: false });
@@ -1017,8 +1008,7 @@ function App() {
     resetImguiTextureCache();
     const worldRoot = worldRootRef.current;
     disposeWorld(worldRoot);
-    rwWaterPipelineRef.current?.dispose();
-    rwWaterPipelineRef.current = null;
+    jsrwSessionRef.current.disposeWaterRuntime();
     timecycleDataRef.current = null;
     resourceCacheRef.current = createResourceCacheState();
     streamingBuildRef.current = {
@@ -1048,8 +1038,9 @@ function App() {
     renderItemsRef.current = [];
     renderChunksRef.current = [];
     worldGameVersionRef.current = String(uiStateRef.current.gameVersion || 'VCS').toUpperCase();
-    rwPipelineControllerRef.current.setRoot(worldRoot);
-    rwPipelineControllerRef.current.applyToRoot(worldRoot, {
+    jsrwSessionRef.current.setBackend(activeBackend || 'WebGL');
+    jsrwSessionRef.current.setRoot(worldRoot);
+    jsrwSessionRef.current.applyToRoot(worldRoot, {
       activeBackend: activeBackend || 'WebGL',
       worldGameVersion: worldGameVersionRef.current,
       fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
@@ -1273,7 +1264,8 @@ function App() {
         dbgLog({ runId: 'safari-build', hypothesisId: 'H3', location: 'App.jsx:tryBuildWater', message: 'Building water: before RWWaterPipeline', data: { token, renderWater: uiStateRef.current.renderWater } });
         // #endregion
         setStatus('Building water... (stage 3/6: constructing water pipeline)');
-        const pipeline = new RWWaterPipeline({
+        jsrwSessionRef.current.setBackend(activeBackend);
+        const pipeline = jsrwSessionRef.current.createWaterRuntime({
           parsed,
           waterConfig,
           texture: null,
@@ -1419,8 +1411,11 @@ function App() {
           };
           const starTexture = sunTextures.star;
           const moonTexture = particleTxd?.get?.('coronamoon')?.texture || particleTxd?.get?.('coronamoon') || null;
-          moonPipelineRef.current?.setTexture(moonTexture);
-          starsPipelineRef.current?.setTexture(starTexture);
+          skyFeatureRef.current?.setParticleTextures({
+            moonTexture,
+            starTexture,
+            sunTextures,
+          });
           if (moonTexture) {
             pushConsoleLine('info', 'Moon texture applied: particle/coronamoon');
           } else {
@@ -1431,7 +1426,6 @@ function App() {
           } else {
             pushConsoleLine('warn', 'Stars texture missing: particle/coronastar. Using fallback sprite.');
           }
-          sunPipelineRef.current?.setTextureSet(sunTextures);
           if (sunTextures.star && sunTextures.hex && sunTextures.circle && sunTextures.ring) {
             pushConsoleLine('info', 'Sun textures applied: particle/coronastar, coronahex, coronacircle, coronaringa');
           } else {
@@ -2002,12 +1996,12 @@ function App() {
         instancedMesh.instanceMatrix.needsUpdate = true;
       }
 
-      rwWaterPipelineRef.current?.dispose();
-      rwWaterPipelineRef.current = pendingWaterPipeline;
+      jsrwSessionRef.current.setWaterRuntime(pendingWaterPipeline);
       renderItemsRef.current = renderItems;
       renderChunksRef.current = Array.from(renderChunkMap.values());
-      rwPipelineControllerRef.current.setRoot(worldRoot);
-      rwPipelineControllerRef.current.applyToRoot(worldRoot, {
+      jsrwSessionRef.current.setBackend(activeBackend);
+      jsrwSessionRef.current.setRoot(worldRoot);
+      jsrwSessionRef.current.applyToRoot(worldRoot, {
         activeBackend,
         worldGameVersion: buildGameVersion,
         timecycleCurrent: timecycleStateRef.current?.current,
@@ -2243,7 +2237,8 @@ function App() {
     if (!proxy) return null;
     worldRootRef.current.add(proxy);
     sideState.proxyRoot = proxy;
-    rwPipelineControllerRef.current.applyToObject(proxy, {
+    jsrwSessionRef.current.setBackend(activeBackend);
+    jsrwSessionRef.current.applyToObject(proxy, {
       activeBackend,
       worldGameVersion: worldGameVersionRef.current,
       timecycleCurrent: timecycleStateRef.current?.current,
@@ -2476,9 +2471,7 @@ function App() {
     const hudScene = new THREE.Scene();
     const hudCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
     hudCamera.position.set(0, 0, 1);
-    const moonPipeline = new RWMoonPipeline();
-    const starsPipeline = new RWStarsPipeline();
-    const sunPipeline = new RWSunPipeline();
+    const skyFeature = new SkyRendererBundle();
 
     const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 60000);
     camera.up.copy(WORLD_UP);
@@ -2599,11 +2592,9 @@ function App() {
     fluffyCloudTextureRef.current = fluffyCloudTexture;
     fluffyHighlightSpritesRef.current = fluffyHighlightSprites;
     fluffyHighlightTextureRef.current = fluffyHighlightTexture;
-    moonPipelineRef.current = moonPipeline;
-    starsPipelineRef.current = starsPipeline;
-    sunPipelineRef.current = sunPipeline;
-    rwRenderQueueRef.current = new RWRenderQueue(worldRootRef.current);
-    rwPipelineControllerRef.current.setRoot(worldRootRef.current);
+    skyFeatureRef.current = skyFeature;
+    jsrwSessionRef.current.setRoot(worldRootRef.current);
+    rwRenderQueueRef.current = jsrwSessionRef.current.getRenderQueue() || jsrwSessionRef.current.createRenderQueue(worldRootRef.current);
     gridRef.current = grid;
     axesRef.current = axes;
     sunLightRef.current = sun;
@@ -2621,9 +2612,7 @@ function App() {
       if (!rendererReady) return;
       renderer.setPixelRatio(dpr);
       renderer.setSize(width, height, false);
-      moonPipeline.setViewport(width * dpr, height * dpr);
-      starsPipeline.setViewport(width * dpr, height * dpr);
-      sunPipeline.setViewport(width * dpr, height * dpr);
+      skyFeature.setViewport(width * dpr, height * dpr);
     };
 
     resize();
@@ -3056,7 +3045,8 @@ function App() {
       const extraSunnyness = THREE.MathUtils.clamp(timecycleCurrent?.extraSunnyness ?? 0, 0, 1);
       const lowCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(cloudCoverage, foggyness, extraSunnyness), 0, 1) * 0.42;
       const fluffyCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(foggyness, extraSunnyness), 0, 1) * 0.5;
-      const sunPipeline = sunPipelineRef.current;
+      const skyFeature = skyFeatureRef.current;
+      const sunPipeline = skyFeature?.sun || null;
       const cloudMotion = cloudMotionRef.current;
       if (skyMaterial?.uniforms) {
         const cameraForward = new THREE.Vector3();
@@ -3118,17 +3108,16 @@ function App() {
       renderer.getDrawingBufferSize(drawingBufferSize);
       const viewportWidth = Math.max(1, drawingBufferSize.x);
       const viewportHeight = Math.max(1, drawingBufferSize.y);
-      const moonPipeline = moonPipelineRef.current;
-      const starsPipeline = starsPipelineRef.current;
-      moonPipeline?.setViewport(viewportWidth, viewportHeight);
-      starsPipeline?.setViewport(viewportWidth, viewportHeight);
-      sunPipeline?.setViewport(viewportWidth, viewportHeight);
+      skyFeature?.setViewport(viewportWidth, viewportHeight);
       const moonSettings = uiStateRef.current.moon;
-      moonPipeline?.update(camera, timecycleCurrent, moonSettings);
       const starsSettings = uiStateRef.current.stars;
-      starsPipeline?.update(camera, timecycleCurrent, starsSettings);
       const sunSettings = uiStateRef.current.sun;
-      const sunMetrics = sunPipeline?.updateSunMetrics(camera, timecycleCurrent, sunSettings) ?? null;
+      const skyFrame = skyFeature?.prepareFrame(camera, timecycleCurrent, {
+        moon: moonSettings,
+        stars: starsSettings,
+        sun: sunSettings,
+      }) || null;
+      const sunMetrics = skyFrame?.sunMetrics || null;
       const lowCloudSprites = lowCloudSpritesRef.current;
       for (let index = 0; index < lowCloudSprites.length; index += 1) {
         const sprite = lowCloudSprites[index];
@@ -3202,17 +3191,17 @@ function App() {
           highlightSprite.scale.setScalar(sprite.scale.x * (30 / 55));
         }
       }
-      const sunState = sunPipeline?.update(
+      const sunState = skyFeature?.finalizeSunFrame({
         camera,
-        worldRootRef.current,
-        timecycleCurrent,
-        sunSettings,
+        worldRoot: worldRootRef.current,
+        timecycleSample: timecycleCurrent,
+        settings: { sun: sunSettings },
         dt,
-        time,
+        timeMs: time,
         sunBlockedByClouds,
         sunMetrics,
-        postFxSunCoronaEnabled,
-      );
+        enableBigBloom: postFxSunCoronaEnabled,
+      });
       const sunLightsMult = computeSunLightsMultFromState(sunState);
       sunRuntimeDebugRef.current = {
         enableBigBloom: postFxSunCoronaEnabled,
@@ -3512,7 +3501,7 @@ function App() {
       axes.visible = uiStateRef.current.showAxes;
       if (lastWireframeRef.current !== uiStateRef.current.wireframe) {
         applyWireframe(worldRootRef.current, uiStateRef.current.wireframe);
-        rwWaterPipelineRef.current?.setWireframe(uiStateRef.current.wireframe);
+        jsrwSessionRef.current.getWaterRuntime()?.setWireframe(uiStateRef.current.wireframe);
         lastWireframeRef.current = uiStateRef.current.wireframe;
       }
       if (lastDisableVertexColorRef.current !== uiStateRef.current.disableVertexColor) {
@@ -3524,7 +3513,7 @@ function App() {
         lastDisableBackfaceCullingRef.current = uiStateRef.current.disableBackfaceCulling;
       }
       if (lastRenderWaterRef.current !== uiStateRef.current.renderWater) {
-        rwWaterPipelineRef.current?.setEnabled(uiStateRef.current.renderWater);
+        jsrwSessionRef.current.getWaterRuntime()?.setEnabled(uiStateRef.current.renderWater);
         lastRenderWaterRef.current = uiStateRef.current.renderWater;
       }
 
@@ -3545,24 +3534,25 @@ function App() {
         fogStart: Number.isFinite(timecycleCurrent?.values?.fogStart) ? timecycleCurrent.values.fogStart : null,
         fogEnd: Number.isFinite(timecycleCurrent?.values?.farClip) ? timecycleCurrent.values.farClip : null,
       };
-      rwPipelineControllerRef.current.setSelection(uiStateRef.current.pipelineDebug);
+      jsrwSessionRef.current.setBackend(activeBackend);
+      jsrwSessionRef.current.setSelection(uiStateRef.current.pipelineDebug);
       const pipelineSelectionSignature = getPipelineSelectionSignature(
         uiStateRef.current.pipelineDebug,
         activeBackend,
         worldGameVersionRef.current,
       );
       if (pipelineSelectionSignature !== lastPipelineSelectionSignatureRef.current) {
-        rwPipelineControllerRef.current.applyToRoot(worldRootRef.current, pipelineRuntimeContext);
+        jsrwSessionRef.current.applyToRoot(worldRootRef.current, pipelineRuntimeContext);
         applyWireframe(worldRootRef.current, uiStateRef.current.wireframe);
         applyDisableVertexColor(worldRootRef.current, uiStateRef.current.disableVertexColor);
         applyGlobalBackfaceCulling(worldRootRef.current, uiStateRef.current.disableBackfaceCulling);
         lastPipelineSelectionSignatureRef.current = pipelineSelectionSignature;
         rwRenderQueueRef.current?.markDirty();
       } else {
-        rwPipelineControllerRef.current.updateRuntime(pipelineRuntimeContext);
+        jsrwSessionRef.current.updateRuntime(pipelineRuntimeContext);
       }
 
-      const waterPipeline = rwWaterPipelineRef.current;
+      const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
       waterPipeline?.applySettings({
         uvSpeed: uiStateRef.current.waterUvSpeed,
         waveHeight: uiStateRef.current.waterWaveHeight,
@@ -3574,7 +3564,7 @@ function App() {
       const farBackgroundColor = skyBottomColor;
       try {
         const rwRenderQueue = rwRenderQueueRef.current;
-        const postFxSceneTarget = rwPipelineControllerRef.current.beginPostFxSceneCapture({
+        const postFxSceneTarget = jsrwSessionRef.current.beginPostFxSceneCapture({
           ...pipelineRuntimeContext,
           viewportWidth,
           viewportHeight,
@@ -3590,8 +3580,7 @@ function App() {
         }
         renderer.autoClear = false;
         renderer.clearDepth();
-        moonPipeline?.render(renderer);
-        starsPipeline?.render(renderer);
+        skyFeature?.renderBackground(renderer);
         if (skyCloudScene) {
           renderer.render(skyCloudScene, camera);
           renderer.clearDepth();
@@ -3641,8 +3630,7 @@ function App() {
               `Water buffers: far.pos=${farPos} far.uv=${farUv} far.idx=${farIndex} near.pos=${nearPos} near.uv=${nearUv} near.idx=${nearIndex} near.normal=${nearNormal} wake.pos=${wakePos}`,
             );
             setStatus(`Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}. Water disabled.`);
-            rwWaterPipelineRef.current?.dispose();
-            rwWaterPipelineRef.current = null;
+            jsrwSessionRef.current.disposeWaterRuntime();
             renderer.autoClear = false;
             rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
             renderer.render(scene, camera);
@@ -3656,18 +3644,18 @@ function App() {
         }
         if (postFxSceneTarget && postFxSunCoronaEnabled) {
           renderer.clearDepth();
-          sunPipeline?.render(renderer, { mode: 'bloom' });
+          skyFeature?.renderSun(renderer, { mode: 'bloom' });
         }
         renderer.setRenderTarget(null);
         if (postFxSceneTarget) {
-          rwPipelineControllerRef.current.renderPostFx(renderer, {
+          jsrwSessionRef.current.renderPostFx(renderer, {
             ...pipelineRuntimeContext,
             viewportWidth,
             viewportHeight,
           });
         }
         renderer.clearDepth();
-        sunPipeline?.render(renderer, { mode: 'full' });
+        skyFeature?.renderSun(renderer, { mode: 'full' });
 
         const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
         gameIconSprite.material.map = iconTextures[activeIcon];
@@ -4460,7 +4448,7 @@ function App() {
                 const pipelineDebug = uiStateRef.current.pipelineDebug;
                 const renderPipelineDebugSection = (category, label, description) => {
                   const selection = pipelineDebug[category];
-                  const status = rwPipelineControllerRef.current.describeSelection(category, {
+                  const status = jsrwSessionRef.current.getPipelineController().describeSelection(category, {
                     activeBackend,
                     worldGameVersion: worldGameVersionRef.current,
                   });
@@ -4657,7 +4645,7 @@ function App() {
                       }
                       ImGui.EndCombo();
                     }
-                    const postFxEffect = rwPipelineControllerRef.current?.getActiveEffect?.(RW_PIPELINE_CATEGORY.POSTFX) || null;
+                    const postFxEffect = jsrwSessionRef.current.getActiveEffect(RW_PIPELINE_CATEGORY.POSTFX) || null;
                     const postFxDebugPreviews = postFxEffect?.getDebugPreviewTextures?.() || [];
                     if (postFxDebugPreviews.length > 0) {
                       ImGui.Separator();
@@ -5005,17 +4993,12 @@ function App() {
       }
       fluffyCloudTextureRef.current?.dispose?.();
       fluffyHighlightTextureRef.current?.dispose?.();
-      moonPipelineRef.current?.dispose();
-      moonPipelineRef.current = null;
-      starsPipelineRef.current?.dispose();
-      starsPipelineRef.current = null;
-      sunPipelineRef.current?.dispose();
-      sunPipelineRef.current = null;
+      skyFeatureRef.current?.dispose();
+      skyFeatureRef.current = null;
       skyQuad.geometry.dispose();
       skyMaterial.dispose();
       imguiGlRef.current = null;
-      rwWaterPipelineRef.current?.dispose();
-      rwWaterPipelineRef.current = null;
+      jsrwSessionRef.current.dispose();
       disposeWorld(worldRoot);
     };
   }, [

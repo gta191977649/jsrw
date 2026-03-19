@@ -1,13 +1,13 @@
 import * as THREE from 'three';
-import rwPostFxFullscreenVertexShader from '../shaders/postfx/fullscreen.vertex.glsl.js';
-import rwPostFxCopyFragmentShader from '../shaders/postfx/copy.fragment.glsl.js';
-import rwPostFxPresentFragmentShader from '../shaders/postfx/present.fragment.glsl.js';
+import rwPostFxFullscreenVertexShader from '../../../../shaders/postfx/fullscreen.vertex.glsl.js';
+import rwPostFxCopyFragmentShader from '../../../../shaders/postfx/copy.fragment.glsl.js';
+import rwPostFxPresentFragmentShader from '../../../../shaders/postfx/present.fragment.glsl.js';
+
 const SKYGFX_RADIOSITY_INTENSITY = 0x23;
 const VCS_BLUR_OFFSET = 2.1;
 const VCS_BLUR_INTENSITY = (39.0 * 0.8) / 255.0;
 const VCS_HISTORY_INTENSITY = 32 / 255.0;
 const VCS_TRAILS_LIMIT = 80;
-const VCS_TRAILS_INTENSITY = 38;
 const VCS_RADIOSITY_PING_PONG_PASSES = 4;
 const VCS_RADIOSITY_SPREAD_WEIGHT = 36 / 255;
 const DEFAULT_RADIOSITY_RESOLUTION_DIVISOR = 4;
@@ -563,7 +563,6 @@ void main() {
   runBlurStage(renderer) {
     if (!this.runtime.enableBlur) return;
 
-    // VCSPC BlurOverlay always samples the original captured current frame.
     this.accumulationMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
     this.accumulationMaterial.uniforms.uColor.value.set(1, 1, 1);
     this.accumulationMaterial.uniforms.uOpacity.value = 1;

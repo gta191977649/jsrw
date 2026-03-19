@@ -1,14 +1,14 @@
 import * as THREE from 'three';
-import { gtaPositionToThree } from './gtaTransforms';
-import { RW_SUN_DEBUG_DEFAULTS, RW_SUN_FLARE_DEFS } from './RWSunConstants';
-import { getRWMaterialDescriptor } from './RWRender';
+import { gtaPositionToThree } from '../../../../gtaTransforms.js';
+import { RW_SUN_DEBUG_DEFAULTS, RW_SUN_FLARE_DEFS } from './constants/RWSunConstants.js';
+import { getRWMaterialDescriptor } from '../../../adapters/three/ThreeMaterialAdapter.js';
 import {
   calcScreenCoorsLikeRw,
   createRwSpriteMaterial,
   prepareRwSpriteTexture,
   rwScreenFromNdc,
   setRwSpriteScreenPosition,
-} from './RWSkySpriteUtils';
+} from './RWSkySpriteUtils.js';
 
 const SCREEN_HIDDEN = 1_000_000;
 const TMP_NDC = new THREE.Vector3();

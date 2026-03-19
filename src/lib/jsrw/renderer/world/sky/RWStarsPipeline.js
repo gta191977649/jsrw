@@ -4,14 +4,14 @@ import {
   RW_STAR_COORDS_Y,
   RW_STAR_SIZES,
   RW_STARS_DEBUG_DEFAULTS,
-} from './RWStarsConstants';
+} from './constants/RWStarsConstants.js';
 import {
   calcScreenCoorsLikeRw,
   createRwSpriteMaterial,
   prepareRwSpriteTexture,
   setRwSpriteScreenPosition,
-} from './RWSkySpriteUtils';
-import { gtaPositionToThree } from './gtaTransforms';
+} from './RWSkySpriteUtils.js';
+import { gtaPositionToThree } from '../../../../gtaTransforms.js';
 
 function createFallbackStarTexture() {
   const canvas = document.createElement('canvas');

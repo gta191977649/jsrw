@@ -1,21 +1,19 @@
+import { cloneRwMaterialDescriptor } from '../material/RwMaterialDescriptor.js';
 import {
-  cloneRWMaterialDescriptor,
-  createThreeMaterialFromRW,
-  getRWMaterialDescriptor,
-} from './RWRender';
+  cloneRWPipelineSelection,
+  cloneRWPipelineSelections,
+  resolveRWPipelineSelection,
+} from './selection.js';
 import {
   RW_PIPELINE_CATEGORY,
   RW_PIPELINE_SELECTION_DEFAULT,
   RW_PIPELINE_SELECTION_DEFAULTS,
-  cloneRWPipelineSelection,
-  cloneRWPipelineSelections,
-  getDefaultRWPipelineRegistry,
-  resolveRWPipelineSelection,
-} from './rwPipelineProfiles';
-
-function cloneDescriptorList(list) {
-  return Array.isArray(list) ? list.map((descriptor) => cloneRWMaterialDescriptor(descriptor)) : [];
-}
+} from './constants.js';
+import {
+  createThreeMaterialFromRW,
+  getRWMaterialDescriptor,
+} from '../../adapters/three/ThreeMaterialAdapter.js';
+import { getDefaultRWPipelineRegistry } from '../../renderer/world/createDefaultPipelineRegistry.js';
 
 function getNodeMaterials(node) {
   if (!node?.isMesh) return [];
@@ -57,11 +55,12 @@ function getDescriptorColorKey(color) {
   return `${r},${g},${b}`;
 }
 
-function getDescriptorCacheKey(profile, descriptor, geometry) {
+function getDescriptorCacheKey(profile, backendId, descriptor, geometry) {
   const surfaceProps = descriptor?.surfaceProps || {};
   const rwFlags = descriptor?.rwFlags || {};
   return JSON.stringify([
     profile?.id || 'none',
+    backendId || 'DEFAULT',
     descriptor?.pipeline || 'default',
     getRWPipelineObjectId(descriptor?.map),
     getRWPipelineObjectId(descriptor?.alphaMap),
@@ -101,11 +100,10 @@ function resolveTargetMeta(node) {
 }
 
 function captureBaseDescriptors(node) {
-  const materials = getNodeMaterials(node);
-  const descriptors = materials
+  const descriptors = getNodeMaterials(node)
     .map((material) => getRWMaterialDescriptor(material))
     .filter(Boolean)
-    .map((descriptor) => cloneRWMaterialDescriptor(descriptor));
+    .map((descriptor) => cloneRwMaterialDescriptor(descriptor));
   if (descriptors.length === 0) return null;
   node.userData = {
     ...(node.userData || {}),
@@ -114,12 +112,17 @@ function captureBaseDescriptors(node) {
   return descriptors;
 }
 
+function cloneDescriptorList(list) {
+  return Array.isArray(list) ? list.map((descriptor) => cloneRwMaterialDescriptor(descriptor)) : [];
+}
+
 export class RWPipelineController {
-  constructor(registry = getDefaultRWPipelineRegistry()) {
-    this.registry = registry;
+  constructor(options = {}) {
+    this.registry = options.registry || getDefaultRWPipelineRegistry();
     this.selections = cloneRWPipelineSelections(RW_PIPELINE_SELECTION_DEFAULTS);
     this.root = null;
     this.activeProfiles = new Map();
+    this.activeImplementations = new Map();
     this.activeMaterials = new Set();
     this.materialCache = new Map();
     this.activeEffects = new Map();
@@ -132,7 +135,7 @@ export class RWPipelineController {
         profileLabel: 'Disabled',
         supported: true,
         warning: '',
-        backend: 'WebGL',
+        backend: 'WEBGL',
       };
     }
   }
@@ -153,21 +156,6 @@ export class RWPipelineController {
     this.root = root || null;
   }
 
-  getStatus(category = RW_PIPELINE_CATEGORY.BUILDING) {
-    return {
-      ...this.statusByCategory[category],
-      selection: cloneRWPipelineSelection(this.statusByCategory[category]?.selection),
-    };
-  }
-
-  getStatuses() {
-    const next = {};
-    for (const category of Object.values(RW_PIPELINE_CATEGORY)) {
-      next[category] = this.getStatus(category);
-    }
-    return next;
-  }
-
   describeSelection(category = RW_PIPELINE_CATEGORY.BUILDING, runtimeContext = {}) {
     const selection = cloneRWPipelineSelection(this.selections[category] || RW_PIPELINE_SELECTION_DEFAULTS[category] || RW_PIPELINE_SELECTION_DEFAULT);
     const resolvedSelection = resolveRWPipelineSelection(selection, runtimeContext.worldGameVersion);
@@ -176,12 +164,14 @@ export class RWPipelineController {
       category,
       worldGameVersion: runtimeContext.worldGameVersion,
     });
-    const backend = String(runtimeContext.activeBackend || 'WebGL');
-    const supported = !profile || profile.backend === backend;
+    const backend = String(runtimeContext.activeBackend || 'WebGL').toUpperCase();
+    const implementation = this.registry.resolveBackendImplementation(profile, backend);
+    const supported = !profile || Boolean(implementation);
     return {
       enabled: selection.enabled,
       selection: resolvedSelection,
       profile,
+      implementation,
       supported,
       backend,
       warning: !selection.enabled
@@ -189,7 +179,7 @@ export class RWPipelineController {
         : !profile
           ? 'No pipeline profile is registered for the current selection.'
           : !supported
-            ? `The selected pipeline only supports ${profile.backend}.`
+            ? `The selected pipeline has no ${backend} implementation.`
             : '',
     };
   }
@@ -202,30 +192,33 @@ export class RWPipelineController {
     return next;
   }
 
-  syncEffect(category, nextProfile, runtimeContext) {
+  syncEffect(category, description, runtimeContext) {
+    const nextProfile = description?.supported ? description.profile : null;
+    const nextImplementation = description?.supported ? description.implementation : null;
     const currentProfile = this.activeProfiles.get(category) || null;
+    const currentImplementation = this.activeImplementations.get(category) || null;
     const currentEffect = this.activeEffects.get(category) || null;
     const selection = this.selections[category] || null;
 
-    if (!nextProfile) {
-      if (currentEffect) {
-        currentProfile?.disposeEffect?.(currentEffect);
-        this.activeEffects.delete(category);
-      }
+    if (!nextProfile || !nextImplementation) {
+      currentImplementation?.disposeEffect?.(currentEffect);
+      this.activeEffects.delete(category);
       this.activeProfiles.delete(category);
+      this.activeImplementations.delete(category);
       return;
     }
 
     let effect = currentEffect;
-    if (!effect || currentProfile?.id !== nextProfile.id) {
-      currentProfile?.disposeEffect?.(currentEffect);
-      effect = nextProfile.createEffect?.() || null;
+    if (!effect || currentProfile?.id !== nextProfile.id || currentImplementation !== nextImplementation) {
+      currentImplementation?.disposeEffect?.(currentEffect);
+      effect = nextImplementation.createEffect?.({ backend: runtimeContext.backend || null, runtimeContext }) || null;
       if (effect) this.activeEffects.set(category, effect);
     }
 
     this.activeProfiles.set(category, nextProfile);
-    nextProfile.applyConfig?.(effect, selection, runtimeContext);
-    nextProfile.updateRuntime?.(runtimeContext, effect);
+    this.activeImplementations.set(category, nextImplementation);
+    nextImplementation.applyConfig?.(effect, selection, runtimeContext);
+    nextImplementation.updateRuntime?.(runtimeContext, effect);
   }
 
   updateStatuses(descriptions) {
@@ -247,19 +240,16 @@ export class RWPipelineController {
   applyToRoot(root = this.root, runtimeContext = {}) {
     this.setRoot(root);
     const descriptions = this.describeSelections(runtimeContext);
-    const activeBuildingProfile = descriptions[RW_PIPELINE_CATEGORY.BUILDING].profile && descriptions[RW_PIPELINE_CATEGORY.BUILDING].supported
-      ? descriptions[RW_PIPELINE_CATEGORY.BUILDING].profile
-      : null;
-    const activePostFxProfile = descriptions[RW_PIPELINE_CATEGORY.POSTFX].profile && descriptions[RW_PIPELINE_CATEGORY.POSTFX].supported
-      ? descriptions[RW_PIPELINE_CATEGORY.POSTFX].profile
-      : null;
-
+    const buildingDescription = descriptions[RW_PIPELINE_CATEGORY.BUILDING];
+    const activeBuildingProfile = buildingDescription.profile && buildingDescription.supported ? buildingDescription.profile : null;
+    const activeBuildingImplementation = buildingDescription.profile && buildingDescription.supported ? buildingDescription.implementation : null;
     this.activeProfiles.set(RW_PIPELINE_CATEGORY.BUILDING, activeBuildingProfile);
-    this.syncEffect(RW_PIPELINE_CATEGORY.POSTFX, activePostFxProfile, runtimeContext);
+    this.activeImplementations.set(RW_PIPELINE_CATEGORY.BUILDING, activeBuildingImplementation);
+    this.syncEffect(RW_PIPELINE_CATEGORY.POSTFX, descriptions[RW_PIPELINE_CATEGORY.POSTFX], runtimeContext);
     this.activeMaterials.clear();
     if (root?.traverse) {
       root.traverse((node) => {
-        this.applyToNode(node, activeBuildingProfile, runtimeContext);
+        this.applyToNode(node, activeBuildingProfile, activeBuildingImplementation, runtimeContext);
       });
     }
     this.updateStatuses(descriptions);
@@ -269,10 +259,12 @@ export class RWPipelineController {
     if (!object3D?.traverse) return;
     const description = this.describeSelection(RW_PIPELINE_CATEGORY.BUILDING, runtimeContext);
     const activeProfile = description.profile && description.supported ? description.profile : null;
+    const activeImplementation = description.profile && description.supported ? description.implementation : null;
     object3D.traverse((node) => {
-      this.applyToNode(node, activeProfile, runtimeContext);
+      this.applyToNode(node, activeProfile, activeImplementation, runtimeContext);
     });
     this.activeProfiles.set(RW_PIPELINE_CATEGORY.BUILDING, activeProfile);
+    this.activeImplementations.set(RW_PIPELINE_CATEGORY.BUILDING, activeImplementation);
     this.statusByCategory[RW_PIPELINE_CATEGORY.BUILDING] = {
       enabled: description.selection.enabled,
       selection: description.selection,
@@ -284,25 +276,18 @@ export class RWPipelineController {
     };
   }
 
-  applyToNode(node, activeProfile, runtimeContext) {
+  applyToNode(node, activeProfile, activeImplementation, runtimeContext) {
     if (!node?.isMesh || node.userData?.rwIsSelectionOverlay) return;
     const targetMeta = resolveTargetMeta(node);
     let baseDescriptors = cloneDescriptorList(node.userData?.rwPipelineBaseDescriptors);
-    if (baseDescriptors.length === 0) {
-      baseDescriptors = captureBaseDescriptors(node) || [];
-    }
-    if (!baseDescriptors || baseDescriptors.length === 0) return;
-
-    const shouldUseProfile = Boolean(activeProfile && activeProfile.isApplicable(targetMeta));
+    if (baseDescriptors.length === 0) baseDescriptors = captureBaseDescriptors(node) || [];
+    if (!baseDescriptors.length) return;
+    const shouldUseProfile = Boolean(activeProfile && activeImplementation && activeProfile.isApplicable(targetMeta));
     const currentMaterials = getNodeMaterials(node);
-
     if (!shouldUseProfile) {
       if (currentMaterials.some((material) => material?.userData?.rwPipelineMaterial)) {
-        for (const material of currentMaterials) {
-          this.activeMaterials.delete(material);
-        }
         const restored = baseDescriptors.map((descriptor) => {
-          const material = createThreeMaterialFromRW(cloneRWMaterialDescriptor(descriptor), node.geometry);
+          const material = createThreeMaterialFromRW(cloneRwMaterialDescriptor(descriptor), node.geometry);
           material.userData = {
             ...(material.userData || {}),
             rwPipelineOwnedMaterial: true,
@@ -314,9 +299,8 @@ export class RWPipelineController {
       }
       return;
     }
-
     const nextMaterials = baseDescriptors.map((descriptor) => {
-      const material = this.getCachedPipelineMaterial(activeProfile, {
+      const material = this.getCachedPipelineMaterial(activeProfile, activeImplementation, {
         descriptor,
         geometry: node.geometry,
         targetMeta,
@@ -326,18 +310,17 @@ export class RWPipelineController {
       return material;
     });
     setNodeMaterials(node, nextMaterials);
-    for (const material of currentMaterials) {
-      this.activeMaterials.delete(material);
-    }
+    for (const material of currentMaterials) this.activeMaterials.delete(material);
     disposeOwnedMaterials(currentMaterials);
   }
 
-  getCachedPipelineMaterial(profile, input) {
-    const cacheKey = getDescriptorCacheKey(profile, input?.descriptor, input?.geometry);
+  getCachedPipelineMaterial(profile, implementation, input) {
+    const backendId = String(input?.runtimeContext?.activeBackend || 'WebGL').toUpperCase();
+    const cacheKey = getDescriptorCacheKey(profile, backendId, input?.descriptor, input?.geometry);
     let material = this.materialCache.get(cacheKey);
     if (!material) {
-      material = profile.createMaterial(input);
-      profile.updateMaterial(material, input?.runtimeContext);
+      material = implementation.createMaterial(input);
+      implementation.updateMaterial?.(material, input?.runtimeContext);
       material.userData = {
         ...(material.userData || {}),
         rwPipelineOwnedMaterial: true,
@@ -347,40 +330,37 @@ export class RWPipelineController {
       this.materialCache.set(cacheKey, material);
       return material;
     }
-    profile.updateMaterial(material, input?.runtimeContext);
+    implementation.updateMaterial?.(material, input?.runtimeContext);
     return material;
   }
 
   updateRuntime(runtimeContext = {}) {
+    const buildingImplementation = this.activeImplementations.get(RW_PIPELINE_CATEGORY.BUILDING);
     const activeBuildingProfile = this.activeProfiles.get(RW_PIPELINE_CATEGORY.BUILDING);
-    if (activeBuildingProfile) {
-      if (typeof activeBuildingProfile.updateRuntime === 'function') {
-        activeBuildingProfile.updateRuntime(runtimeContext);
+    if (activeBuildingProfile && buildingImplementation) {
+      if (typeof buildingImplementation.updateRuntime === 'function') {
+        buildingImplementation.updateRuntime(runtimeContext);
       } else {
         for (const material of this.activeMaterials) {
           if (!material?.userData?.rwPipelineMaterial) continue;
-          activeBuildingProfile.updateMaterial(material, runtimeContext);
+          buildingImplementation.updateMaterial?.(material, runtimeContext);
         }
       }
     }
-
-    const activePostFxProfile = this.activeProfiles.get(RW_PIPELINE_CATEGORY.POSTFX);
-    if (activePostFxProfile) {
-      activePostFxProfile.applyConfig?.(
-        this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX) || null,
-        this.selections[RW_PIPELINE_CATEGORY.POSTFX] || null,
-        runtimeContext,
-      );
-      activePostFxProfile.updateRuntime?.(runtimeContext, this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX) || null);
+    const postFxImplementation = this.activeImplementations.get(RW_PIPELINE_CATEGORY.POSTFX);
+    const postFxEffect = this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX) || null;
+    if (postFxImplementation) {
+      postFxImplementation.applyConfig?.(postFxEffect, this.selections[RW_PIPELINE_CATEGORY.POSTFX] || null, runtimeContext);
+      postFxImplementation.updateRuntime?.(runtimeContext, postFxEffect);
     }
   }
 
   renderPostFx(renderer, runtimeContext = {}) {
-    const activePostFxProfile = this.activeProfiles.get(RW_PIPELINE_CATEGORY.POSTFX);
     const effect = this.activeEffects.get(RW_PIPELINE_CATEGORY.POSTFX);
-    if (!activePostFxProfile || !effect) return;
-    activePostFxProfile.applyConfig?.(effect, this.selections[RW_PIPELINE_CATEGORY.POSTFX] || null, runtimeContext);
-    activePostFxProfile.updateRuntime?.(runtimeContext, effect);
+    const implementation = this.activeImplementations.get(RW_PIPELINE_CATEGORY.POSTFX);
+    if (!effect || !implementation) return;
+    implementation.applyConfig?.(effect, this.selections[RW_PIPELINE_CATEGORY.POSTFX] || null, runtimeContext);
+    implementation.updateRuntime?.(runtimeContext, effect);
     effect.render?.(renderer, runtimeContext);
   }
 
@@ -396,6 +376,19 @@ export class RWPipelineController {
 
   getActiveEffect(category) {
     return this.activeEffects.get(category) || null;
+  }
+
+  getStatus(category = RW_PIPELINE_CATEGORY.BUILDING) {
+    return {
+      ...this.statusByCategory[category],
+      selection: cloneRWPipelineSelection(this.statusByCategory[category]?.selection),
+    };
+  }
+
+  getStatuses() {
+    const next = {};
+    for (const category of Object.values(RW_PIPELINE_CATEGORY)) next[category] = this.getStatus(category);
+    return next;
   }
 }
 

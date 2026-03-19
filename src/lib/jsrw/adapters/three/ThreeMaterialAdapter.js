@@ -1,6 +1,9 @@
 import * as THREE from 'three';
-
-export const RW_ALPHA_REF_DEFAULT = 2 / 255;
+import {
+  RW_ALPHA_REF_DEFAULT,
+  cloneRwColor,
+  cloneRwMaterialDescriptor,
+} from '../../core/material/RwMaterialDescriptor.js';
 
 function mapCompressionMethod(compression, d3dFormat) {
   const c = Number(compression);
@@ -24,7 +27,6 @@ function mapPixelFormat(rasterFormat, d3dFormat) {
   if (raster === 0x0500) return 'RASTER_8888';
   if (raster === 0x0600) return 'RASTER_888';
   if (raster === 0x0A00) return 'RASTER_555';
-
   const fmt = Number(d3dFormat);
   if (fmt === 21) return 'A8R8G8B8';
   if (fmt === 22) return 'X8R8G8B8';
@@ -49,7 +51,9 @@ function getDescriptorSide(side) {
 }
 
 function cloneColor(color) {
-  return color?.isColor ? color.clone() : new THREE.Color(1, 1, 1);
+  if (color?.isColor) return color.clone();
+  const plain = cloneRwColor(color);
+  return new THREE.Color(plain.r, plain.g, plain.b);
 }
 
 function blendingFromMode(alphaMode, blending) {
@@ -111,7 +115,6 @@ function buildRWDescriptor(material, geometry, overrides = {}) {
     },
     renderBucket: 'opaque',
   };
-
   descriptor.transparent = descriptor.alphaMode === 'blend' || descriptor.alphaMode === 'additive';
   descriptor.blending = blendingFromMode(descriptor.alphaMode, descriptor.blending);
   descriptor.renderBucket = renderBucketFromMode(descriptor.alphaMode);
@@ -119,17 +122,7 @@ function buildRWDescriptor(material, geometry, overrides = {}) {
     descriptor.depthWrite = false;
     descriptor.alphaRef = 0;
   }
-
   return descriptor;
-}
-
-export function cloneRWMaterialDescriptor(descriptor) {
-  return {
-    ...descriptor,
-    color: cloneColor(descriptor.color),
-    surfaceProps: { ...(descriptor.surfaceProps || {}) },
-    rwFlags: { ...(descriptor.rwFlags || {}) },
-  };
 }
 
 export function getRWMaterialDescriptor(material) {
@@ -150,10 +143,8 @@ export function syncThreeMaterialFromRW(material, geometry) {
   const descriptor = getRWMaterialDescriptor(material);
   if (!material || !descriptor) return material;
   const isPipelineMaterial = Boolean(material.userData?.rwPipelineMaterial);
-
   const hasVertexColor = Boolean(geometry?.getAttribute?.('color'));
   const allowVertexColors = descriptor.vertexColorMode !== 'none' && hasVertexColor && !descriptor.rwFlags?.forceIgnoreVertexColor;
-
   material.name = descriptor.name || '';
   if ('map' in material) material.map = descriptor.map || null;
   if ('alphaMap' in material) material.alphaMap = descriptor.alphaMapMode === 'separate' ? (descriptor.alphaMap || null) : null;
@@ -166,35 +157,22 @@ export function syncThreeMaterialFromRW(material, geometry) {
   material.side = getDescriptorSide(descriptor.side);
   material.blending = blendingFromMode(descriptor.alphaMode, descriptor.blending);
   material.wireframe = Boolean(descriptor.wireframe);
-  material.fog = isPipelineMaterial
-    ? Boolean(material.userData?.rwPipelineUsesThreeFog)
-    : Boolean(descriptor.fog);
+  material.fog = isPipelineMaterial ? Boolean(material.userData?.rwPipelineUsesThreeFog) : Boolean(descriptor.fog);
   material.toneMapped = Boolean(descriptor.toneMapped);
   material.vertexColors = allowVertexColors;
   material.needsUpdate = true;
-
   material.userData = {
     ...(material.userData || {}),
     rwMaterial: descriptor,
     rwForceIgnoreVertexColor: Boolean(descriptor.rwFlags?.forceIgnoreVertexColor),
   };
-
   if (isPipelineMaterial) {
     const uniforms = material.uniforms || {};
-    if (uniforms.uUseVertexColor) {
-      uniforms.uUseVertexColor.value = allowVertexColors;
-    }
-    if (uniforms.opacity) {
-      uniforms.opacity.value = descriptor.opacity ?? 1;
-    }
-    if (uniforms.alphaTest) {
-      uniforms.alphaTest.value = descriptor.alphaRef ?? 0;
-    }
-    if (uniforms.map) {
-      uniforms.map.value = descriptor.map || uniforms.map.value;
-    }
+    if (uniforms.uUseVertexColor) uniforms.uUseVertexColor.value = allowVertexColors;
+    if (uniforms.opacity) uniforms.opacity.value = descriptor.opacity ?? 1;
+    if (uniforms.alphaTest) uniforms.alphaTest.value = descriptor.alphaRef ?? 0;
+    if (uniforms.map) uniforms.map.value = descriptor.map || uniforms.map.value;
   }
-
   if (descriptor.pipeline === 'tobj') {
     material.transparent = true;
     material.opacity = 1;
@@ -202,7 +180,6 @@ export function syncThreeMaterialFromRW(material, geometry) {
     material.alphaTest = 0;
     material.blending = THREE.NormalBlending;
   }
-
   return material;
 }
 
@@ -214,7 +191,7 @@ export function createThreeMaterialFromRW(descriptor, geometry) {
     color: cloneColor(descriptor.color),
     transparent: Boolean(descriptor.transparent),
     opacity: descriptor.opacity ?? 1,
-    alphaTest: descriptor.alphaRef ?? 0,
+    alphaTest: descriptor.alphaRef ?? RW_ALPHA_REF_DEFAULT,
     side: getDescriptorSide(descriptor.side),
     depthTest: descriptor.depthTest !== false,
     depthWrite: descriptor.depthWrite !== false,
@@ -224,15 +201,13 @@ export function createThreeMaterialFromRW(descriptor, geometry) {
     fog: Boolean(descriptor.fog),
     toneMapped: Boolean(descriptor.toneMapped),
   });
-  setRWMaterialDescriptor(material, cloneRWMaterialDescriptor(descriptor));
+  setRWMaterialDescriptor(material, cloneRwMaterialDescriptor(descriptor));
   return syncThreeMaterialFromRW(material, geometry);
 }
 
 export function createRWMaterial(material, geometry, overrides = {}) {
   if (!material) return material;
-  if (material.isShaderMaterial) {
-    return material;
-  }
+  if (material.isShaderMaterial) return material;
   const descriptor = buildRWDescriptor(material, geometry, overrides);
   return createThreeMaterialFromRW(descriptor, geometry);
 }
@@ -304,12 +279,10 @@ export function normalizeTextureDictionary(dict, options = {}) {
       rwD3dFormat: Number(meta.d3dFormat ?? rawEntry?.d3dFormat) || 0,
       rwRasterFormat: Number(meta.rasterFormat ?? rawEntry?.rasterFormat) || 0,
     };
-
     texture.magFilter = THREE.LinearFilter;
     texture.minFilter = alphaMode === 'blend' ? THREE.LinearFilter : THREE.LinearMipmapLinearFilter;
     texture.generateMipmaps = alphaMode === 'cutout';
     texture.needsUpdate = true;
-
     normalized.set(key, {
       texture,
       hasAlpha,
@@ -332,7 +305,7 @@ export function prepareTobjInstanceMaterials(root, disableVertexColor = false) {
     const tobjMaterials = sourceMaterials.map((mat) => {
       if (!mat) return mat;
       const descriptor = getRWMaterialDescriptor(mat)
-        ? cloneRWMaterialDescriptor(getRWMaterialDescriptor(mat))
+        ? cloneRwMaterialDescriptor(getRWMaterialDescriptor(mat))
         : buildRWDescriptor(mat, node.geometry);
       descriptor.pipeline = 'tobj';
       descriptor.alphaMode = 'blend';
@@ -348,7 +321,6 @@ export function prepareTobjInstanceMaterials(root, disableVertexColor = false) {
       descriptor.renderBucket = 'transparent';
       return createThreeMaterialFromRW(descriptor, node.geometry);
     });
-
     node.material = Array.isArray(node.material) ? tobjMaterials : tobjMaterials[0];
     node.renderOrder = 50;
   });

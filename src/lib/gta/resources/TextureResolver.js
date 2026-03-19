@@ -1,5 +1,4 @@
-import { normalizeTextureDictionary } from '../../RWRender';
-import { TXDLoader } from '../../jsrw';
+import { normalizeTextureDictionary, TXDLoader } from '../../jsrw';
 import { hasExtension, joinPath, normalizeAssetName, normalizeName, stripExtension } from './ResourceLocator';
 
 function createMetadataPatchedLoader() {

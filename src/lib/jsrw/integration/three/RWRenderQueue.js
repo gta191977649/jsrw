@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getRWMaterialDescriptor } from './RWRender';
+import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
 
 const BUCKET_LAYERS = {
   opaque: 1,
@@ -66,6 +66,11 @@ export class RWRenderQueue {
     };
     this.cameraMaskStack = [];
     this.dirty = true;
+  }
+
+  setRoot(root) {
+    this.root = root;
+    this.markDirty();
   }
 
   markDirty() {
@@ -157,4 +162,3 @@ export class RWRenderQueue {
     camera.layers.mask = mask;
   }
 }
-

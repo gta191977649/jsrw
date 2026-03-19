@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { RW_ALPHA_REF_DEFAULT, getRWMaterialDescriptor, syncThreeMaterialFromRW } from './RWRender';
+import { RW_ALPHA_REF_DEFAULT } from '../../core/material/RwMaterialDescriptor.js';
+import { getRWMaterialDescriptor, syncThreeMaterialFromRW } from './ThreeMaterialAdapter.js';
 
 export const RW_IDE_FLAG = Object.freeze({
   IS_ROAD: 0x1,
