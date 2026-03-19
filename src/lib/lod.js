@@ -34,6 +34,22 @@ function pickBestSpatialCandidate(candidates, placements, sourcePlacement, usedL
   return { index: bestIndex, score: bestScore };
 }
 
+function isValidPlacementIndex(index, placements) {
+  return Number.isInteger(index) && index >= 0 && index < placements.length;
+}
+
+function getHintedLodCandidate(placements, placement, usedLodIndices, maxDistanceSq) {
+  const hintedIndex = placement?.lod;
+  if (!isValidPlacementIndex(hintedIndex, placements)) return null;
+  if (usedLodIndices.has(hintedIndex)) return null;
+  const hintedPlacement = placements[hintedIndex];
+  if (!hintedPlacement || !isLodModel(hintedPlacement.modelName)) return null;
+  if (normalizeModelName(hintedPlacement.modelName) === normalizeModelName(placement.modelName)) return null;
+  const distSq = positionDistanceSq(placement, hintedPlacement);
+  if (distSq > maxDistanceSq) return null;
+  return { index: hintedIndex, score: distSq, placement: hintedPlacement };
+}
+
 export function isLodModel(modelName) {
   return normalizeModelName(modelName).startsWith('lod');
 }
@@ -54,25 +70,25 @@ export function buildLodMapping(placements, gameVersion) {
     lodNameToIndices.get(lodName).push(i);
   }
 
-  // SA has reliable per-placement IPL lod links. VCS/VC exports are far less
-  // consistent, so there we keep the link only as a hint and rely primarily on
-  // name + spatial matching.
-  if (version === 'SA') {
-    for (let i = 0; i < placements.length; i += 1) {
-      const placement = placements[i];
-      if (isLodModel(placement.modelName)) continue;
-      const lodIndex = placement.lod;
-      if (!Number.isInteger(lodIndex) || lodIndex < 0 || lodIndex >= placements.length) continue;
-      const lodPlacement = placements[lodIndex];
-      if (!lodPlacement || !isLodModel(lodPlacement.modelName)) continue;
-      if (normalizeModelName(lodPlacement.modelName) === normalizeModelName(placement.modelName)) continue;
-      if (usedLodIndices.has(lodIndex)) continue;
-      mapping.set(i, lodIndex);
-      usedLodIndices.add(lodIndex);
-    }
+  const MAX_FALLBACK_PAIR_DISTANCE_SQ = 64 * 64;
+  const MAX_HINTED_PAIR_DISTANCE_SQ = version === 'SA' ? (256 * 256) : (96 * 96);
+
+  // Prefer explicit IPL lod links whenever they point at a nearby LOD model.
+  // This avoids name-based mismatches that can create holes during near/LOD swaps.
+  for (let i = 0; i < placements.length; i += 1) {
+    const placement = placements[i];
+    if (isLodModel(placement.modelName)) continue;
+    const hinted = getHintedLodCandidate(
+      placements,
+      placement,
+      usedLodIndices,
+      MAX_HINTED_PAIR_DISTANCE_SQ,
+    );
+    if (!hinted) continue;
+    mapping.set(i, hinted.index);
+    usedLodIndices.add(hinted.index);
   }
 
-  const MAX_FALLBACK_PAIR_DISTANCE_SQ = 64 * 64;
   for (let i = 0; i < placements.length; i += 1) {
     if (mapping.has(i)) continue;
     const placement = placements[i];
@@ -80,14 +96,14 @@ export function buildLodMapping(placements, gameVersion) {
     const expected = expectedLodNameByPrefix(placement.modelName);
     if (!expected) continue;
     const candidates = [...(lodNameToIndices.get(expected) || [])];
-    if (version !== 'SA') {
-      const hintedIndex = placement.lod;
-      if (Number.isInteger(hintedIndex) && hintedIndex >= 0 && hintedIndex < placements.length) {
-        const hintedPlacement = placements[hintedIndex];
-        if (hintedPlacement && normalizeModelName(hintedPlacement.modelName) === expected) {
-          candidates.unshift(hintedIndex);
-        }
-      }
+    const hinted = getHintedLodCandidate(
+      placements,
+      placement,
+      usedLodIndices,
+      MAX_HINTED_PAIR_DISTANCE_SQ,
+    );
+    if (hinted && normalizeModelName(hinted.placement?.modelName) === expected) {
+      candidates.unshift(hinted.index);
     }
     if (candidates.length === 0) continue;
     const { index: target, score } = pickBestSpatialCandidate(candidates, placements, placement, usedLodIndices);

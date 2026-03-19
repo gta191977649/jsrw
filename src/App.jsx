@@ -3497,15 +3497,11 @@ function App() {
             }
 
             const pairedItem = hasNear && hasLod;
-            const nearEndDistance = Math.min(
-              resolveRenderableDistance(
-                pairedItem
-                  ? (showLods ? drawDistance : renderingDistance)
-                  : item.nearState?.drawDistance,
-                renderingDistance,
-              ),
-              renderingDistance,
+            const nearConfiguredDistance = resolveRenderableDistance(
+              item.nearState?.drawDistance,
+              showLods ? drawDistance : renderingDistance,
             );
+            const nearEndDistance = Math.min(nearConfiguredDistance, renderingDistance);
             const lodEndDistance = Math.min(
               resolveRenderableDistance(item.lodState?.drawDistance, renderingDistance),
               renderingDistance,
