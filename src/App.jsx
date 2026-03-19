@@ -4,14 +4,12 @@ import { WebGPURenderer } from 'three/webgpu';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import WebGPU from 'three/addons/capabilities/WebGPU.js';
-import { DFFLoader, TXDLoader } from './lib/jsrw';
 import { playerController as createExternalPlayerController } from 'three-player-controller';
 import { formatConsoleArg } from './lib/console';
 import { buildFileIndex } from './lib/fileIndex';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from './lib/gtaTransforms';
-import { normalizePath, parseGtaDat, parseIde, parseIpl } from './lib/gtaParsers';
-import { parseTimecyc, sampleTimecyc, TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/Timecycle';
-import { IMGParser } from './lib/imgArchive';
+import { normalizePath } from './lib/gtaParsers';
+import { sampleTimecyc, TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/Timecycle';
 import { buildLodMapping, isLodModel } from './lib/lod';
 import { PlayerControllerAdapter } from './lib/playerControllerAdapter';
 import { APP_MODE_EDITOR, APP_MODE_TEST, PlayerModeManager } from './lib/PlayerModeManager';
@@ -61,7 +59,8 @@ import {
   clearObjectSelectionHighlight,
   getSelectableRootFromObject,
 } from './lib/selection';
-import { getWaterConfig, parseWaterproDat } from './lib/waterpro';
+import { BrowserFileSystem } from './lib/gta/fs/BrowserFileSystem';
+import { WorldLoader } from './lib/gta/world/WorldLoader';
 import saIcon from './assets/sa.png';
 import vcsIcon from './assets/vcs.png';
 import skyVertexShader from './shaders/sky.vertex.glsl.js';
@@ -1120,215 +1119,87 @@ function App() {
       await yieldToBrowser();
       const parseStartTime = performance.now();
 
-    const trackAndResolveFile = (kind, pathHint, options = {}) => {
-      const {
-        declaredDetail = 'declared',
-        foundDetail = 'found',
-        missingDetail = 'missing',
-        warnOnMissing = true,
-      } = options;
-      const requestedPath = normalizePath(pathHint);
-      if (declaredDetail) pushLoadedFile(kind, requestedPath, declaredDetail);
-      const file = fileIndex.findByPathHint(requestedPath);
-      if (!file) {
-        pushLoadedFile(kind, requestedPath, missingDetail);
-        if (warnOnMissing) pushConsoleLine('warn', `${kind} missing: ${requestedPath}`);
-        return null;
-      }
-      const resolvedPath = normalizePath(file.webkitRelativePath || file.name || requestedPath);
-      pushLoadedFile(kind, resolvedPath, foundDetail);
-      return { file, requestedPath, resolvedPath };
-    };
-
-      const gtaDatRecord = trackAndResolveFile('DAT', 'data/gta.dat', {
-        declaredDetail: 'required',
-        foundDetail: 'loaded',
-        missingDetail: 'missing',
-        warnOnMissing: false,
-      });
-      const gtaDatFile = gtaDatRecord?.file ?? null;
-      if (!gtaDatFile) {
+      let worldLoadResult;
+      try {
+        const worldLoader = new WorldLoader({
+          fileSystem: new BrowserFileSystem(fileIndex),
+          gameVersion: uiStateRef.current.gameVersion,
+          onLog: (level, message) => pushConsoleLine(level, message),
+          onFileEvent: (kind, path, detail) => pushLoadedFile(kind, path, detail),
+        });
+        worldLoadResult = await worldLoader.load({
+          extraImgPaths: ['models/gta3.img'],
+        });
+      } catch (error) {
         setStatus('gta.dat not found in uploaded files.');
-        pushConsoleLine('error', 'gta.dat not found in selected folder');
+        pushConsoleLine('error', formatConsoleArg(error));
         return;
       }
 
-      const gtaDat = parseGtaDat(await gtaDatFile.text());
-      pushConsoleLine(
-        'info',
-        `gta.dat parsed: IDE ${gtaDat.idePaths.length}, IPL ${gtaDat.iplPaths.length}, IMG ${gtaDat.imgPaths?.length || 0}, IMAGEPATH ${gtaDat.imagePaths?.length || 0}`,
-      );
+      const worldContext = worldLoadResult.context;
+      const worldBuild = worldLoadResult.build;
+      const worldLoadStats = worldLoadResult.stats;
+      const ideById = worldContext.ideRegistry?.byId || new Map();
+      const ideByModel = worldContext.ideRegistry?.byModel || new Map();
+      const placements = worldContext.iplRegistry?.getAll?.() || [];
 
-      const imgParser = new IMGParser();
-      const imgPaths = [];
-      const imgPathSet = new Set();
-      const registerImgPath = (pathHint) => {
-        const normalized = String(pathHint || '').trim().replaceAll('\\', '/').toLowerCase();
-        if (!normalized || imgPathSet.has(normalized)) return;
-        imgPathSet.add(normalized);
-        imgPaths.push(normalized);
-      };
-      registerImgPath('models/gta3.img');
-      for (const path of gtaDat.imgPaths || []) registerImgPath(path);
-
-      for (const imgPath of imgPaths) {
-      const imgRecord = trackAndResolveFile('IMG', imgPath, {
-        foundDetail: 'found',
-        missingDetail: 'missing img',
-      });
-      if (!imgRecord) {
-        continue;
-      }
-      const dirPath = imgPath.replace(/\.img$/i, '.dir');
-      const dirRecord = trackAndResolveFile('DIR', dirPath, {
-        foundDetail: 'found',
-        missingDetail: 'missing dir',
-        warnOnMissing: false,
-      });
-      if (!dirRecord) {
-        pushLoadedFile('IMG', imgPath, 'missing dir');
-        pushConsoleLine('warn', `IMG directory missing: ${dirPath}`);
-        continue;
-      }
-      try {
-        const parsed = await imgParser.appendArchive(imgRecord.file, dirRecord.file, imgPath);
-        pushLoadedFile('IMG', imgPath, `${parsed.total} entries`);
-        pushConsoleLine(
-          'info',
-          `IMG loaded: ${imgPath} (${parsed.total} entries${parsed.overridden > 0 ? `, override ${parsed.overridden}` : ''})`,
-        );
-      } catch (error) {
-        pushConsoleLine('error', `IMG parse failed: ${imgPath} (${formatConsoleArg(error)})`);
-      }
-      }
-
-      if ((gtaDat.imagePaths || []).length > 0) {
-        for (const imagePath of gtaDat.imagePaths) {
-          pushLoadedFile('IMAGEPATH', imagePath, 'ignored');
-        }
-        pushConsoleLine('info', 'IMAGEPATH entries are ignored. Textures are resolved by IDE TXD only.');
-      }
-
-      const ideById = new Map();
-      const ideByModel = new Map();
-      let parsedIdeFiles = 0;
-
-      for (const pathHint of gtaDat.idePaths) {
-      const ideRecord = trackAndResolveFile('IDE', pathHint, {
-        foundDetail: 'found',
-        missingDetail: 'missing',
-      });
-      if (!ideRecord) {
-        continue;
-      }
-      pushConsoleLine('info', `Loading IDE: ${ideRecord.requestedPath}`);
-
-      const parsed = parseIde(await ideRecord.file.text());
-      parsedIdeFiles += 1;
-      pushLoadedFile('IDE', ideRecord.resolvedPath, 'loaded');
-
-      for (const [id, def] of parsed.byId.entries()) ideById.set(id, def);
-      for (const [name, def] of parsed.byModel.entries()) ideByModel.set(name, def);
-      }
-
-      let parsedIplFiles = 0;
-      const placements = [];
-
-      for (const pathHint of gtaDat.iplPaths) {
-      const iplRecord = trackAndResolveFile('IPL', pathHint, {
-        foundDetail: 'found',
-        missingDetail: 'missing',
-      });
-      if (!iplRecord) {
-        continue;
-      }
-      pushConsoleLine('info', `Loading IPL: ${iplRecord.requestedPath}`);
-
-      const parsed = parseIpl(await iplRecord.file.text(), { gameVersion: uiStateRef.current.gameVersion });
-      const placementBaseIndex = placements.length;
-      for (const placement of parsed) {
-        if (Number.isInteger(placement.lod) && placement.lod >= 0) {
-          placement.lod += placementBaseIndex;
-        } else {
-          placement.lod = -1;
-        }
-      }
-      parsedIplFiles += 1;
-      pushLoadedFile('IPL', iplRecord.resolvedPath, 'loaded');
-      placements.push(...parsed);
-      }
       pushConsoleLine('info', `IDE/IPL parsed in ${(performance.now() - parseStartTime).toFixed(1)} ms`);
 
-      const timecycRecord = trackAndResolveFile('DAT', 'data/timecyc.dat', {
-        declaredDetail: 'optional',
-        foundDetail: 'loaded',
-        missingDetail: 'missing optional',
-        warnOnMissing: false,
-      });
-      if (timecycRecord) {
-        try {
-          const parsedTimecycle = parseTimecyc(await timecycRecord.file.text(), {
-            gameVersion: uiStateRef.current.gameVersion,
-          });
-          const previousControls = timecycleStateRef.current?.controls || {};
-          const weatherNames = Array.isArray(parsedTimecycle.weatherNames) && parsedTimecycle.weatherNames.length > 0
-            ? parsedTimecycle.weatherNames
-            : [...VCS_WEATHER_NAMES];
-          const controls = {
-            hour: Number.isFinite(previousControls.hour) ? previousControls.hour : 12,
-            minute: Number.isFinite(previousControls.minute) ? previousControls.minute : 0,
-            weatherA: Number.isFinite(previousControls.weatherA) ? previousControls.weatherA : 0,
-            weatherB: Number.isFinite(previousControls.weatherB) ? previousControls.weatherB : 0,
-            weatherBlend: Number.isFinite(previousControls.weatherBlend) ? previousControls.weatherBlend : 0,
-            extraColour: Number.isFinite(previousControls.extraColour) ? previousControls.extraColour : -1,
-            overrides: previousControls.overrides && typeof previousControls.overrides === 'object'
-              ? { ...previousControls.overrides }
-              : {},
-          };
-          controls.weatherA = Math.min(Math.max(controls.weatherA, 0), weatherNames.length - 1);
-          controls.weatherB = Math.min(Math.max(controls.weatherB, 0), weatherNames.length - 1);
-          const current = applyTimecycleOverrides(sampleTimecyc(parsedTimecycle, controls), controls.overrides);
-          timecycleDataRef.current = parsedTimecycle;
-          timecycleStateRef.current = {
-            sourcePath: timecycRecord.resolvedPath,
-            data: parsedTimecycle,
-            current,
-            weatherNames,
-            controls,
-          };
-          pushConsoleLine(
-            'info',
-            `timecyc.dat loaded: ${parsedTimecycle.hours} hours x ${weatherNames.length} weathers (${timecycRecord.resolvedPath})`,
-          );
-        } catch (error) {
-          timecycleDataRef.current = null;
-          timecycleStateRef.current = {
-            sourcePath: '',
-            data: null,
-            current: null,
-            weatherNames: [...VCS_WEATHER_NAMES],
-            controls: {
-              hour: 12,
-              minute: 0,
-              weatherA: 0,
-              weatherB: 0,
-              weatherBlend: 0,
-              extraColour: -1,
-              overrides: {},
-            },
-          };
-          pushConsoleLine('warn', `timecyc.dat parse failed: ${formatConsoleArg(error)}`);
-        }
+      const previousControls = timecycleStateRef.current?.controls || {};
+      const parsedTimecycle = worldBuild.weather?.data || null;
+      const weatherNames = worldBuild.weather?.weatherNames || [...VCS_WEATHER_NAMES];
+      if (parsedTimecycle) {
+        const controls = {
+          hour: Number.isFinite(previousControls.hour) ? previousControls.hour : 12,
+          minute: Number.isFinite(previousControls.minute) ? previousControls.minute : 0,
+          weatherA: Number.isFinite(previousControls.weatherA) ? previousControls.weatherA : 0,
+          weatherB: Number.isFinite(previousControls.weatherB) ? previousControls.weatherB : 0,
+          weatherBlend: Number.isFinite(previousControls.weatherBlend) ? previousControls.weatherBlend : 0,
+          extraColour: Number.isFinite(previousControls.extraColour) ? previousControls.extraColour : -1,
+          overrides: previousControls.overrides && typeof previousControls.overrides === 'object'
+            ? { ...previousControls.overrides }
+            : {},
+        };
+        controls.weatherA = Math.min(Math.max(controls.weatherA, 0), weatherNames.length - 1);
+        controls.weatherB = Math.min(Math.max(controls.weatherB, 0), weatherNames.length - 1);
+        const current = applyTimecycleOverrides(sampleTimecyc(parsedTimecycle, controls), controls.overrides);
+        timecycleDataRef.current = parsedTimecycle;
+        timecycleStateRef.current = {
+          sourcePath: worldBuild.weather?.sourcePath || '',
+          data: parsedTimecycle,
+          current,
+          weatherNames,
+          controls,
+        };
+        pushConsoleLine(
+          'info',
+          `timecyc.dat loaded: ${parsedTimecycle.hours} hours x ${weatherNames.length} weathers (${worldBuild.weather?.sourcePath || 'unknown'})`,
+        );
       } else {
-        pushConsoleLine('warn', 'timecyc.dat not found. Fog/timecycle disabled.');
+        timecycleDataRef.current = null;
+        timecycleStateRef.current = {
+          sourcePath: '',
+          data: null,
+          current: null,
+          weatherNames: [...VCS_WEATHER_NAMES],
+          controls: {
+            hour: 12,
+            minute: 0,
+            weatherA: 0,
+            weatherB: 0,
+            weatherBlend: 0,
+            extraColour: -1,
+            overrides: {},
+          },
+        };
       }
 
       totalObjectsRef.current = placements.length;
 
       setStats({
         files: fileIndex.count,
-        ideFiles: parsedIdeFiles,
-        iplFiles: parsedIplFiles,
+        ideFiles: worldLoadStats.ideFiles,
+        iplFiles: worldLoadStats.iplFiles,
         ideDefs: ideByModel.size,
         iplInst: placements.length,
         loaded: 0,
@@ -1340,75 +1211,33 @@ function App() {
         instancedItems: 0,
       });
 
-      const txdLoader = new TXDLoader();
-      const txdMetadataByNameRef = { current: new Map() };
-      if (!txdLoader.__rwMetaPatched) {
-      const baseReadTextureNative = txdLoader.readTextureNative.bind(txdLoader);
-      txdLoader.readTextureNative = function patchedReadTextureNative(...args) {
-        const parsed = baseReadTextureNative(...args);
-        if (parsed?.name) {
-          txdMetadataByNameRef.current.set(String(parsed.name).toLowerCase(), {
-            compression: parsed.compression,
-            d3dFormat: parsed.d3dFormat,
-            rasterFormat: parsed.rasterFormat,
-            platformId: parsed.platformId,
-            width: parsed.width,
-            height: parsed.height,
-            hasAlpha: parsed.hasAlpha,
-          });
-        }
-        return parsed;
-      };
-      const baseParse = txdLoader.parse.bind(txdLoader);
-      txdLoader.parse = function patchedParse(...args) {
-        txdMetadataByNameRef.current = new Map();
-        return baseParse(...args);
-      };
-      txdLoader.__rwMetaPatched = true;
-      }
       const modelCache = new Map();
-      const txdCache = new Map();
+      const textureLogCache = new Set();
       let pendingWaterPipeline = null;
 
       const getTextureDict = async (txdName) => {
-      if (!txdName) return null;
-      if (txdCache.has(txdName)) return txdCache.get(txdName);
+        if (!txdName) return null;
 
-      try {
-        const txdFromFile = fileIndex.findByBasename(`${txdName}.txd`);
-        let txdBuffer = null;
-        let txdSource = '';
-        if (txdFromFile) {
-          txdBuffer = await txdFromFile.arrayBuffer();
-          txdSource = normalizePath(txdFromFile.webkitRelativePath || txdFromFile.name || `${txdName}.txd`);
-        } else {
-          const txdFromImg = imgParser.getAssetBytes(`${txdName}.txd`);
-          if (!txdFromImg) {
-            txdCache.set(txdName, null);
-            pushConsoleLine('warn', `TXD missing: ${txdName}.txd (file + IMG)`);
-            return null;
+        try {
+          const txd = await worldContext.textureResolver.resolveTextureDictionary(txdName);
+          const txdSource = worldContext.textureResolver.getSource(txdName);
+          if (txd && txdSource && !textureLogCache.has(txdName)) {
+            textureLogCache.add(txdName);
+            pushConsoleLine('info', `TXD loaded: ${txdName}.txd (${txdSource})`);
           }
-          txdBuffer = txdFromImg.buffer.slice(
-            txdFromImg.byteOffset,
-            txdFromImg.byteOffset + txdFromImg.byteLength,
-          );
-          txdSource = imgParser.getAssetSource(`${txdName}.txd`) || 'unknown IMG';
+          return txd;
+        } catch {
+          pushConsoleLine('error', `TXD parse failed: ${txdName}.txd`);
+          return null;
         }
-        const txd = normalizeTextureDictionary(txdLoader.parse(txdBuffer), {
-          metadataByName: txdMetadataByNameRef.current,
-        });
-        txdCache.set(txdName, txd);
-        pushConsoleLine('info', `TXD loaded: ${txdName}.txd (${txdSource})`);
-        return txd;
-      } catch {
-        txdCache.set(txdName, null);
-        pushConsoleLine('error', `TXD parse failed: ${txdName}.txd`);
-        return null;
-      }
       };
 
       const tryBuildWater = async () => {
-      const waterConfig = getWaterConfig(uiStateRef.current.gameVersion);
+      const waterConfig = worldBuild.water?.config || null;
+      if (!waterConfig) {
+        pushConsoleLine('warn', 'waterpro.dat not found. Water rendering disabled.');
+        return;
+      }
       if (waterConfig.source !== 'waterpro') {
         pushConsoleLine(
           'warn',
@@ -1417,13 +1246,9 @@ function App() {
         return;
       }
 
-      const waterRecord = trackAndResolveFile('DAT', 'data/waterpro.dat', {
-        declaredDetail: 'optional',
-        foundDetail: 'loaded',
-        missingDetail: 'missing optional',
-        warnOnMissing: false,
-      });
-      if (!waterRecord) {
+      const waterSourcePath = worldBuild.water?.sourcePath || '';
+      const parsed = worldBuild.water?.data || null;
+      if (!waterConfig || !parsed) {
         pushConsoleLine('warn', 'waterpro.dat not found. Water rendering disabled.');
         return;
       }
@@ -1431,7 +1256,7 @@ function App() {
       try {
         setStatus('Building water... (stage 1/6: start)');
         // #region agent log
-        dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: start', data: { token, waterPath: waterRecord?.resolvedPath ?? null } });
+        dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: start', data: { token, waterPath: waterSourcePath || null } });
         // #endregion
         await yieldToBrowser();
         const waterStartTime = performance.now();
@@ -1439,7 +1264,6 @@ function App() {
         dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: before arrayBuffer', data: { token } });
         // #endregion
         setStatus('Building water... (stage 2/6: reading waterpro.dat)');
-        const parsed = parseWaterproDat(await waterRecord.file.arrayBuffer());
         // #region agent log
         dbgLog({ runId: 'safari-build', hypothesisId: 'H2', location: 'App.jsx:tryBuildWater', message: 'Building water: parsed waterpro.dat', data: { token, levelCount: parsed?.levelCount ?? null, fineBlocks: parsed?.fineBlockList?.length ?? null } });
         // #endregion
@@ -1626,30 +1450,15 @@ function App() {
       if (modelCache.has(key)) return modelCache.get(key);
 
       const pending = (async () => {
-        const dffLoader = new DFFLoader();
-        const txd = await getTextureDict(txdName);
-        if (txd) dffLoader.setTextureDictionary(txd);
-
-        const dffFromFile = fileIndex.findByBasename(`${modelName}.dff`);
-        let dffBuffer = null;
-        let dffSource = '';
-        if (dffFromFile) {
-          dffBuffer = await dffFromFile.arrayBuffer();
-          dffSource = normalizePath(dffFromFile.webkitRelativePath || dffFromFile.name || `${modelName}.dff`);
-        } else {
-          const dffFromImg = imgParser.getAssetBytes(`${modelName}.dff`);
-          if (!dffFromImg) {
-            pushConsoleLine('error', `DFF missing: ${modelName}.dff (file + IMG)`);
-            throw new Error(`Missing DFF: ${modelName}.dff`);
-          }
-          dffBuffer = dffFromImg.buffer.slice(
-            dffFromImg.byteOffset,
-            dffFromImg.byteOffset + dffFromImg.byteLength,
-          );
-          dffSource = imgParser.getAssetSource(`${modelName}.dff`) || 'unknown IMG';
+        const resolvedModel = await worldContext.modelResolver.resolve(modelName, txdName);
+        if (!resolvedModel?.template) {
+          pushConsoleLine('error', `DFF missing: ${modelName}.dff (file + IMG)`);
+          throw new Error(`Missing DFF: ${modelName}.dff`);
         }
 
-        const template = dffLoader.parse(dffBuffer);
+        const txd = resolvedModel.textureDictionary || null;
+        const dffSource = resolvedModel.dffSource || '';
+        const template = resolvedModel.template;
         const usedTextureEntries = new Map();
         const registerTexture = (textureName, texture) => {
           const name = String(textureName || '').trim().toLowerCase();

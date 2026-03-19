@@ -113,9 +113,3 @@ export class IMGParser {
     return this.assetSources.get(normalizePath(name));
   }
 }
-
-export async function buildImgAssetMap(imgFile, dirFile) {
-  const parser = new IMGParser();
-  await parser.appendArchive(imgFile, dirFile);
-  return parser.assets;
-}

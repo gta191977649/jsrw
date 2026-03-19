@@ -8,31 +8,6 @@ export function normalizePath(input) {
   return input.trim().replaceAll('\\', '/').replace(/^\.\//, '').toLowerCase();
 }
 
-export function parseGtaDat(content) {
-  const idePaths = [];
-  const iplPaths = [];
-  const imgPaths = [];
-  const imagePaths = [];
-
-  for (const raw of content.split(/\r?\n/)) {
-    const line = cleanLine(raw);
-    if (!line) continue;
-
-    const parts = line.split(/\s+/);
-    if (parts.length < 2) continue;
-
-    const type = parts[0].toUpperCase();
-    const filePath = normalizePath(parts.slice(1).join(' '));
-
-    if (type === 'IDE') idePaths.push(filePath);
-    if (type === 'IPL') iplPaths.push(filePath);
-    if (type === 'CDIMAGE' || type === 'IMG') imgPaths.push(filePath);
-    if (type === 'IMAGEPATH') imagePaths.push(filePath);
-  }
-
-  return { idePaths, iplPaths, imgPaths, imagePaths };
-}
-
 function parseCsvLine(line) {
   return line
     .split(',')
