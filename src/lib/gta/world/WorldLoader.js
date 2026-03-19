@@ -163,6 +163,7 @@ export class WorldLoader {
         ideFiles: ideRegistry.files.length,
         iplFiles: iplRegistry.files.length,
         ideDefs: ideRegistry.size,
+        ideEffects: ideRegistry.effectsCount,
         iplInst: iplRegistry.size,
         defaultResources,
       },
@@ -423,6 +424,14 @@ export class WorldLoader {
       const { sourcePath, parsed } = await this.ideLoader.load(record);
       registry.addParsed(parsed, sourcePath);
       this.onFileEvent?.('IDE', sourcePath, 'loaded');
+      let effectCount = 0;
+      for (const effects of parsed?.effectsById?.values?.() || []) {
+        effectCount += Array.isArray(effects) ? effects.length : 0;
+      }
+      if (effectCount > 0) {
+        this.onFileEvent?.('2DFX', sourcePath, `${effectCount} effects`);
+        this.onLog?.('info', `2DFX parsed: ${sourcePath} (${effectCount} effects)`);
+      }
     }
 
     return registry;

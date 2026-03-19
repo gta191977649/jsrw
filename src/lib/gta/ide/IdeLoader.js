@@ -1,4 +1,4 @@
-import { parseIde } from '../../gtaParsers';
+import { parseIde } from '../loaders/SectionLoader';
 
 export class IdeLoader {
   async load(record) {

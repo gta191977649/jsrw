@@ -68,6 +68,13 @@ export {
 export * from './renderer/world/sky/index.js';
 export { PostFxRuntime } from './renderer/postfx/PostFxRuntime.js';
 export { RWPostFxPipeline } from './renderer/postfx/RWPostFxPipeline.js';
+export { CoronaRuntime } from './renderer/corona/CoronaRuntime.js';
+export { RWCoronaPipeline } from './renderer/corona/RWCoronaPipeline.js';
+export {
+  buildTrafficLightCoronaEmitters,
+  isTrafficLightModelName,
+  resolveTrafficLightPhase,
+} from './renderer/corona/TrafficLights.js';
 export { WaterRuntime } from './renderer/water/WaterRuntime.js';
 export { RWWaterPipeline } from './renderer/water/RWWaterPipeline.js';
 

@@ -1,4 +1,4 @@
-import { parseIpl } from '../../gtaParsers';
+import { parseIpl } from '../loaders/SectionLoader';
 
 export class IplLoader {
   constructor(options = {}) {

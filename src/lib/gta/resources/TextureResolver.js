@@ -50,6 +50,7 @@ export class TextureResolver {
     this.loader = patchedLoader.loader;
     this.metadataByNameRef = patchedLoader.metadataByNameRef;
     this.sources = new Map();
+    this.textureEntryCache = new Map();
   }
 
   getSource(name) {
@@ -70,6 +71,79 @@ export class TextureResolver {
     const resolved = await pending;
     this.registry.set(normalizedName, resolved);
     return resolved;
+  }
+
+  async resolveTextureEntry(name, options = {}) {
+    const normalizedName = stripExtension(normalizeName(name));
+    if (!normalizedName) return null;
+    if (this.textureEntryCache.has(normalizedName)) {
+      return this.textureEntryCache.get(normalizedName);
+    }
+
+    const pending = this.loadTextureEntry(normalizedName, options).catch((error) => {
+      this.textureEntryCache.set(normalizedName, null);
+      throw error;
+    });
+    this.textureEntryCache.set(normalizedName, pending);
+
+    const resolved = await pending;
+    this.textureEntryCache.set(normalizedName, resolved);
+    return resolved;
+  }
+
+  getKnownTextureDictionaryNames() {
+    const names = [];
+    const seen = new Set();
+    const addName = (value) => {
+      const normalized = stripExtension(normalizeName(value));
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      names.push(normalized);
+    };
+
+    for (const name of this.sourceIndex?.keys?.() || []) addName(name);
+    for (const name of this.registry?.records?.keys?.() || []) addName(name);
+    for (const pathHint of this.imagePaths || []) {
+      if (hasExtension(pathHint, 'txd')) addName(pathHint);
+    }
+    for (const assetName of this.imgArchives?.listAssets?.('txd') || []) addName(assetName);
+    for (const record of this.fileSystem?.listByExtension?.('txd') || []) {
+      addName(record.basename || record.resolvedPath || '');
+    }
+
+    return names;
+  }
+
+  async loadTextureEntry(name, options = {}) {
+    const normalizedName = stripExtension(normalizeName(name));
+    const preferredDictionaries = Array.isArray(options.preferredDictionaries)
+      ? options.preferredDictionaries
+      : [];
+    const orderedDictionaryNames = [];
+    const seen = new Set();
+    const addDictionary = (value) => {
+      const normalized = stripExtension(normalizeName(value));
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      orderedDictionaryNames.push(normalized);
+    };
+
+    preferredDictionaries.forEach(addDictionary);
+    this.getKnownTextureDictionaryNames().forEach(addDictionary);
+
+    for (const dictionaryName of orderedDictionaryNames) {
+      const dictionary = await this.resolveTextureDictionary(dictionaryName);
+      if (!dictionary?.get) continue;
+      const entry = dictionary.get(normalizedName) || null;
+      if (!entry) continue;
+      return {
+        ...entry,
+        txdName: dictionaryName,
+        sourcePath: this.getSource(dictionaryName),
+      };
+    }
+
+    return null;
   }
 
   async loadTextureDictionary(name) {

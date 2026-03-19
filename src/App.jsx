@@ -8,7 +8,7 @@ import { playerController as createExternalPlayerController } from 'three-player
 import { formatConsoleArg } from './lib/console';
 import { buildFileIndex } from './lib/fileIndex';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from './lib/gtaTransforms';
-import { normalizePath } from './lib/gtaParsers';
+import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE, normalizePath } from './lib/gta/loaders/SectionLoader';
 import { sampleTimecyc, TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/Timecycle';
 import { buildLodMapping, isLodModel } from './lib/lod';
 import { PlayerControllerAdapter } from './lib/playerControllerAdapter';
@@ -19,6 +19,7 @@ import {
   calcScreenCoorsLikeRw,
   cloneRWMaterialDescriptor,
   cloneRWPipelineSelections,
+  buildTrafficLightCoronaEmitters,
   createJsrwRenderer,
   createRWPipelineMaterialForProfile,
   createThreeMaterialFromRW,
@@ -80,6 +81,22 @@ const SKY_DEFAULT_BOTTOM = DEFAULT_SCENE_BACKGROUND.clone();
 const SKY_DEFAULT_FOG = DEFAULT_SCENE_BACKGROUND.clone();
 const RW_PIPELINE_FALLBACK_AMBIENT = new THREE.Color(1, 1, 1);
 const RW_PIPELINE_FALLBACK_EMISSIVE = new THREE.Color(0, 0, 0);
+const TRAFFIC_LIGHT_DEBUG_DEFAULTS = Object.freeze({
+  enabled: true,
+  ignoreFacing: false,
+  forcePhase: 'auto',
+  windBlinking: false,
+  windStrength: 0,
+  brightnessScale: 0.7,
+  sizeScale: 1,
+});
+const RW_DFF_LIGHT_TYPE = Object.freeze({
+  DIRECTIONAL: 0x01,
+  AMBIENT: 0x02,
+  POINT: 0x80,
+  SPOT: 0x81,
+  SPOTSOFT: 0x82,
+});
 const TIMECYCLE_FIELD_MAP = new Map(TIMECYCLE_FIELD_GROUPS.map((field) => [field.key, field]));
 const LOW_CLOUD_OFFSETS_X = [1.0, 0.7, 0.0, -0.7, -1.0, -0.7, 0.0, 0.7, 0.8, -0.8, 0.4, -0.4];
 const LOW_CLOUD_OFFSETS_Z = [0.0, -0.7, -1.0, -0.7, 0.0, 0.7, 1.0, 0.7, 0.4, 0.4, -0.8, -0.8];
@@ -118,6 +135,42 @@ function createResourceCacheState() {
     missingDff: new Set(),
     missingTxd: new Set(),
   };
+}
+
+function toPlainVector(vector) {
+  return {
+    x: Number(vector?.x) || 0,
+    y: Number(vector?.y) || 0,
+    z: Number(vector?.z) || 0,
+  };
+}
+
+function map2dfxVisibilityMode(lightType) {
+  switch (Number(lightType)) {
+    case IDE_LIGHT_TYPE.ON_NIGHT: return 'night';
+    case IDE_LIGHT_TYPE.FLICKER: return 'flicker';
+    case IDE_LIGHT_TYPE.FLICKER_NIGHT: return 'flicker-night';
+    case IDE_LIGHT_TYPE.FLASH1: return 'flash1';
+    case IDE_LIGHT_TYPE.FLASH1_NIGHT: return 'flash1-night';
+    case IDE_LIGHT_TYPE.FLASH2: return 'flash2';
+    case IDE_LIGHT_TYPE.FLASH2_NIGHT: return 'flash2-night';
+    case IDE_LIGHT_TYPE.FLASH3: return 'flash3';
+    case IDE_LIGHT_TYPE.FLASH3_NIGHT: return 'flash3-night';
+    case IDE_LIGHT_TYPE.RANDOM_FLICKER: return 'random-flicker';
+    case IDE_LIGHT_TYPE.RANDOM_FLICKER_NIGHT: return 'random-flicker-night';
+    default: return 'always';
+  }
+}
+
+function mapDffLightKind(lightType) {
+  switch (Number(lightType)) {
+    case RW_DFF_LIGHT_TYPE.AMBIENT: return 'ambient';
+    case RW_DFF_LIGHT_TYPE.DIRECTIONAL: return 'directional';
+    case RW_DFF_LIGHT_TYPE.POINT: return 'point';
+    case RW_DFF_LIGHT_TYPE.SPOT: return 'spot';
+    case RW_DFF_LIGHT_TYPE.SPOTSOFT: return 'spotsoft';
+    default: return '';
+  }
 }
 
 function clamp01(value) {
@@ -825,6 +878,10 @@ function App() {
     showLods: true,
     forceLodOnly: false,
     showTobjs: false,
+    render2dfx: true,
+    debug2dfx: false,
+    forceRender2dfx: false,
+    trafficLights: { ...TRAFFIC_LIGHT_DEBUG_DEFAULTS },
     streamingBuild: true,
     backgroundPreloadRadius: 1.5,
     showGrid: true,
@@ -875,6 +932,7 @@ function App() {
     ideFiles: 0,
     iplFiles: 0,
     ideDefs: 0,
+    ideEffects: 0,
     iplInst: 0,
     loaded: 0,
     failed: 0,
@@ -883,6 +941,8 @@ function App() {
     totalChunks: 0,
     instancedBatches: 0,
     instancedItems: 0,
+    lightObjects: 0,
+    lightEmitters: 0,
     queuedChunks: 0,
     readyChunks: 0,
   });
@@ -1081,6 +1141,7 @@ function App() {
     const worldRoot = worldRootRef.current;
     disposeWorld(worldRoot);
     jsrwSessionRef.current.disposeWaterRuntime();
+    jsrwSessionRef.current.disposeCoronaRuntime();
     timecycleDataRef.current = null;
     resourceCacheRef.current = createResourceCacheState();
     streamingBuildRef.current = {
@@ -1145,10 +1206,13 @@ function App() {
       loaded: 0,
       failed: 0,
       unresolved: 0,
+      ideEffects: 0,
       nearOnly: 0,
       totalChunks: 0,
       instancedBatches: 0,
       instancedItems: 0,
+      lightObjects: 0,
+      lightEmitters: 0,
       queuedChunks: 0,
       readyChunks: 0,
     }));
@@ -1276,6 +1340,7 @@ function App() {
         ideFiles: worldLoadStats.ideFiles,
         iplFiles: worldLoadStats.iplFiles,
         ideDefs: ideByModel.size,
+        ideEffects: worldLoadStats.ideEffects || 0,
         iplInst: placements.length,
         defaultResources,
         loaded: 0,
@@ -1285,11 +1350,14 @@ function App() {
         totalChunks: 0,
         instancedBatches: 0,
         instancedItems: 0,
+        lightObjects: 0,
+        lightEmitters: 0,
       });
 
       const modelCache = new Map();
       const textureLogCache = new Set();
       let pendingWaterPipeline = null;
+      let particleTextureDictionary = null;
       const pushRuntimeMapLog = (label, texture, matches) => {
         const runtimePath = `${label}: ${texture?.name || 'unnamed'}`;
         const detail = `match=${matches ? 'yes' : 'no'}`;
@@ -1316,6 +1384,43 @@ function App() {
         }
       };
 
+      const log2dfxDebug = (level, message) => {
+        pushConsoleLine(level, message, 'runtime');
+        if (level === 'warn') console.warn(message);
+        else if (level === 'error') console.error(message);
+        else console.log(message);
+      };
+
+      const buildCoronaTextureDictionary = async (emitters = []) => {
+        const mergedDictionary = new Map(particleTextureDictionary ? Array.from(particleTextureDictionary.entries()) : []);
+        const textureKeys = Array.from(new Set(
+          (emitters || [])
+            .map((emitter) => String(emitter?.textureKey || '').trim().toLowerCase())
+            .filter(Boolean),
+        ));
+
+        log2dfxDebug('info', `[2DFX] emitter texture keys: ${textureKeys.length > 0 ? textureKeys.join(', ') : '(none)'}`);
+
+        for (const textureKey of textureKeys) {
+          if (mergedDictionary.has(textureKey)) {
+            const existingEntry = mergedDictionary.get(textureKey);
+            log2dfxDebug('info', `[2DFX] texture found: ${textureKey} <- particle.txd (${existingEntry?.texture?.name || existingEntry?.name || textureKey})`);
+            continue;
+          }
+          const resolvedEntry = await worldContext.textureResolver.resolveTextureEntry(textureKey, {
+            preferredDictionaries: ['particle'],
+          });
+          if (!resolvedEntry) {
+            log2dfxDebug('warn', `[2DFX] texture missing: ${textureKey}`);
+            continue;
+          }
+          mergedDictionary.set(textureKey, resolvedEntry);
+          log2dfxDebug('info', `[2DFX] texture found: ${textureKey} <- ${resolvedEntry.txdName || 'unknown.txd'} (${resolvedEntry.sourcePath || 'unknown source'})`);
+        }
+
+        return mergedDictionary;
+      };
+
       const applyParticleTextures = async () => {
         pushConsoleLine('info', '[RUNTIME_MAP] applyParticleTextures invoked', 'runtime');
         console.log('[RUNTIME_MAP] applyParticleTextures invoked');
@@ -1323,6 +1428,7 @@ function App() {
         dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:particle-textures', message: 'Particle textures: start getTextureDict(particle)', data: { token } });
         setStatus('Loading particle.txd...');
         const particleTxd = await getTextureDict('particle');
+        particleTextureDictionary = particleTxd || null;
         const particleSource = worldContext.textureResolver.getSource('particle');
         dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:particle-textures', message: 'Particle textures: got particle txd', data: { token, ok: Boolean(particleTxd), source: particleSource || '' } });
         if (buildTokenRef.current !== token) return;
@@ -1627,7 +1733,8 @@ function App() {
             localMatrix: node.matrixWorld.clone(),
           }))
           : [];
-        pushConsoleLine('info', `DFF loaded: ${modelName}.dff (${dffSource})`);
+        const dffLights = Array.isArray(template.userData?.rwDffLights) ? template.userData.rwDffLights : [];
+        pushConsoleLine('info', `DFF loaded: ${modelName}.dff (${dffSource})${dffLights.length > 0 ? ` | dffLights=${dffLights.length}` : ''}`);
         const txdTextures = txd && typeof txd.keys === 'function' ? txd : null;
         if (txdTextures) {
           for (const entry of usedTextureEntries.values()) {
@@ -1646,6 +1753,7 @@ function App() {
           txdName,
           template,
           usedTextureEntries: Array.from(usedTextureEntries.values()).sort((a, b) => a.name.localeCompare(b.name)),
+          dffLights,
           instancable,
           meshDescriptors,
         };
@@ -1735,6 +1843,9 @@ function App() {
     const renderItems = [];
     const renderChunkMap = new Map();
     const instancedBatchMap = new Map();
+    const coronaEmitters = [];
+    const registeredCoronaPlacements = new Set();
+    const placementsWithLights = new Set();
     let instancedItems = 0;
 
     const getRenderChunk = (anchor) => {
@@ -1796,29 +1907,166 @@ function App() {
       );
     };
 
-    const buildObjectDetail = (ide, placement, lodKind, model) => ({
-      id: ide.id,
-      placementId: placement.id,
-      modelName: ide.modelName,
-      txdName: ide.txdName,
-      flags: ide.flags | 0,
-      activeFlagNames: decodeRwIdeFlags(ide.flags).activeFlags,
-      section: ide.section,
-      drawDistance: ide.drawDistance,
-      lodKind,
-      position: {
-        x: placement.position.x,
-        y: placement.position.y,
-        z: placement.position.z,
-      },
-      rotation: {
-        x: placement.rotation.x,
-        y: placement.rotation.y,
-        z: placement.rotation.z,
-        w: placement.rotation.w,
-      },
-      usedTextureEntries: model.usedTextureEntries || [],
-    });
+    const buildCoronaEmittersForPlacement = (placement, placementIndex, worldMatrix, ide, model) => {
+      const emitters = [];
+      const directionMatrix = new THREE.Matrix3().setFromMatrix4(worldMatrix);
+      const baseId = `${placement.sourcePath || 'ipl'}:${placementIndex}:${placement.modelName}`;
+      const effectLights = Array.isArray(ide?.effects)
+        ? ide.effects.filter((e) => e.kind === 'light')
+        : [];
+      const trafficLightEmitters = buildTrafficLightCoronaEmitters({
+        effectLights,
+        placement,
+        placementIndex,
+        worldMatrix,
+        baseId,
+        toWorldPosition: (position, matrix) => {
+          const localPosition = gtaPositionToThree(
+            Number(position?.x) || 0,
+            Number(position?.y) || 0,
+            Number(position?.z) || 0,
+          );
+          return toPlainVector(localPosition.applyMatrix4(matrix));
+        },
+        toWorldDirection: (direction, matrix) => {
+          const localDirection = gtaPositionToThree(
+            Number(direction?.x) || 0,
+            Number(direction?.y) || 0,
+            Number(direction?.z) || 0,
+          ).normalize();
+          return toPlainVector(localDirection.applyMatrix3(new THREE.Matrix3().setFromMatrix4(matrix)).normalize());
+        },
+      });
+      if (trafficLightEmitters.length > 0) {
+        emitters.push(...trafficLightEmitters);
+      } else {
+        effectLights.forEach((effect) => {
+          const effectColor = effect.color || { r: 255, g: 255, b: 255, a: 255 };
+          const localPosition = gtaPositionToThree(
+            Number(effect.position?.x) || 0,
+            Number(effect.position?.y) || 0,
+            Number(effect.position?.z) || 0,
+          );
+          const worldPosition = localPosition.applyMatrix4(worldMatrix);
+          emitters.push({
+            id: `2dfx:${baseId}:${effect.effectIndex ?? 0}`,
+            sourceType: '2dfx',
+            modelName: placement.modelName,
+            placementIndex,
+            position: toPlainVector(worldPosition),
+            color: { ...effectColor, a: 255 },
+            alpha: 255,
+            size: Number(effect.size) || 1,
+            drawDistance: Number(effect.distance) || 0,
+            textureKey: effect.coronaTextureName || 'corona',
+            flareType: Number(effect.flare) || 0,
+            reflection: Number(effect.roadReflection ?? effect.wet) || 0,
+            losCheck: Boolean((effect.flags | 0) & IDE_LIGHT_FLAG.LOS_CHECK),
+            longDistance: Boolean((effect.flags | 0) & IDE_LIGHT_FLAG.LONG_DISTANCE),
+            visibilityMode: map2dfxVisibilityMode(effect.flash),
+            fogType: (effect.flags | 0) & IDE_LIGHT_FLAG.FOG_TYPE_MASK,
+            hideObject: Boolean((effect.flags | 0) & IDE_LIGHT_FLAG.HIDE_OBJECT),
+            shadow: {
+              textureKey: effect.shadowTextureName || '',
+              size: Number(effect.shadowSize ?? effect.innerRange) || 0,
+              intensity: Number(effect.shadowIntensity) || 0,
+            },
+            light: Number(effect.outerRange) > 0 ? {
+              kind: 'point',
+              range: Number(effect.outerRange) || 0,
+              intensity: 1.5,
+              colorScale: 'spriteBrightness',
+            } : null,
+          });
+        });
+      }
+
+      const dffLights = Array.isArray(model?.dffLights) ? model.dffLights : [];
+      dffLights.forEach((light) => {
+        const lightKind = mapDffLightKind(light.lightType);
+        if (!lightKind) return;
+        const worldPosition = new THREE.Vector3(
+          ...(Array.isArray(light.localPosition) ? light.localPosition : [0, 0, 0]),
+        ).applyMatrix4(worldMatrix);
+        const worldDirection = new THREE.Vector3(
+          ...(Array.isArray(light.localDirection) ? light.localDirection : [0, 0, -1]),
+        ).applyMatrix3(directionMatrix)
+          .normalize();
+        const normalizedColor = {
+          r: Math.round(Math.max(0, Math.min(1, Number(light.color?.r) || 0)) * 255),
+          g: Math.round(Math.max(0, Math.min(1, Number(light.color?.g) || 0)) * 255),
+          b: Math.round(Math.max(0, Math.min(1, Number(light.color?.b) || 0)) * 255),
+          a: 255,
+        };
+        emitters.push({
+          id: `dfflight:${baseId}:${light.lightIndex ?? 0}`,
+          sourceType: 'dffLight',
+          modelName: placement.modelName,
+          placementIndex,
+          position: toPlainVector(worldPosition),
+          direction: toPlainVector(worldDirection),
+          color: normalizedColor,
+          drawDistance: Math.max(120, (Number(light.radius) || 0) * 12),
+          frameIndex: Number(light.frameIndex) || 0,
+          lightType: Number(light.lightType) || 0,
+          lightFlags: Number(light.flags) || 0,
+          radius: Number(light.radius) || 0,
+          directionAngle: Number(light.directionAngle) || 0,
+          light: {
+            kind: lightKind,
+            range: Number(light.radius) || 0,
+            intensity: 1.25,
+            directionAngle: Number(light.directionAngle) || 0,
+            penumbra: lightKind === 'spotsoft' ? 0.5 : 0,
+          },
+        });
+      });
+
+      return emitters;
+    };
+
+    const maybeRegisterPlacementEmitters = (placement, placementIndex, worldMatrix, ide, model, lodKind) => {
+      if (lodKind === 'lod') return;
+      if (registeredCoronaPlacements.has(placementIndex)) return;
+      registeredCoronaPlacements.add(placementIndex);
+      const emitters = buildCoronaEmittersForPlacement(placement, placementIndex, worldMatrix, ide, model);
+      if (emitters.length > 0) {
+        placementsWithLights.add(placementIndex);
+        coronaEmitters.push(...emitters);
+      }
+    };
+
+    const buildObjectDetail = (ide, placement, lodKind, model) => {
+      const ideEffects = Array.isArray(ide.effects) ? ide.effects : [];
+      const dffLights = Array.isArray(model.dffLights) ? model.dffLights : [];
+      return {
+        id: ide.id,
+        placementId: placement.id,
+        modelName: ide.modelName,
+        txdName: ide.txdName,
+        flags: ide.flags | 0,
+        activeFlagNames: decodeRwIdeFlags(ide.flags).activeFlags,
+        section: ide.section,
+        drawDistance: ide.drawDistance,
+        lodKind,
+        position: {
+          x: placement.position.x,
+          y: placement.position.y,
+          z: placement.position.z,
+        },
+        rotation: {
+          x: placement.rotation.x,
+          y: placement.rotation.y,
+          z: placement.rotation.z,
+          w: placement.rotation.w,
+        },
+        usedTextureEntries: model.usedTextureEntries || [],
+        ideEffects,
+        dffLights,
+        hasLighting:
+          ideEffects.some((e) => e.kind === 'light') || (dffLights?.length ?? 0) > 0,
+      };
+    };
 
     const canUseInstancing = (model, ide) => {
       if (!ENABLE_WORLD_INSTANCING) return false;
@@ -1865,7 +2113,7 @@ function App() {
       return batch;
     };
 
-    const tryBuildInstancedHandles = async (placement, lodKind, anchor) => {
+    const tryBuildInstancedHandles = async (placement, placementIndex, lodKind, anchor) => {
       const ide = ideByModel.get(placement.modelName) ?? ideById.get(placement.id);
       if (!ide) {
         unresolved += 1;
@@ -1877,6 +2125,7 @@ function App() {
         const model = await getModelTemplate(ide.modelName, ide.txdName);
         if (!canUseInstancing(model, ide)) return null;
         const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
+        maybeRegisterPlacementEmitters(placement, placementIndex, worldMatrix, ide, model, lodKind);
         const handles = [];
         const objectDetail = buildObjectDetail(ide, placement, lodKind, model);
         model.meshDescriptors.forEach((descriptor, descriptorIndex) => {
@@ -1915,7 +2164,7 @@ function App() {
       }
     };
 
-    const buildPlacementObject = async (placement, lodKind, anchor) => {
+    const buildPlacementObject = async (placement, placementIndex, lodKind, anchor) => {
       const ide = ideByModel.get(placement.modelName) ?? ideById.get(placement.id);
       if (!ide) {
         unresolved += 1;
@@ -1926,6 +2175,7 @@ function App() {
       try {
         const model = await getModelTemplate(ide.modelName, ide.txdName);
         const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
+        maybeRegisterPlacementEmitters(placement, placementIndex, worldMatrix, ide, model, lodKind);
 
         const instance = SkeletonUtils.clone(model.template);
         instance.applyMatrix4(worldMatrix);
@@ -1985,8 +2235,8 @@ function App() {
         const nearDef = getPlacementDef(placement);
         const lodDef = getPlacementDef(lodPlacement);
         const isTobj = nearDef?.section === 'tobjs';
-        const nearObj = await buildPlacementObject(placement, 'near', anchor);
-        const lodObj = await buildPlacementObject(lodPlacement, 'lod', lodAnchor);
+        const nearObj = await buildPlacementObject(placement, index, 'near', anchor);
+        const lodObj = await buildPlacementObject(lodPlacement, lodIndex, 'lod', lodAnchor);
         if (nearObj || lodObj) {
           registerRenderItem({
             isTobj,
@@ -2023,8 +2273,8 @@ function App() {
         const anchor = placementAnchors[index];
         const nearDef = getPlacementDef(placement);
         const isTobj = nearDef?.section === 'tobjs';
-        const nearInstanced = await tryBuildInstancedHandles(placement, 'near', anchor);
-        const nearObj = nearInstanced ? null : await buildPlacementObject(placement, 'near', anchor);
+        const nearInstanced = await tryBuildInstancedHandles(placement, index, 'near', anchor);
+        const nearObj = nearInstanced ? null : await buildPlacementObject(placement, index, 'near', anchor);
         if (nearObj || nearInstanced) {
           registerRenderItem({
             isTobj,
@@ -2061,8 +2311,8 @@ function App() {
         const anchor = placementAnchors[index];
         const lodDef = getPlacementDef(placement);
         const isTobj = lodDef?.section === 'tobjs';
-        const lodInstanced = await tryBuildInstancedHandles(placement, 'lod', anchor);
-        const lodObj = lodInstanced ? null : await buildPlacementObject(placement, 'lod', anchor);
+        const lodInstanced = await tryBuildInstancedHandles(placement, index, 'lod', anchor);
+        const lodObj = lodInstanced ? null : await buildPlacementObject(placement, index, 'lod', anchor);
         if (lodObj || lodInstanced) {
           registerRenderItem({
             isTobj,
@@ -2130,6 +2380,42 @@ function App() {
       }
 
       jsrwSessionRef.current.setWaterRuntime(pendingWaterPipeline);
+      log2dfxDebug('info', `[2DFX] corona emitters discovered: ${coronaEmitters.length}`);
+      if (coronaEmitters.length > 0) {
+        const coronaTextureDictionary = await buildCoronaTextureDictionary(coronaEmitters);
+        const coronaRuntime = jsrwSessionRef.current.createCoronaRuntime({
+          root: worldRoot,
+          emitters: coronaEmitters,
+          textureDictionary: coronaTextureDictionary,
+          enableDebugHelpers: true,
+        });
+        coronaRuntime.setEnabled(uiStateRef.current.render2dfx);
+        coronaRuntime.setDebugShowAll(uiStateRef.current.debug2dfx);
+        const coronaBindings = Array.isArray(coronaRuntime?.raw?.entries)
+          ? coronaRuntime.raw.entries
+            .filter((entry) => entry?.emitter?.sourceType === '2dfx')
+            .map((entry) => ({
+              textureKey: String(entry?.emitter?.textureKey || ''),
+              hasTexture: Boolean(entry?.sprite?.material?.map),
+              appliedName: entry?.sprite?.material?.map?.name || '',
+            }))
+          : [];
+        if (coronaBindings.length > 0) {
+          const groupedBindings = Array.from(new Map(
+            coronaBindings.map((binding) => [binding.textureKey, binding]),
+          ).values());
+          groupedBindings.forEach((binding) => {
+            log2dfxDebug(
+              binding.hasTexture ? 'info' : 'warn',
+              `[2DFX] apply ${binding.textureKey}: ${binding.hasTexture ? `ok (${binding.appliedName || 'unnamed'})` : 'failed (material.map missing)'}`,
+            );
+          });
+        }
+        log2dfxDebug('info', `[2DFX] corona emitters ready: ${coronaEmitters.length}`);
+      } else {
+        log2dfxDebug('warn', '[2DFX] no corona emitters were created');
+        jsrwSessionRef.current.disposeCoronaRuntime();
+      }
       renderItemsRef.current = renderItems;
       renderChunksRef.current = Array.from(renderChunkMap.values());
       jsrwSessionRef.current.setBackend(activeBackend);
@@ -2175,6 +2461,8 @@ function App() {
         totalChunks: renderChunkMap.size,
         instancedBatches: instancedBatchMap.size,
         instancedItems,
+        lightObjects: placementsWithLights.size,
+        lightEmitters: coronaEmitters.length,
       }));
       pushConsoleLine('info', `Chunk visible set: ${renderChunkMap.size} chunks`);
       pushConsoleLine('info', `Instanced batches: ${instancedBatchMap.size}, instanced placements: ${instancedItems}`);
@@ -2513,6 +2801,9 @@ function App() {
     }
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.NoToneMapping;
+    if (renderer.info) {
+      renderer.info.autoReset = false;
+    }
 
     canvas.tabIndex = 1;
 
@@ -3079,6 +3370,7 @@ function App() {
         fpsHistoryRef.current[fpsHistoryIndexRef.current] = fps;
         fpsHistoryIndexRef.current = (fpsHistoryIndexRef.current + 1) % fpsHistoryRef.current.length;
       }
+      renderer.info?.reset?.();
 
       if (dt > 0) {
         if (playerModeManager.isTestMode()) {
@@ -3616,13 +3908,12 @@ function App() {
           batch.mesh.boundingSphere = null;
         }
         renderMetricsRef.current = {
+          ...renderMetricsRef.current,
           activeChunks,
           frustumChunks,
           activeItems,
           visibleNear,
           visibleLod,
-          drawCalls: renderer.info.render.calls,
-          triangles: renderer.info.render.triangles,
         };
         activeFadeCountRef.current = activeFades;
         lodState.needsRefresh = activeFades > 0;
@@ -3692,10 +3983,23 @@ function App() {
       } else {
 
         const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
+        const coronaRuntime = jsrwSessionRef.current.getCoronaRuntime();
+        coronaRuntime?.setEnabled(uiStateRef.current.render2dfx);
+        coronaRuntime?.setDebugShowAll(uiStateRef.current.debug2dfx);
         waterPipeline?.applySettings({
           uvSpeed: uiStateRef.current.waterUvSpeed,
           waveHeight: uiStateRef.current.waterWaveHeight,
           farAlpha: uiStateRef.current.waterAlpha,
+        });
+        coronaRuntime?.setViewport(viewportWidth, viewportHeight);
+        coronaRuntime?.update(camera, {
+          ...pipelineRuntimeContext,
+          timeMs: time,
+          dt,
+          viewportWidth,
+          viewportHeight,
+          forceRender2dfx: uiStateRef.current.forceRender2dfx,
+          trafficLights: uiStateRef.current.trafficLights,
         });
         const skyScene = skySceneRef.current;
         const skyCamera = skyCameraRef.current;
@@ -3750,6 +4054,8 @@ function App() {
               rwRenderQueue?.pushCameraBucketMask(camera, ['transparent', 'additive', 'overlay']);
               renderer.render(scene, camera);
               rwRenderQueue?.popCameraBucketMask(camera);
+              renderer.clearDepth();
+              coronaRuntime?.render(renderer);
               renderer.autoClear = true;
             } catch (waterError) {
               rwRenderQueue?.popCameraBucketMask(camera);
@@ -3774,12 +4080,16 @@ function App() {
               rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
               renderer.render(scene, camera);
               rwRenderQueue?.popCameraBucketMask(camera);
+              renderer.clearDepth();
+              coronaRuntime?.render(renderer);
             }
           } else {
             renderer.autoClear = false;
             rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
             renderer.render(scene, camera);
             rwRenderQueue?.popCameraBucketMask(camera);
+            renderer.clearDepth();
+            coronaRuntime?.render(renderer);
           }
           if (postFxSceneTarget && postFxSunCoronaEnabled) {
             renderer.clearDepth();
@@ -3834,6 +4144,11 @@ function App() {
           rafId = window.requestAnimationFrame(animate);
           return;
         }
+        renderMetricsRef.current = {
+          ...renderMetricsRef.current,
+          drawCalls: renderer.info?.render?.calls ?? 0,
+          triangles: renderer.info?.render?.triangles ?? 0,
+        };
       }
 
       const { ImGui, ImGui_Impl, ready } = imguiRef.current;
@@ -3977,6 +4292,20 @@ function App() {
           'Show TOBJs',
           (value = uiStateRef.current.showTobjs) => {
             uiStateRef.current.showTobjs = value;
+            return value;
+          },
+        );
+        ImGui.Checkbox(
+          'Render 2DFX',
+          (value = uiStateRef.current.render2dfx) => {
+            uiStateRef.current.render2dfx = value;
+            return value;
+          },
+        );
+        ImGui.Checkbox(
+          'Force Render 2DFX',
+          (value = uiStateRef.current.forceRender2dfx) => {
+            uiStateRef.current.forceRender2dfx = value;
             return value;
           },
         );
@@ -4271,6 +4600,13 @@ function App() {
                 ImGui.EndChild();
               }
               ImGui.Text(`Draw Distance: ${Number.isFinite(detail.drawDistance) ? detail.drawDistance : 'N/A'}`);
+              const ideEffects = Array.isArray(detail.ideEffects) ? detail.ideEffects : [];
+              const ideLights = ideEffects.filter((e) => e.kind === 'light');
+              const dffLights = Array.isArray(detail.dffLights) ? detail.dffLights : [];
+              const lightSummary = detail.hasLighting
+                ? `yes (${ideLights.length} 2DFX, ${dffLights.length} DFF)`
+                : 'no';
+              ImGui.Text(`Lighting: ${lightSummary}`);
             }
             if (ImGui.CollapsingHeader('Transform', defaultOpen)) {
               ImGui.Text(
@@ -4279,6 +4615,34 @@ function App() {
               ImGui.Text(
                 `Rotation(q): ${detail.rotation.x.toFixed(6)}, ${detail.rotation.y.toFixed(6)}, ${detail.rotation.z.toFixed(6)}, ${detail.rotation.w.toFixed(6)}`,
               );
+            }
+            if (ImGui.CollapsingHeader('Lighting', defaultOpen)) {
+              const ideEffects = Array.isArray(detail.ideEffects) ? detail.ideEffects : [];
+              const ideLights = ideEffects.filter((e) => e.kind === 'light');
+              const dffLights = Array.isArray(detail.dffLights) ? detail.dffLights : [];
+              ImGui.Text(`Has Lighting: ${detail.hasLighting ? 'yes' : 'no'}`);
+              ImGui.Text(`IDE 2DFX lights: ${ideLights.length}`);
+              ImGui.Text(`DFF RW lights: ${dffLights.length}`);
+              if (ideLights.length > 0) {
+                ImGui.SeparatorText?.('2DFX');
+                ImGui.BeginChild('obj-2dfx-lights', new Vec2(0, 110), true);
+                for (const effect of ideLights) {
+                  ImGui.TextWrapped(
+                    `#${effect.effectIndex ?? 0} ${effect.coronaTextureName || 'corona'} dist=${Number(effect.distance || 0).toFixed(2)} size=${Number(effect.size || 0).toFixed(2)} outerRange=${Number(effect.outerRange || 0).toFixed(2)}`,
+                  );
+                }
+                ImGui.EndChild();
+              }
+              if (dffLights.length > 0) {
+                ImGui.SeparatorText?.('DFF');
+                ImGui.BeginChild('obj-dff-lights', new Vec2(0, 110), true);
+                for (const light of dffLights) {
+                  ImGui.TextWrapped(
+                    `#${light.lightIndex ?? 0} type=${light.lightType} flags=${light.flags} radius=${Number(light.radius || 0).toFixed(2)} frame=${light.frameIndex ?? -1}`,
+                  );
+                }
+                ImGui.EndChild();
+              }
             }
             if (ImGui.CollapsingHeader('Textures In Model', defaultOpen)) {
               const items = Array.isArray(detail.usedTextureEntries) ? detail.usedTextureEntries : [];
@@ -4381,15 +4745,15 @@ function App() {
             const fpsAvg = fpsCount > 0 ? (fpsSum / fpsCount) : 0;
             const fpsCurrentIndex = (fpsHistoryIndexRef.current - 1 + fpsValues.length) % fpsValues.length;
             const fpsCurrent = fpsValues[fpsCurrentIndex] || 0;
-            const rendererInfo = rendererRef.current?.info?.render;
             const renderMetrics = renderMetricsRef.current;
             ImGui.Text(`FPS: ${fpsCurrent.toFixed(1)} | avg ${fpsAvg.toFixed(1)} | min ${fpsCount > 0 ? fpsMin.toFixed(1) : '0.0'} | max ${fpsMax.toFixed(1)}`);
-            ImGui.Text(`Draw Calls: ${rendererInfo?.calls ?? renderMetrics.drawCalls}`);
-            ImGui.Text(`Triangles: ${rendererInfo?.triangles ?? renderMetrics.triangles}`);
+            ImGui.Text(`Draw Calls: ${renderMetrics.drawCalls}`);
+            ImGui.Text(`Triangles: ${renderMetrics.triangles}`);
             ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
             ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
             ImGui.Text(`Visible: near ${renderMetrics.visibleNear} | lod ${renderMetrics.visibleLod}`);
             ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
+            ImGui.Text(`Lighting: IDE 2DFX ${statsRef.current.ideEffects} | objects ${statsRef.current.lightObjects} | emitters ${statsRef.current.lightEmitters}`);
             ImGui.Text('FPS Graph');
             const fpsPlotValues = Array.from({ length: fpsValues.length }, (_, i) => {
               const idx = (fpsHistoryIndexRef.current + i) % fpsValues.length;
@@ -4942,6 +5306,110 @@ function App() {
               renderImguiSliderRow(ImGui, { id: 'sparkle-min', rowPrefix: 'stars-row', label: 'Sparkle Min Flicker', value: starsSettings.sparkleMinFlicker, setValue: (value) => { starsSettings.sparkleMinFlicker = value; }, min: 0, max: 1 });
               renderImguiSliderRow(ImGui, { id: 'sparkle-range', rowPrefix: 'stars-row', label: 'Sparkle Flicker Range', value: starsSettings.sparkleFlickerRange, setValue: (value) => { starsSettings.sparkleFlickerRange = value; }, min: 0, max: 1 });
               ImGui.TextWrapped('RW mapping: stars are the fixed Rockstar-logo sprite pattern from Clouds.cpp plus the flickering star, using particle/coronastar and the original night visibility curve with weather coverage dimming.');
+              ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem('2DFX')) {
+              ImGui.TextWrapped('2DFX coronas are billboard sprites sourced from particle.txd-style textures, with optional debug helpers and forced daytime rendering.');
+              ImGui.Checkbox(
+                'Render 2DFX',
+                (value = uiStateRef.current.render2dfx) => {
+                  uiStateRef.current.render2dfx = value;
+                  return value;
+                },
+              );
+              ImGui.Checkbox(
+                'Debug 2DFX',
+                (value = uiStateRef.current.debug2dfx) => {
+                  uiStateRef.current.debug2dfx = value;
+                  return value;
+                },
+              );
+              ImGui.Checkbox(
+                'Force Render 2DFX',
+                (value = uiStateRef.current.forceRender2dfx) => {
+                  uiStateRef.current.forceRender2dfx = value;
+                  return value;
+                },
+              );
+              ImGui.Text(`IDE 2DFX defs: ${statsRef.current.ideEffects}`);
+              ImGui.Text(`Active emitters: ${statsRef.current.lightEmitters}`);
+              ImGui.Text(`Objects with lights: ${statsRef.current.lightObjects}`);
+              ImGui.TextDisabled('Force Render 2DFX bypasses the original night/flicker schedule for 2DFX emitters only.');
+              ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem('Traffic Light')) {
+              const trafficSettings = uiStateRef.current.trafficLights;
+              ImGui.TextWrapped('Traffic light coronas follow revc-style model-specific lamp selection, phase switching, and camera-facing side selection.');
+              ImGui.Checkbox(
+                'Render Traffic Lights',
+                (value = trafficSettings.enabled) => {
+                  trafficSettings.enabled = value;
+                  return value;
+                },
+              );
+              ImGui.Checkbox(
+                'Debug 2DFX Helpers',
+                (value = uiStateRef.current.debug2dfx) => {
+                  uiStateRef.current.debug2dfx = value;
+                  return value;
+                },
+              );
+              ImGui.Checkbox(
+                'Ignore Facing',
+                (value = trafficSettings.ignoreFacing) => {
+                  trafficSettings.ignoreFacing = value;
+                  return value;
+                },
+              );
+              const phaseOptions = ['auto', 'red', 'yellow', 'green'];
+              if (ImGui.BeginCombo('Force Phase', String(trafficSettings.forcePhase || 'auto'))) {
+                for (const option of phaseOptions) {
+                  const selected = trafficSettings.forcePhase === option;
+                  if (ImGui.Selectable(option, selected)) {
+                    trafficSettings.forcePhase = option;
+                  }
+                  if (selected) ImGui.SetItemDefaultFocus();
+                }
+                ImGui.EndCombo();
+              }
+              ImGui.Checkbox(
+                'Wind Blinking',
+                (value = trafficSettings.windBlinking) => {
+                  trafficSettings.windBlinking = value;
+                  return value;
+                },
+              );
+              renderImguiSliderRow(ImGui, {
+                id: 'traffic-wind-strength',
+                rowPrefix: 'traffic-light-row',
+                label: 'Wind Strength',
+                value: trafficSettings.windStrength,
+                setValue: (value) => { trafficSettings.windStrength = value; },
+                min: 0,
+                max: 2,
+              });
+              renderImguiSliderRow(ImGui, {
+                id: 'traffic-brightness-scale',
+                rowPrefix: 'traffic-light-row',
+                label: 'Brightness Scale',
+                value: trafficSettings.brightnessScale,
+                setValue: (value) => { trafficSettings.brightnessScale = value; },
+                min: 0,
+                max: 2,
+              });
+              renderImguiSliderRow(ImGui, {
+                id: 'traffic-size-scale',
+                rowPrefix: 'traffic-light-row',
+                label: 'Size Scale',
+                value: trafficSettings.sizeScale,
+                setValue: (value) => { trafficSettings.sizeScale = value; },
+                min: 0.1,
+                max: 3,
+              });
+              ImGui.Text('Cars1 visual: green 5000ms, yellow 1000ms, else red');
+              ImGui.Text('Cars2 visual: red 6000ms, green 5000ms, yellow 1000ms, else red');
+              ImGui.Text(`Total light emitters: ${statsRef.current.lightEmitters}`);
+              ImGui.TextDisabled('Ignore Facing shows both sides. Force Phase overrides the revc Cars1/Cars2 visual schedule.');
               ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem('Backend')) {

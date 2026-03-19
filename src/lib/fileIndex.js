@@ -1,4 +1,4 @@
-import { normalizePath } from './gtaParsers';
+import { normalizePath } from './gta/loaders/SectionLoader';
 
 function basename(path) {
   const chunks = path.split('/');

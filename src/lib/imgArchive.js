@@ -1,4 +1,4 @@
-import { normalizePath } from './gtaParsers';
+import { normalizePath } from './gta/loaders/SectionLoader';
 
 const IMG_SECTOR_SIZE = 2048;
 const DIR_ENTRY_SIZE = 32;

@@ -146,17 +146,29 @@ class DFFReader {
       case ChunkType.CHUNK_CLUMP: {
         const header = this.readHeader();
         const numAtomics = this.readUInt32();
+        let numLights = 0;
+        let numCameras = 0;
         if (header.length === 0xC) {
-          this.readUInt32();
-          this.readUInt32();
+          numLights = this.readUInt32();
+          numCameras = this.readUInt32();
         }
         data = {
           RWFrameList: this.readChunk(ChunkType.CHUNK_FRAMELIST),
           RWGeometryList: this.readChunk(ChunkType.CHUNK_GEOMETRYLIST),
+          RWLightList: [],
+          RWCameraList: [],
           RWAtomicList: [],
         };
         for (let i = 0; i < numAtomics; i += 1) {
           data.RWAtomicList[i] = this.readChunk(ChunkType.CHUNK_ATOMIC);
+        }
+        for (let i = 0; i < numLights; i += 1) {
+          const light = this.readChunk(ChunkType.CHUNK_LIGHT);
+          if (light) data.RWLightList.push(light);
+        }
+        for (let i = 0; i < numCameras; i += 1) {
+          const camera = this.readChunk(ChunkType.CHUNK_CAMERA);
+          if (camera) data.RWCameraList.push(camera);
         }
         this.readExtension(data);
         break;
@@ -367,6 +379,30 @@ class DFFReader {
         };
         this.readUInt32();
         this.readExtension(data);
+        break;
+      }
+
+      case ChunkType.CHUNK_LIGHT: {
+        this.readHeader();
+        data = {
+          frameIndex: this.readUInt32(),
+          radius: this.readFloat32(),
+          color: {
+            r: this.readFloat32(),
+            g: this.readFloat32(),
+            b: this.readFloat32(),
+          },
+          directionAngle: this.readFloat32(),
+          flags: this.readUInt16(),
+          lightType: this.readUInt16(),
+        };
+        this.readExtension(data);
+        break;
+      }
+
+      case ChunkType.CHUNK_CAMERA: {
+        data = {};
+        this.position += chunkHeader.length;
         break;
       }
 

@@ -1,4 +1,4 @@
-import { normalizePath as normalizeRawPath } from '../../gtaParsers';
+import { normalizePath as normalizeRawPath } from '../loaders/SectionLoader';
 
 export function normalizePath(input = '') {
   return normalizeRawPath(String(input || ''));

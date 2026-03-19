@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 
+const RW_TO_THREE_LOCAL_MATRIX = new THREE.Matrix4().makeRotationFromEuler(
+  new THREE.Euler(-Math.PI / 2, 0, Math.PI),
+);
+const RW_TO_THREE_LOCAL_NORMAL_MATRIX = new THREE.Matrix3().setFromMatrix4(RW_TO_THREE_LOCAL_MATRIX);
+
 export class ThreeDffFactory {
   constructor(options = {}) {
     this.textureDictionary = options.textureDictionary || null;
@@ -14,6 +19,7 @@ export class ThreeDffFactory {
   create(clump) {
     const group = new THREE.Group();
     if (!clump) return group;
+    const frameTransforms = this.buildFrameTransforms(clump.RWFrameList || []);
 
     const meshes = [];
     const meshesByGeometry = [];
@@ -212,7 +218,70 @@ export class ThreeDffFactory {
       group.add(mesh);
     });
 
+    group.userData = {
+      ...(group.userData || {}),
+      rwDffLights: this.buildDffLights(clump, frameTransforms),
+    };
+
     return group;
+  }
+
+  buildFrameTransforms(frameList = []) {
+    return frameList.map((frame, index) => {
+      const rwFrame = frame?.RWFrame || {};
+      const localMatrix = new THREE.Matrix4();
+      localMatrix.set(
+        rwFrame.rotationMatrix?.[0] ?? 1, rwFrame.rotationMatrix?.[3] ?? 0, rwFrame.rotationMatrix?.[6] ?? 0, rwFrame.position?.[0] ?? 0,
+        rwFrame.rotationMatrix?.[1] ?? 0, rwFrame.rotationMatrix?.[4] ?? 1, rwFrame.rotationMatrix?.[7] ?? 0, rwFrame.position?.[1] ?? 0,
+        rwFrame.rotationMatrix?.[2] ?? 0, rwFrame.rotationMatrix?.[5] ?? 0, rwFrame.rotationMatrix?.[8] ?? 1, rwFrame.position?.[2] ?? 0,
+        0, 0, 0, 1,
+      );
+      const worldMatrix = localMatrix.clone();
+      const parentIndex = Number.isInteger(rwFrame.parentIndex) ? rwFrame.parentIndex : -1;
+      if (parentIndex >= 0 && parentIndex < index) {
+        worldMatrix.premultiply(frameList[parentIndex]?.__worldMatrix || new THREE.Matrix4());
+      }
+      frame.__worldMatrix = worldMatrix.clone();
+      const rwPosition = new THREE.Vector3();
+      const rwQuaternion = new THREE.Quaternion();
+      const rwScale = new THREE.Vector3();
+      worldMatrix.decompose(rwPosition, rwQuaternion, rwScale);
+      const localPosition = rwPosition.clone().applyMatrix4(RW_TO_THREE_LOCAL_MATRIX);
+      const localDirection = new THREE.Vector3(0, 0, -1)
+        .applyQuaternion(rwQuaternion)
+        .applyMatrix3(RW_TO_THREE_LOCAL_NORMAL_MATRIX)
+        .normalize();
+      return {
+        index,
+        parentIndex,
+        worldMatrix,
+        localPosition,
+        localDirection,
+      };
+    });
+  }
+
+  buildDffLights(clump, frameTransforms = []) {
+    const lights = Array.isArray(clump?.RWLightList) ? clump.RWLightList : [];
+    return lights.map((light, lightIndex) => {
+      const frameIndex = Number.isInteger(light?.frameIndex) ? light.frameIndex : -1;
+      const frameTransform = frameTransforms[frameIndex] || null;
+      return {
+        lightIndex,
+        frameIndex,
+        radius: Number(light?.radius) || 0,
+        color: {
+          r: Number(light?.color?.r) || 0,
+          g: Number(light?.color?.g) || 0,
+          b: Number(light?.color?.b) || 0,
+        },
+        directionAngle: Number(light?.directionAngle) || 0,
+        flags: Number(light?.flags) || 0,
+        lightType: Number(light?.lightType) || 0,
+        localPosition: frameTransform?.localPosition?.toArray?.() || [0, 0, 0],
+        localDirection: frameTransform?.localDirection?.toArray?.() || [0, 0, -1],
+      };
+    });
   }
 
   createMaterial(matData, hasColors) {

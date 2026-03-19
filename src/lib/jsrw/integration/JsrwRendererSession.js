@@ -1,5 +1,6 @@
 import RWPipelineController from '../core/pipeline/controller.js';
 import { WaterRuntime } from '../renderer/water/WaterRuntime.js';
+import { CoronaRuntime } from '../renderer/corona/CoronaRuntime.js';
 import WebGLRenderBackend from '../backends/webgl/WebGLRenderBackend.js';
 import WebGPURenderBackend from '../backends/webgpu/WebGPURenderBackend.js';
 import { RWRenderQueue } from './three/RWRenderQueue.js';
@@ -14,6 +15,7 @@ export class JsrwRendererSession {
   constructor(options = {}) {
     this.pipelineController = options.pipelineController || new RWPipelineController();
     this.waterRuntime = null;
+    this.coronaRuntime = null;
     this.backend = createBackend(options.activeBackend || 'WebGL');
     this.renderQueue = null;
   }
@@ -33,6 +35,7 @@ export class JsrwRendererSession {
 
   setRoot(root) {
     this.pipelineController.setRoot(root);
+    this.coronaRuntime?.setRoot?.(root);
     if (!this.renderQueue) {
       this.renderQueue = new RWRenderQueue(root);
     } else {
@@ -105,6 +108,33 @@ export class JsrwRendererSession {
     return this.waterRuntime;
   }
 
+  createCoronaRuntime(options) {
+    this.coronaRuntime?.dispose();
+    this.coronaRuntime = new CoronaRuntime({
+      ...options,
+      root: options?.root || this.pipelineController.root || null,
+      backend: this.backend,
+    });
+    return this.coronaRuntime;
+  }
+
+  getCoronaRuntime() {
+    return this.coronaRuntime;
+  }
+
+  setCoronaRuntime(runtime) {
+    if (this.coronaRuntime === runtime) return this.coronaRuntime;
+    this.disposeCoronaRuntime();
+    this.coronaRuntime = runtime || null;
+    this.coronaRuntime?.setRoot?.(this.pipelineController.root || null);
+    return this.coronaRuntime;
+  }
+
+  disposeCoronaRuntime() {
+    this.coronaRuntime?.dispose();
+    this.coronaRuntime = null;
+  }
+
   setWaterRuntime(runtime) {
     if (this.waterRuntime === runtime) return this.waterRuntime;
     this.disposeWaterRuntime();
@@ -119,6 +149,7 @@ export class JsrwRendererSession {
 
   dispose() {
     this.disposeWaterRuntime();
+    this.disposeCoronaRuntime();
   }
 }
 
