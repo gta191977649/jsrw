@@ -90,6 +90,16 @@ const TRAFFIC_LIGHT_DEBUG_DEFAULTS = Object.freeze({
   brightnessScale: 0.7,
   sizeScale: 1,
 });
+const SHADOW_DEBUG_DEFAULTS = Object.freeze({
+  enabled: true,
+  wireframe: false,
+  rebuildEveryFrame: false,
+  intensityScale: 1,
+  sizeScale: 1,
+  zDistanceScale: 1,
+  drawDistanceScale: 1,
+  heightBias: 0.03,
+});
 const RW_DFF_LIGHT_TYPE = Object.freeze({
   DIRECTIONAL: 0x01,
   AMBIENT: 0x02,
@@ -882,6 +892,7 @@ function App() {
     debug2dfx: false,
     forceRender2dfx: false,
     trafficLights: { ...TRAFFIC_LIGHT_DEBUG_DEFAULTS },
+    shadows: { ...SHADOW_DEBUG_DEFAULTS },
     streamingBuild: true,
     backgroundPreloadRadius: 1.5,
     showGrid: true,
@@ -1395,7 +1406,10 @@ function App() {
         const mergedDictionary = new Map(particleTextureDictionary ? Array.from(particleTextureDictionary.entries()) : []);
         const textureKeys = Array.from(new Set(
           (emitters || [])
-            .map((emitter) => String(emitter?.textureKey || '').trim().toLowerCase())
+            .flatMap((emitter) => [
+              String(emitter?.textureKey || '').trim().toLowerCase(),
+              String(emitter?.shadow?.textureKey || (Number(emitter?.shadow?.size) > 0 ? 'shad_exp' : '')).trim().toLowerCase(),
+            ])
             .filter(Boolean),
         ));
 
@@ -1970,6 +1984,10 @@ function App() {
               textureKey: effect.shadowTextureName || '',
               size: Number(effect.shadowSize ?? effect.innerRange) || 0,
               intensity: Number(effect.shadowIntensity) || 0,
+              front: toPlainVector(gtaPositionToThree(Number(effect.shadowSize ?? effect.innerRange) || 0, 0, 0)),
+              side: toPlainVector(gtaPositionToThree(0, -(Number(effect.shadowSize ?? effect.innerRange) || 0), 0)),
+              zDistance: 15,
+              drawDistance: 40,
             },
             light: Number(effect.outerRange) > 0 ? {
               kind: 'point',
@@ -2411,10 +2429,17 @@ function App() {
             );
           });
         }
+        const shadowRuntime = jsrwSessionRef.current.createShadowRuntime({
+          root: worldRoot,
+          emitters: coronaEmitters,
+          textureDictionary: coronaTextureDictionary,
+        });
+        shadowRuntime.setEnabled(uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled);
         log2dfxDebug('info', `[2DFX] corona emitters ready: ${coronaEmitters.length}`);
       } else {
         log2dfxDebug('warn', '[2DFX] no corona emitters were created');
         jsrwSessionRef.current.disposeCoronaRuntime();
+        jsrwSessionRef.current.disposeShadowRuntime();
       }
       renderItemsRef.current = renderItems;
       renderChunksRef.current = Array.from(renderChunkMap.values());
@@ -3984,7 +4009,9 @@ function App() {
 
         const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
         const coronaRuntime = jsrwSessionRef.current.getCoronaRuntime();
+        const shadowRuntime = jsrwSessionRef.current.getShadowRuntime();
         coronaRuntime?.setEnabled(uiStateRef.current.render2dfx);
+        shadowRuntime?.setEnabled(uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled);
         coronaRuntime?.setDebugShowAll(uiStateRef.current.debug2dfx);
         waterPipeline?.applySettings({
           uvSpeed: uiStateRef.current.waterUvSpeed,
@@ -4000,6 +4027,16 @@ function App() {
           viewportHeight,
           forceRender2dfx: uiStateRef.current.forceRender2dfx,
           trafficLights: uiStateRef.current.trafficLights,
+        });
+        shadowRuntime?.update(camera, {
+          ...pipelineRuntimeContext,
+          timeMs: time,
+          dt,
+          viewportWidth,
+          viewportHeight,
+          forceRender2dfx: uiStateRef.current.forceRender2dfx,
+          trafficLights: uiStateRef.current.trafficLights,
+          shadows: uiStateRef.current.shadows,
         });
         const skyScene = skySceneRef.current;
         const skyCamera = skyCameraRef.current;
@@ -4054,7 +4091,6 @@ function App() {
               rwRenderQueue?.pushCameraBucketMask(camera, ['transparent', 'additive', 'overlay']);
               renderer.render(scene, camera);
               rwRenderQueue?.popCameraBucketMask(camera);
-              renderer.clearDepth();
               coronaRuntime?.render(renderer);
               renderer.autoClear = true;
             } catch (waterError) {
@@ -4080,7 +4116,6 @@ function App() {
               rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
               renderer.render(scene, camera);
               rwRenderQueue?.popCameraBucketMask(camera);
-              renderer.clearDepth();
               coronaRuntime?.render(renderer);
             }
           } else {
@@ -4088,7 +4123,6 @@ function App() {
             rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
             renderer.render(scene, camera);
             rwRenderQueue?.popCameraBucketMask(camera);
-            renderer.clearDepth();
             coronaRuntime?.render(renderer);
           }
           if (postFxSceneTarget && postFxSunCoronaEnabled) {
@@ -5410,6 +5444,88 @@ function App() {
               ImGui.Text('Cars2 visual: red 6000ms, green 5000ms, yellow 1000ms, else red');
               ImGui.Text(`Total light emitters: ${statsRef.current.lightEmitters}`);
               ImGui.TextDisabled('Ignore Facing shows both sides. Force Phase overrides the revc Cars1/Cars2 visual schedule.');
+              ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem('Shadow')) {
+              const shadowSettings = uiStateRef.current.shadows;
+              const shadowStats = jsrwSessionRef.current.getShadowRuntime()?.raw?.debugStats || {};
+              ImGui.TextWrapped('RW shadows are handled by a dedicated shadow runtime, separate from coronas, and project additive shadow geometry onto scene collision.');
+              ImGui.Checkbox(
+                'Render Shadows',
+                (value = shadowSettings.enabled) => {
+                  shadowSettings.enabled = value;
+                  return value;
+                },
+              );
+              ImGui.Checkbox(
+                'Wireframe Shadows',
+                (value = shadowSettings.wireframe) => {
+                  shadowSettings.wireframe = value;
+                  return value;
+                },
+              );
+              ImGui.Checkbox(
+                'Rebuild Every Frame',
+                (value = shadowSettings.rebuildEveryFrame) => {
+                  shadowSettings.rebuildEveryFrame = value;
+                  return value;
+                },
+              );
+              renderImguiSliderRow(ImGui, {
+                id: 'shadow-intensity-scale',
+                rowPrefix: 'shadow-row',
+                label: 'Intensity Scale',
+                value: shadowSettings.intensityScale,
+                setValue: (value) => { shadowSettings.intensityScale = value; },
+                min: 0,
+                max: 4,
+              });
+              renderImguiSliderRow(ImGui, {
+                id: 'shadow-size-scale',
+                rowPrefix: 'shadow-row',
+                label: 'Size Scale',
+                value: shadowSettings.sizeScale,
+                setValue: (value) => { shadowSettings.sizeScale = value; },
+                min: 0.1,
+                max: 4,
+              });
+              renderImguiSliderRow(ImGui, {
+                id: 'shadow-z-distance-scale',
+                rowPrefix: 'shadow-row',
+                label: 'Z Distance Scale',
+                value: shadowSettings.zDistanceScale,
+                setValue: (value) => { shadowSettings.zDistanceScale = value; },
+                min: 0.1,
+                max: 4,
+              });
+              renderImguiSliderRow(ImGui, {
+                id: 'shadow-draw-distance-scale',
+                rowPrefix: 'shadow-row',
+                label: 'Draw Distance Scale',
+                value: shadowSettings.drawDistanceScale,
+                setValue: (value) => { shadowSettings.drawDistanceScale = value; },
+                min: 0.1,
+                max: 4,
+              });
+              renderImguiSliderRow(ImGui, {
+                id: 'shadow-height-bias',
+                rowPrefix: 'shadow-row',
+                label: 'Height Bias',
+                value: shadowSettings.heightBias,
+                setValue: (value) => { shadowSettings.heightBias = value; },
+                min: 0,
+                max: 0.25,
+              });
+              ImGui.Text(`Shadow entries: ${shadowStats.entryCount || 0}`);
+              ImGui.Text(`Projected: ${shadowStats.projectedCount || 0}`);
+              ImGui.Text(`Visible: ${shadowStats.visibleCount || 0}`);
+              ImGui.Text(`Rebuilt this frame: ${shadowStats.rebuiltCount || 0}`);
+              ImGui.Text(`Missing texture: ${shadowStats.missingTextureCount || 0}`);
+              ImGui.Text(`Zero intensity: ${shadowStats.zeroIntensityCount || 0}`);
+              ImGui.Text(`Out of range: ${shadowStats.outOfRangeCount || 0}`);
+              ImGui.Text(`Rebuild failed: ${shadowStats.rebuildFailedCount || 0}`);
+              ImGui.Text(`Fallback corners: ${shadowStats.fallbackCornerCount || 0}`);
+              ImGui.TextDisabled('Rebuild Every Frame is expensive and is intended only for shadow debugging.');
               ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem('Backend')) {

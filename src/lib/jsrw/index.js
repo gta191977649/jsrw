@@ -70,6 +70,8 @@ export { PostFxRuntime } from './renderer/postfx/PostFxRuntime.js';
 export { RWPostFxPipeline } from './renderer/postfx/RWPostFxPipeline.js';
 export { CoronaRuntime } from './renderer/corona/CoronaRuntime.js';
 export { RWCoronaPipeline } from './renderer/corona/RWCoronaPipeline.js';
+export { ShadowRuntime } from './renderer/shadows/ShadowRuntime.js';
+export { RWShadowPipeline } from './renderer/shadows/RWShadowPipeline.js';
 export {
   buildTrafficLightCoronaEmitters,
   isTrafficLightModelName,

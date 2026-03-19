@@ -8,7 +8,7 @@ import {
   prepareRwSpriteTexture,
   rwScreenFromNdc,
   setRwSpriteScreenPosition,
-} from './RWSkySpriteUtils.js';
+} from './RWSpriteUtils.js';
 
 const SCREEN_HIDDEN = 1_000_000;
 const TMP_NDC = new THREE.Vector3();

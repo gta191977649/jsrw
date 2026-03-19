@@ -1,6 +1,7 @@
 import RWPipelineController from '../core/pipeline/controller.js';
 import { WaterRuntime } from '../renderer/water/WaterRuntime.js';
 import { CoronaRuntime } from '../renderer/corona/CoronaRuntime.js';
+import { ShadowRuntime } from '../renderer/shadows/ShadowRuntime.js';
 import WebGLRenderBackend from '../backends/webgl/WebGLRenderBackend.js';
 import WebGPURenderBackend from '../backends/webgpu/WebGPURenderBackend.js';
 import { RWRenderQueue } from './three/RWRenderQueue.js';
@@ -16,6 +17,7 @@ export class JsrwRendererSession {
     this.pipelineController = options.pipelineController || new RWPipelineController();
     this.waterRuntime = null;
     this.coronaRuntime = null;
+    this.shadowRuntime = null;
     this.backend = createBackend(options.activeBackend || 'WebGL');
     this.renderQueue = null;
   }
@@ -36,6 +38,7 @@ export class JsrwRendererSession {
   setRoot(root) {
     this.pipelineController.setRoot(root);
     this.coronaRuntime?.setRoot?.(root);
+    this.shadowRuntime?.setRoot?.(root);
     if (!this.renderQueue) {
       this.renderQueue = new RWRenderQueue(root);
     } else {
@@ -122,6 +125,33 @@ export class JsrwRendererSession {
     return this.coronaRuntime;
   }
 
+  createShadowRuntime(options) {
+    this.shadowRuntime?.dispose();
+    this.shadowRuntime = new ShadowRuntime({
+      ...options,
+      root: options?.root || this.pipelineController.root || null,
+      backend: this.backend,
+    });
+    return this.shadowRuntime;
+  }
+
+  getShadowRuntime() {
+    return this.shadowRuntime;
+  }
+
+  setShadowRuntime(runtime) {
+    if (this.shadowRuntime === runtime) return this.shadowRuntime;
+    this.disposeShadowRuntime();
+    this.shadowRuntime = runtime || null;
+    this.shadowRuntime?.setRoot?.(this.pipelineController.root || null);
+    return this.shadowRuntime;
+  }
+
+  disposeShadowRuntime() {
+    this.shadowRuntime?.dispose();
+    this.shadowRuntime = null;
+  }
+
   setCoronaRuntime(runtime) {
     if (this.coronaRuntime === runtime) return this.coronaRuntime;
     this.disposeCoronaRuntime();
@@ -150,6 +180,7 @@ export class JsrwRendererSession {
   dispose() {
     this.disposeWaterRuntime();
     this.disposeCoronaRuntime();
+    this.disposeShadowRuntime();
   }
 }
 

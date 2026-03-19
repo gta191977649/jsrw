@@ -12,6 +12,7 @@ const TRAFFIC_LIGHT_PHASE_SEQUENCE = Object.freeze([
 
 const TRAFFIC_LIGHT_MODEL_SPECS = Object.freeze({
   trafficlight1: {
+    shadowMode: 'primary',
     buildLocalPairs(effectLights) {
       if (effectLights.length < 6) return [];
       let x = Number(effectLights[0]?.position?.x) || 0;
@@ -53,6 +54,7 @@ const TRAFFIC_LIGHT_MODEL_SPECS = Object.freeze({
     },
   },
   mtraffic4: {
+    shadowMode: 'primary',
     buildLocalPairs(effectLights) {
       if (effectLights.length < 3) return [];
       return [
@@ -63,6 +65,7 @@ const TRAFFIC_LIGHT_MODEL_SPECS = Object.freeze({
     },
   },
   mtraffic1: {
+    shadowMode: 'midpoint',
     buildLocalPairs(effectLights) {
       if (effectLights.length < 6) return [];
       return [
@@ -91,6 +94,7 @@ const TRAFFIC_LIGHT_MODEL_SPECS = Object.freeze({
     },
   },
   mtraffic2: {
+    shadowMode: 'midpoint',
     buildLocalPairs(effectLights) {
       if (effectLights.length < 6) return [];
       return [
@@ -119,6 +123,31 @@ const TRAFFIC_LIGHT_MODEL_SPECS = Object.freeze({
     },
   },
 });
+
+function toThreeBasisVector(x, y, z) {
+  return {
+    x: -(Number(x) || 0),
+    y: Number(z) || 0,
+    z: Number(y) || 0,
+  };
+}
+
+export function computeTrafficLightBrightness(runtimeContext = null) {
+  const hour = ((Math.floor(Number(runtimeContext?.timecycleCurrent?.hour) || 0) % 24) + 24) % 24;
+  const minute = THREE_MATH_CLAMP_MINUTE(Number(runtimeContext?.timecycleCurrent?.minute) || 0);
+  const foggyness = Math.max(0, Math.min(1, Number(runtimeContext?.timecycleCurrent?.foggyness ?? runtimeContext?.foggyness ?? 0) || 0));
+
+  let brightness = 0;
+  if (hour === 18) brightness = minute / 60;
+  else if (hour > 18 || hour < 6) brightness = 1;
+  else if (hour === 6) brightness = 1 - (minute / 60);
+
+  return Math.max(brightness, foggyness);
+}
+
+function THREE_MATH_CLAMP_MINUTE(value) {
+  return Math.max(0, Math.min(59, Math.floor(Number(value) || 0)));
+}
 
 export function isTrafficLightModelName(modelName) {
   return Object.hasOwn(TRAFFIC_LIGHT_MODEL_SPECS, String(modelName || '').trim().toLowerCase());
@@ -170,9 +199,11 @@ export function buildTrafficLightCoronaEmitters(options = {}) {
   const emitters = [];
   phasePairs.forEach(({ phase, pair }) => {
     const phaseColor = TRAFFIC_LIGHT_PHASE_COLORS[phase];
+    const worldPositions = [];
     pair.forEach((localPosition, pairIndex) => {
       const worldPosition = toWorldPosition(localPosition, worldMatrix);
       if (!worldPosition) return;
+      worldPositions.push(worldPosition);
       emitters.push({
         id: `trafficlight:${baseId}:${phase}:${pairIndex}`,
         sourceType: 'trafficLight',
@@ -197,6 +228,39 @@ export function buildTrafficLightCoronaEmitters(options = {}) {
         visibilityMode: 'traffic-light',
       });
     });
+
+    if (worldPositions.length > 0) {
+      const shadowPosition = modelSpec.shadowMode === 'midpoint' && worldPositions.length > 1
+        ? {
+          x: (Number(worldPositions[0].x) + Number(worldPositions[1].x)) * 0.5,
+          y: (Number(worldPositions[0].y) + Number(worldPositions[1].y)) * 0.5,
+          z: (Number(worldPositions[0].z) + Number(worldPositions[1].z)) * 0.5,
+        }
+        : worldPositions[0];
+      emitters.push({
+        id: `trafficlight-shadow:${baseId}:${phase}`,
+        sourceType: 'trafficLightShadow',
+        modelName: placement.modelName,
+        placementIndex,
+        position: shadowPosition,
+        trafficLightPhase: phase,
+        trafficLightType,
+        trafficLightIgnoreFacing: true,
+        color: phaseColor,
+        drawDistance: 40,
+        visibilityMode: 'traffic-light',
+        shadow: {
+          textureKey: 'shad_exp',
+          size: 8,
+          intensity: 128,
+          front: toThreeBasisVector(8, 0, 0),
+          side: toThreeBasisVector(0, -8, 0),
+          zDistance: 12,
+          drawDistance: 40,
+          colorScale: 'trafficLightGround',
+        },
+      });
+    }
   });
 
   return emitters;

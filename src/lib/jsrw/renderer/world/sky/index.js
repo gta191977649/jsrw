@@ -9,7 +9,7 @@ export {
   prepareRwSpriteTexture,
   rwScreenFromNdc,
   setRwSpriteScreenPosition,
-} from './RWSkySpriteUtils.js';
+} from './RWSpriteUtils.js';
 
 export { RW_MOON_DEBUG_DEFAULTS } from './constants/RWMoonConstants.js';
 export {

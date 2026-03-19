@@ -3,8 +3,7 @@ import {
   calcScreenCoorsLikeRw,
   createRwSpriteMaterial,
   prepareRwSpriteTexture,
-  setRwSpriteScreenPosition,
-} from '../world/sky/RWSkySpriteUtils.js';
+} from '../world/sky/RWSpriteUtils.js';
 import { resolveTrafficLightPhase } from './TrafficLights.js';
 
 const TMP_POSITION = new THREE.Vector3();
@@ -18,6 +17,7 @@ const DEBUG_HELPER_GEOMETRY = new THREE.BoxGeometry(0.18, 0.18, 0.18);
 const MIN_LOS_INTERVAL_MS = 250;
 const DEFAULT_FADE_PER_SECOND = 3;
 const DEFAULT_POINT_LIGHT_INTENSITY = 1.5;
+const OFFSCREEN_FADE_MARGIN = 0;
 
 function clamp01(value) {
   return THREE.MathUtils.clamp(Number(value) || 0, 0, 1);
@@ -175,12 +175,14 @@ export class RWCoronaPipeline {
     this.textureDictionary = null;
     this.viewportWidth = 1;
     this.viewportHeight = 1;
-    this.overlayScene = new THREE.Scene();
-    this.overlayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
-    this.overlayRoot = new THREE.Group();
-    this.overlayScene.add(this.overlayRoot);
+    this.spriteRoot = new THREE.Group();
     this.lightRoot = new THREE.Group();
     this.debugRoot = new THREE.Group();
+    this.spriteRoot.name = 'rw_corona_sprites';
+    this.spriteRoot.userData = {
+      ...(this.spriteRoot.userData || {}),
+      rwCoronaAux: true,
+    };
     this.lightRoot.name = 'rw_corona_lights';
     this.lightRoot.userData = {
       ...(this.lightRoot.userData || {}),
@@ -202,6 +204,9 @@ export class RWCoronaPipeline {
 
   setRoot(root) {
     if (this.root === root) return this.root;
+    if (this.spriteRoot.parent) {
+      this.spriteRoot.parent.remove(this.spriteRoot);
+    }
     if (this.lightRoot.parent) {
       this.lightRoot.parent.remove(this.lightRoot);
     }
@@ -210,6 +215,7 @@ export class RWCoronaPipeline {
     }
     this.root = root || null;
     if (this.root) {
+      this.root.add(this.spriteRoot);
       this.root.add(this.lightRoot);
       this.root.add(this.debugRoot);
     }
@@ -238,27 +244,24 @@ export class RWCoronaPipeline {
   setViewport(width, height) {
     this.viewportWidth = Math.max(1, Number(width) || 1);
     this.viewportHeight = Math.max(1, Number(height) || 1);
-    this.overlayCamera.left = -this.viewportWidth * 0.5;
-    this.overlayCamera.right = this.viewportWidth * 0.5;
-    this.overlayCamera.top = this.viewportHeight * 0.5;
-    this.overlayCamera.bottom = -this.viewportHeight * 0.5;
-    this.overlayCamera.updateProjectionMatrix();
   }
 
   setTextureDictionary(textureDictionary) {
     this.textureDictionary = textureDictionary || null;
     for (const entry of this.entries) {
-      if (!entry.sprite?.material) continue;
-      entry.sprite.material.map = this.resolveTexture(entry.emitter.textureKey);
-      entry.sprite.material.needsUpdate = true;
+      if (entry.sprite?.material) {
+        entry.sprite.material.map = this.resolveTexture(entry.emitter.textureKey);
+        entry.sprite.material.needsUpdate = true;
+      }
     }
   }
 
-  resolveTexture(textureKey) {
+  resolveTexture(textureKey, options = {}) {
+    const fallbackToCorona = options.fallbackToCorona !== false;
     const normalizedKey = String(textureKey || '').trim().toLowerCase();
     if (!normalizedKey || !this.textureDictionary?.get) return null;
-    const textureKeys = normalizedKey === 'corona'
-      ? ['corona']
+    const textureKeys = normalizedKey === 'corona' || !fallbackToCorona
+      ? [normalizedKey]
       : [normalizedKey, 'corona'];
     for (const key of textureKeys) {
       const textureEntry = this.textureDictionary.get(key);
@@ -291,6 +294,7 @@ export class RWCoronaPipeline {
       lightTarget: null,
       helperMesh: null,
       helperLine: null,
+      lastScreen: null,
     };
 
     if (emitter.textureKey) {
@@ -298,12 +302,15 @@ export class RWCoronaPipeline {
       sprite.visible = false;
       sprite.frustumCulled = false;
       sprite.renderOrder = 90;
+      sprite.layers.set(4);
+      sprite.material.depthTest = emitter.losCheck !== true;
+      sprite.material.depthWrite = false;
       sprite.userData = {
         ...(sprite.userData || {}),
         rwCoronaAux: true,
         rwCoronaEmitterId: emitter.id,
       };
-      this.overlayRoot.add(sprite);
+      this.spriteRoot.add(sprite);
       entry.sprite = sprite;
     }
 
@@ -475,24 +482,43 @@ export class RWCoronaPipeline {
       const losVisible = targetAlpha > 0 ? this.computeLosVisible(entry, camera, timeMs) : true;
       if (!losVisible) targetAlpha = 0;
 
-      const screen = entry.sprite && targetAlpha > 0
+      const currentScreen = entry.sprite
         ? calcScreenCoorsLikeRw(camera, toVector3(emitter.position), this.viewportWidth, this.viewportHeight, true)
         : null;
+      let screen = currentScreen;
+      let screenVisible = Boolean(screen);
       if (entry.sprite && !screen) targetAlpha = 0;
       if (entry.sprite && screen) {
         const offscreen = (
-          screen.x < -64
-          || screen.x > (this.viewportWidth + 64)
-          || screen.y < -64
-          || screen.y > (this.viewportHeight + 64)
+          screen.x < -OFFSCREEN_FADE_MARGIN
+          || screen.x > (this.viewportWidth + OFFSCREEN_FADE_MARGIN)
+          || screen.y < -OFFSCREEN_FADE_MARGIN
+          || screen.y > (this.viewportHeight + OFFSCREEN_FADE_MARGIN)
         );
-        if (offscreen) targetAlpha = 0;
+        if (offscreen) {
+          targetAlpha = 0;
+          screenVisible = false;
+        }
+      } else if (entry.sprite) {
+        screenVisible = false;
       }
 
       entry.fadeAlpha = approach(entry.fadeAlpha, targetAlpha, fadeDelta);
+      if (entry.sprite && screenVisible && screen) {
+        entry.lastScreen = {
+          x: screen.x,
+          y: screen.y,
+          z: screen.z,
+          recipZ: screen.recipZ,
+          spriteW: screen.spriteW,
+          spriteH: screen.spriteH,
+        };
+      } else if (entry.sprite && entry.fadeAlpha > 0.001 && entry.lastScreen) {
+        screen = entry.lastScreen;
+      }
 
       if (entry.sprite) {
-        const visible = this.enabled && entry.fadeAlpha > 0.001 && screen;
+        const visible = this.enabled && entry.fadeAlpha > 0.001 && screenVisible;
         entry.sprite.visible = Boolean(visible);
         if (visible) {
           const color = normalizeEmitterColor(emitter.color);
@@ -516,18 +542,11 @@ export class RWCoronaPipeline {
           const trafficLightSizeScale = emitter.sourceType === 'trafficLight'
             ? spriteSize * Math.max(0.1, Number(trafficLightSettings?.sizeScale) || 1.75)
             : 1;
-          const size = Math.max(1, Number(emitter.size) || 1) * trafficLightSizeScale;
-          const widthPx = Math.max(1, screen.spriteW * size * fogScale * 2);
-          const heightPx = Math.max(1, screen.spriteH * size * fogScale * 2);
-          setRwSpriteScreenPosition(
-            entry.sprite,
-            screen.x,
-            screen.y,
-            this.viewportWidth,
-            this.viewportHeight,
-            widthPx,
-            heightPx,
-          );
+          const worldSize = Math.max(0.01, Number(emitter.size) || 1) * trafficLightSizeScale * fogScale * 2;
+          entry.sprite.position.copy(toVector3(emitter.position));
+          entry.sprite.scale.set(worldSize, worldSize, 1);
+        } else if (entry.fadeAlpha <= 0.001) {
+          entry.lastScreen = null;
         }
       }
 
@@ -580,9 +599,7 @@ export class RWCoronaPipeline {
   }
 
   render(renderer) {
-    if (!this.enabled) return;
-    if (!this.entries.some((entry) => entry.sprite?.visible)) return;
-    renderer.render(this.overlayScene, this.overlayCamera);
+    void renderer;
   }
 
   disposeEntries() {
@@ -608,6 +625,7 @@ export class RWCoronaPipeline {
 
   dispose() {
     this.disposeEntries();
+    if (this.spriteRoot.parent) this.spriteRoot.parent.remove(this.spriteRoot);
     if (this.lightRoot.parent) this.lightRoot.parent.remove(this.lightRoot);
     if (this.debugRoot.parent) this.debugRoot.parent.remove(this.debugRoot);
   }

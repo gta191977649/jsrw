@@ -5,7 +5,7 @@ import {
   createRwSpriteMaterial,
   prepareRwSpriteTexture,
   setRwSpriteScreenPosition,
-} from './RWSkySpriteUtils.js';
+} from './RWSpriteUtils.js';
 import { gtaPositionToThree } from '../../../../gtaTransforms.js';
 
 function createFallbackMoonTexture() {
