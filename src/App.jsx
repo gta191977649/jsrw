@@ -1429,7 +1429,7 @@ function App() {
       }
 
       try {
-        setStatus('Building water...');
+        setStatus('Building water... (stage 1/6: start)');
         // #region agent log
         dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: start', data: { token, waterPath: waterRecord?.resolvedPath ?? null } });
         // #endregion
@@ -1438,6 +1438,7 @@ function App() {
         // #region agent log
         dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: before arrayBuffer', data: { token } });
         // #endregion
+        setStatus('Building water... (stage 2/6: reading waterpro.dat)');
         const parsed = parseWaterproDat(await waterRecord.file.arrayBuffer());
         // #region agent log
         dbgLog({ runId: 'safari-build', hypothesisId: 'H2', location: 'App.jsx:tryBuildWater', message: 'Building water: parsed waterpro.dat', data: { token, levelCount: parsed?.levelCount ?? null, fineBlocks: parsed?.fineBlockList?.length ?? null } });
@@ -1447,6 +1448,7 @@ function App() {
         // #region agent log
         dbgLog({ runId: 'safari-build', hypothesisId: 'H3', location: 'App.jsx:tryBuildWater', message: 'Building water: before RWWaterPipeline', data: { token, renderWater: uiStateRef.current.renderWater } });
         // #endregion
+        setStatus('Building water... (stage 3/6: constructing water pipeline)');
         const pipeline = new RWWaterPipeline({
           parsed,
           waterConfig,
@@ -1473,6 +1475,7 @@ function App() {
         // #region agent log
         dbgLog({ runId: 'safari-build', hypothesisId: 'H3', location: 'App.jsx:tryBuildWater', message: 'Building water: after RWWaterPipeline', data: { token, ms: Number((performance.now() - waterStartTime).toFixed(1)) } });
         // #endregion
+        setStatus('Building water... (stage 4/6: pipeline ready)');
         pendingWaterPipeline?.dispose();
         pendingWaterPipeline = pipeline;
         pipeline.setTimecycleProvider(() => {
@@ -1515,10 +1518,12 @@ function App() {
           // #region agent log
           dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:water-textures', message: 'Water textures: start getTextureDict(particle)', data: { token } });
           // #endregion
+          setStatus('Building water... (stage 5/6: loading particle.txd)');
           const particleTxd = await getTextureDict('particle');
           // #region agent log
           dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:water-textures', message: 'Water textures: got particle txd', data: { token, ok: Boolean(particleTxd) } });
           // #endregion
+          setStatus('Building water... (stage 6/6: applying textures)');
           if (buildTokenRef.current !== token) return;
           const waterTextureEntry = particleTxd?.get?.(waterTextureName) || null;
           const waterTexture = waterTextureEntry?.texture || waterTextureEntry || null;
