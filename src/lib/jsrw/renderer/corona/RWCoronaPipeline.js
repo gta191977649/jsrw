@@ -522,9 +522,10 @@ export class RWCoronaPipeline {
         entry.sprite.visible = Boolean(visible);
         if (visible) {
           const color = normalizeEmitterColor(emitter.color);
+          const coronaAlpha = clamp01((Number(emitter.alpha) || 255) / 255);
           const trafficLightSettings = runtimeContext?.trafficLights || null;
           const trafficLightColorScale = emitter.sourceType === 'trafficLight'
-            ? clamp01(spriteBrightness * Math.max(0, Number(trafficLightSettings?.brightnessScale) || 0.7))
+            ? (spriteBrightness * Math.max(0, Number(trafficLightSettings?.brightnessScale) || 0.7))
             : 1;
           const fadeDistance = drawDistance > 0 ? (drawDistance * 0.5) : 0;
           const distanceFade = fadeDistance > 0
@@ -537,7 +538,7 @@ export class RWCoronaPipeline {
             (color.b * trafficLightColorScale) / fogScale,
             THREE.SRGBColorSpace,
           );
-          entry.sprite.material.opacity = clamp01(entry.fadeAlpha * distanceFade * color.a);
+          entry.sprite.material.opacity = clamp01(entry.fadeAlpha * distanceFade * coronaAlpha);
           entry.sprite.material.rotation = 20 * screen.recipZ;
           const trafficLightSizeScale = emitter.sourceType === 'trafficLight'
             ? spriteSize * Math.max(0.1, Number(trafficLightSettings?.sizeScale) || 1.75)

@@ -1982,6 +1982,7 @@ function App() {
             hideObject: Boolean((effect.flags | 0) & IDE_LIGHT_FLAG.HIDE_OBJECT),
             shadow: {
               textureKey: effect.shadowTextureName || '',
+              alpha: 128,
               size: Number(effect.shadowSize ?? effect.innerRange) || 0,
               intensity: Number(effect.shadowIntensity) || 0,
               front: toPlainVector(gtaPositionToThree(Number(effect.shadowSize ?? effect.innerRange) || 0, 0, 0)),

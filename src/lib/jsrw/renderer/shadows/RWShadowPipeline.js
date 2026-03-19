@@ -623,10 +623,12 @@ export class RWShadowPipeline {
       }
 
       const color = normalizeEmitterColor(emitter.color);
+      const debugIntensityScale = Math.max(0, Number(shadowDebug.intensityScale) || 1);
       const baseBrightness = shadowSettings.colorScale === 'trafficLightGround'
         ? ((lightOnGroundBrightness / 8) * trafficLightBrightness)
         : spriteBrightness;
-      const brightnessScale = clamp01(baseBrightness * (shadowIntensity / 255) * Math.max(0, Number(shadowDebug.intensityScale) || 1));
+      const brightnessScale = clamp01(baseBrightness * (shadowIntensity / 255) * debugIntensityScale);
+      const alphaScale = clamp01(entry.fadeAlpha * ((Number(shadowSettings.alpha) || 128) / 255) * debugIntensityScale);
       entry.shadowMesh.visible = true;
       visibleCount += 1;
       projectedCount += 1;
@@ -640,7 +642,7 @@ export class RWShadowPipeline {
         THREE.SRGBColorSpace,
       );
       entry.shadowMesh.material.color.copy(TMP_COLOR);
-      entry.shadowMesh.material.opacity = clamp01(entry.fadeAlpha * brightnessScale);
+      entry.shadowMesh.material.opacity = alphaScale;
     }
 
     this.debugStats.visibleCount = visibleCount;

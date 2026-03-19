@@ -251,6 +251,7 @@ export function buildTrafficLightCoronaEmitters(options = {}) {
         visibilityMode: 'traffic-light',
         shadow: {
           textureKey: 'shad_exp',
+          alpha: 128,
           size: 8,
           intensity: 128,
           front: toThreeBasisVector(8, 0, 0),
