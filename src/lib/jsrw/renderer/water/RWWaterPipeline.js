@@ -5,6 +5,9 @@ const DEFAULT_WATER_COLOR = new THREE.Color(0xffffff);
 const RW_DEFAULT_WAVE_HEIGHT = 35.0;
 const RW_DEFAULT_WIND = 0.0;
 const MIN_FAR_RENDER_DISTANCE = 512;
+const COARSE_WATER_START_DISTANCE = 500;
+const COARSE_WATER_GROUP_SIZE = 4;
+const WATER_CULL_MARGIN_MULTIPLIER = 1.25;
 
 function createFallbackTexture() {
   const data = new Uint8Array([255, 255, 255, 255]);
@@ -96,7 +99,7 @@ function getRwWaveAmplitude(waveHeightSetting) {
   return clamped / RW_DEFAULT_WAVE_HEIGHT;
 }
 
-function buildRwSectorPatchGeometry(toThreePosition, cellSizeX, cellSizeY, subdivisions = 8) {
+function buildRwSectorPatchGeometry(toThreePosition, cellSizeX, cellSizeY, subdivisions = 8, uvScaleX = 1, uvScaleY = 1) {
   const origin = toThreePosition(0, 0, 0);
   const positions = [];
   const uvs = [];
@@ -125,12 +128,12 @@ function buildRwSectorPatchGeometry(toThreePosition, cellSizeX, cellSizeY, subdi
         p3.x - origin.x, p3.y - origin.y, p3.z - origin.z,
       );
       uvs.push(
-        u0, v0,
-        u1, v0,
-        u1, v1,
-        u0, v0,
-        u1, v1,
-        u0, v1,
+        u0 * uvScaleX, v0 * uvScaleY,
+        u1 * uvScaleX, v0 * uvScaleY,
+        u1 * uvScaleX, v1 * uvScaleY,
+        u0 * uvScaleX, v0 * uvScaleY,
+        u1 * uvScaleX, v1 * uvScaleY,
+        u0 * uvScaleX, v1 * uvScaleY,
       );
       normals.push(
         0, 1, 0,
@@ -168,11 +171,14 @@ function buildSectorEntries(parsed, bounds, toThreePosition) {
   const cellSizeX = (bounds.end.x - bounds.start.x) / cellCount;
   const cellSizeY = (bounds.end.y - bounds.start.y) / cellCount;
   const radius = Math.sqrt((cellSizeX * cellSizeX) + (cellSizeY * cellSizeY)) * 0.5;
+  const cullRadius = radius + (Math.max(cellSizeX, cellSizeY) * WATER_CULL_MARGIN_MULTIPLIER);
   const sectors = [];
+  const sectorGrid = new Array(cellCount * cellCount).fill(null);
 
   for (let x = 0; x < cellCount; x += 1) {
     for (let y = 0; y < cellCount; y += 1) {
-      const levelIndex = getWaterLevelIndex(parsed.fineBlockList[(x * cellCount) + y]);
+      const flatIndex = (x * cellCount) + y;
+      const levelIndex = getWaterLevelIndex(parsed.fineBlockList[flatIndex]);
       if (levelIndex < 0 || levelIndex >= parsed.waterZs.length) continue;
       const waterZ = parsed.waterZs[levelIndex];
       if (!Number.isFinite(waterZ)) continue;
@@ -182,14 +188,92 @@ function buildSectorEntries(parsed, bounds, toThreePosition) {
         waterZ,
       );
       const matrix = new THREE.Matrix4().makeTranslation(world.x, world.y, world.z);
-      sectors.push({
+      const sector = {
+        index: flatIndex,
+        x,
+        y,
+        levelIndex,
+        waterZ,
         matrix,
         center: world.clone(),
         radius,
-      });
+        cullRadius,
+      };
+      sectors.push(sector);
+      sectorGrid[flatIndex] = sector;
     }
   }
-  return sectors;
+  return {
+    sectors,
+    sectorGrid,
+    cellCount,
+    cellSizeX,
+    cellSizeY,
+  };
+}
+
+function buildCoarseSectorEntries(sectorData, bounds, toThreePosition, groupSize = COARSE_WATER_GROUP_SIZE) {
+  const { sectorGrid, cellCount, cellSizeX, cellSizeY } = sectorData;
+  const coarseEntries = [];
+  const coarseCoveredIndices = new Set();
+  const coarseRadius = Math.sqrt(
+    ((cellSizeX * groupSize) * (cellSizeX * groupSize))
+    + ((cellSizeY * groupSize) * (cellSizeY * groupSize)),
+  ) * 0.5;
+  const coarseCullRadius = coarseRadius + (Math.max(cellSizeX * groupSize, cellSizeY * groupSize) * WATER_CULL_MARGIN_MULTIPLIER);
+
+  for (let x = 0; x < cellCount; x += groupSize) {
+    for (let y = 0; y < cellCount; y += groupSize) {
+      const cells = [];
+      let sharedLevelIndex = null;
+      let valid = true;
+      for (let dx = 0; dx < groupSize && valid; dx += 1) {
+        for (let dy = 0; dy < groupSize; dy += 1) {
+          const cellX = x + dx;
+          const cellY = y + dy;
+          if (cellX >= cellCount || cellY >= cellCount) {
+            valid = false;
+            break;
+          }
+          const sector = sectorGrid[(cellX * cellCount) + cellY];
+          if (!sector) {
+            valid = false;
+            break;
+          }
+          if (sharedLevelIndex === null) sharedLevelIndex = sector.levelIndex;
+          else if (sharedLevelIndex !== sector.levelIndex) {
+            valid = false;
+            break;
+          }
+          cells.push(sector);
+        }
+      }
+      if (!valid || cells.length !== (groupSize * groupSize)) continue;
+
+      const waterZ = cells[0].waterZ;
+      const world = toThreePosition(
+        bounds.start.x + (x * cellSizeX),
+        bounds.start.y + (y * cellSizeY),
+        waterZ,
+      );
+      coarseEntries.push({
+        matrix: new THREE.Matrix4().makeTranslation(world.x, world.y, world.z),
+        center: toThreePosition(
+          bounds.start.x + ((x + (groupSize * 0.5)) * cellSizeX),
+          bounds.start.y + ((y + (groupSize * 0.5)) * cellSizeY),
+          waterZ,
+        ),
+        radius: coarseRadius,
+        cullRadius: coarseCullRadius,
+      });
+      for (const cell of cells) coarseCoveredIndices.add(cell.index);
+    }
+  }
+
+  return {
+    coarseEntries,
+    coarseCoveredIndices,
+  };
 }
 
 function createFarMaterial(texture, options = {}) {
@@ -277,7 +361,13 @@ export class RWWaterPipeline {
     const cellSizeY = (bounds.end.y - bounds.start.y) / 128;
     const sectorGeometry = buildRwSectorPatchGeometry(options.toThreePosition, cellSizeX, cellSizeY, 8);
     const sectorCount = countValidFineSectors(this.parsed);
-    this.sectorEntries = buildSectorEntries(this.parsed, bounds, options.toThreePosition);
+    const sectorData = buildSectorEntries(this.parsed, bounds, options.toThreePosition);
+    const coarseSectorData = buildCoarseSectorEntries(sectorData, bounds, options.toThreePosition);
+    this.sectorEntries = sectorData.sectors.map((sector) => ({
+      ...sector,
+      coarseCovered: coarseSectorData.coarseCoveredIndices.has(sector.index),
+    }));
+    this.coarseSectorEntries = coarseSectorData.coarseEntries;
     this.tempProjScreenMatrix = new THREE.Matrix4();
     this.tempFrustum = new THREE.Frustum();
     this.tempSphere = new THREE.Sphere();
@@ -286,6 +376,23 @@ export class RWWaterPipeline {
     this.farMesh.count = 0;
     this.farMesh.instanceMatrix.needsUpdate = true;
     this.farScene.add(this.farMesh);
+    const coarseGeometry = buildRwSectorPatchGeometry(
+      options.toThreePosition,
+      cellSizeX * COARSE_WATER_GROUP_SIZE,
+      cellSizeY * COARSE_WATER_GROUP_SIZE,
+      4,
+      COARSE_WATER_GROUP_SIZE,
+      COARSE_WATER_GROUP_SIZE,
+    );
+    this.farCoarseMesh = new THREE.InstancedMesh(
+      coarseGeometry,
+      this.farMaterial,
+      Math.max(1, this.coarseSectorEntries.length),
+    );
+    this.farCoarseMesh.frustumCulled = false;
+    this.farCoarseMesh.count = 0;
+    this.farCoarseMesh.instanceMatrix.needsUpdate = true;
+    this.farScene.add(this.farCoarseMesh);
 
     this.nearMesh = new THREE.Mesh(createEmptyGeometry(), new THREE.MeshBasicMaterial({ visible: false }));
     this.wavyMesh = new THREE.Mesh(createEmptyGeometry(), new THREE.MeshBasicMaterial({ visible: false }));
@@ -297,6 +404,7 @@ export class RWWaterPipeline {
     this.visibleNearCells = 0;
     this.visibleWavyCells = 0;
     this.visibleFarCells = 0;
+    this.visibleFarCoarseCells = 0;
     this.waterCellCount = sectorCount;
 
     this.applySettings(options.settings || null);
@@ -349,7 +457,7 @@ export class RWWaterPipeline {
   }
 
   updateVisibleFarSectors(camera) {
-    if (!camera || !this.farMesh || !Array.isArray(this.sectorEntries)) return;
+    if (!camera || !this.farMesh || !this.farCoarseMesh || !Array.isArray(this.sectorEntries)) return;
     this.tempProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.tempFrustum.setFromProjectionMatrix(this.tempProjScreenMatrix);
     const renderDistance = Math.max(
@@ -357,20 +465,40 @@ export class RWWaterPipeline {
       (Number(camera.far) || MIN_FAR_RENDER_DISTANCE) * 1.1,
     );
     const renderDistanceSq = renderDistance * renderDistance;
-    let visibleCount = 0;
+    const coarseStartDistanceSq = Math.min(
+      renderDistanceSq,
+      Math.max(COARSE_WATER_START_DISTANCE, renderDistance * 0.2) ** 2,
+    );
+    let visibleFineCount = 0;
+    let visibleCoarseCount = 0;
     for (const sector of this.sectorEntries) {
-      if (camera.position.distanceToSquared(sector.center) > (renderDistanceSq + (sector.radius * sector.radius))) {
+      const distanceSq = camera.position.distanceToSquared(sector.center);
+      if (distanceSq > (renderDistanceSq + (sector.cullRadius * sector.cullRadius))) {
         continue;
       }
       this.tempSphere.center.copy(sector.center);
-      this.tempSphere.radius = sector.radius;
+      this.tempSphere.radius = sector.cullRadius;
       if (!this.tempFrustum.intersectsSphere(this.tempSphere)) continue;
-      this.farMesh.setMatrixAt(visibleCount, sector.matrix);
-      visibleCount += 1;
+      if (sector.coarseCovered && distanceSq >= coarseStartDistanceSq) continue;
+      this.farMesh.setMatrixAt(visibleFineCount, sector.matrix);
+      visibleFineCount += 1;
     }
-    this.visibleFarCells = visibleCount;
-    this.farMesh.count = visibleCount;
+    for (const sector of this.coarseSectorEntries) {
+      const distanceSq = camera.position.distanceToSquared(sector.center);
+      if (distanceSq < coarseStartDistanceSq) continue;
+      if (distanceSq > (renderDistanceSq + (sector.cullRadius * sector.cullRadius))) continue;
+      this.tempSphere.center.copy(sector.center);
+      this.tempSphere.radius = sector.cullRadius;
+      if (!this.tempFrustum.intersectsSphere(this.tempSphere)) continue;
+      this.farCoarseMesh.setMatrixAt(visibleCoarseCount, sector.matrix);
+      visibleCoarseCount += 1;
+    }
+    this.visibleFarCells = visibleFineCount;
+    this.visibleFarCoarseCells = visibleCoarseCount;
+    this.farMesh.count = visibleFineCount;
     this.farMesh.instanceMatrix.needsUpdate = true;
+    this.farCoarseMesh.count = visibleCoarseCount;
+    this.farCoarseMesh.instanceMatrix.needsUpdate = true;
   }
 
   update(camera, timeMs, dt) {
@@ -413,10 +541,14 @@ export class RWWaterPipeline {
 
     this.updateVisibleFarSectors(camera);
     this.farMesh.visible = this.enabled && this.visibleFarCells > 0;
+    this.farCoarseMesh.visible = this.enabled && this.visibleFarCoarseCells > 0;
   }
 
   renderFar(renderer, camera, background = null) {
-    if (!this.enabled || !this.farMesh.visible || this.visibleFarCells <= 0) return;
+    if (
+      !this.enabled
+      || ((!this.farMesh.visible || this.visibleFarCells <= 0) && (!this.farCoarseMesh.visible || this.visibleFarCoarseCells <= 0))
+    ) return;
     this.farScene.background = background ?? null;
     renderer.render(this.farScene, camera);
   }
@@ -430,6 +562,7 @@ export class RWWaterPipeline {
   dispose() {
     const items = [
       this.farMesh?.geometry,
+      this.farCoarseMesh?.geometry,
       this.nearMesh?.geometry,
       this.wavyMesh?.geometry,
       this.wakeMesh?.geometry,

@@ -177,6 +177,7 @@ export class RWCoronaPipeline {
     this.textureDictionary = null;
     this.viewportWidth = 1;
     this.viewportHeight = 1;
+    this.renderScene = new THREE.Scene();
     this.spriteRoot = new THREE.Group();
     this.lightRoot = new THREE.Group();
     this.debugRoot = new THREE.Group();
@@ -200,6 +201,9 @@ export class RWCoronaPipeline {
     this.raycaster = new THREE.Raycaster();
     this.cachedOccluderMeshes = null;
     this.occludersDirty = true;
+    this.renderScene.autoUpdate = true;
+    this.renderScene.add(this.spriteRoot);
+    this.renderScene.add(this.debugRoot);
     this.setRoot(options.root || null);
     this.setTextureDictionary(options.textureDictionary || null);
     this.setViewport(options.viewportWidth || 1, options.viewportHeight || 1);
@@ -208,22 +212,14 @@ export class RWCoronaPipeline {
 
   setRoot(root) {
     if (this.root === root) return this.root;
-    if (this.spriteRoot.parent) {
-      this.spriteRoot.parent.remove(this.spriteRoot);
-    }
     if (this.lightRoot.parent) {
       this.lightRoot.parent.remove(this.lightRoot);
-    }
-    if (this.debugRoot.parent) {
-      this.debugRoot.parent.remove(this.debugRoot);
     }
     this.root = root || null;
     this.occludersDirty = true;
     this.cachedOccluderMeshes = null;
     if (this.root) {
-      this.root.add(this.spriteRoot);
       this.root.add(this.lightRoot);
-      this.root.add(this.debugRoot);
     }
     return this.root;
   }
@@ -342,7 +338,8 @@ export class RWCoronaPipeline {
       sprite.visible = false;
       sprite.frustumCulled = false;
       sprite.renderOrder = 90;
-      sprite.layers.set(4);
+      sprite.layers.disableAll();
+      sprite.layers.enable(0);
       sprite.material.depthTest = emitter.losCheck !== true;
       sprite.material.depthWrite = false;
       sprite.userData = {
@@ -687,8 +684,10 @@ export class RWCoronaPipeline {
     }
   }
 
-  render(renderer) {
-    void renderer;
+  render(renderer, camera) {
+    if (!renderer || !camera || !this.enabled) return;
+    this.renderScene.updateMatrixWorld(true);
+    renderer.render(this.renderScene, camera);
   }
 
   disposeEntries() {
@@ -714,8 +713,8 @@ export class RWCoronaPipeline {
 
   dispose() {
     this.disposeEntries();
-    if (this.spriteRoot.parent) this.spriteRoot.parent.remove(this.spriteRoot);
     if (this.lightRoot.parent) this.lightRoot.parent.remove(this.lightRoot);
+    if (this.spriteRoot.parent) this.spriteRoot.parent.remove(this.spriteRoot);
     if (this.debugRoot.parent) this.debugRoot.parent.remove(this.debugRoot);
   }
 }

@@ -4154,7 +4154,7 @@ function App() {
                 });
               }
               if (renderStages.coronas) {
-                coronaRuntime?.render(renderer);
+                coronaRuntime?.render(renderer, camera);
               }
               renderer.autoClear = true;
             } catch (waterError) {
@@ -4197,7 +4197,7 @@ function App() {
                 }
               }
               if (renderStages.coronas) {
-                coronaRuntime?.render(renderer);
+                coronaRuntime?.render(renderer, camera);
               }
             }
           } else {
@@ -4222,7 +4222,7 @@ function App() {
               }
             }
             if (renderStages.coronas) {
-              coronaRuntime?.render(renderer);
+              coronaRuntime?.render(renderer, camera);
             }
           }
           if (postFxSceneTarget && postFxSunCoronaEnabled && renderStages.sunBloom) {
