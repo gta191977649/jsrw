@@ -90,6 +90,9 @@ const TRAFFIC_LIGHT_DEBUG_DEFAULTS = Object.freeze({
   brightnessScale: 0.7,
   sizeScale: 1,
 });
+const TWO_DFX_DEBUG_DEFAULTS = Object.freeze({
+  maxActiveCoronas: 96,
+});
 const SHADOW_DEBUG_DEFAULTS = Object.freeze({
   enabled: true,
   wireframe: false,
@@ -99,6 +102,7 @@ const SHADOW_DEBUG_DEFAULTS = Object.freeze({
   zDistanceScale: 1,
   drawDistanceScale: 1,
   heightBias: 0.03,
+  maxActiveShadows: 48,
 });
 const RW_DFF_LIGHT_TYPE = Object.freeze({
   DIRECTIONAL: 0x01,
@@ -891,6 +895,7 @@ function App() {
     render2dfx: true,
     debug2dfx: false,
     forceRender2dfx: false,
+    twoDfx: { ...TWO_DFX_DEBUG_DEFAULTS },
     trafficLights: { ...TRAFFIC_LIGHT_DEBUG_DEFAULTS },
     shadows: { ...SHADOW_DEBUG_DEFAULTS },
     streamingBuild: true,
@@ -4027,6 +4032,7 @@ function App() {
           viewportWidth,
           viewportHeight,
           forceRender2dfx: uiStateRef.current.forceRender2dfx,
+          twoDfx: uiStateRef.current.twoDfx,
           trafficLights: uiStateRef.current.trafficLights,
         });
         shadowRuntime?.update(camera, {
@@ -5344,6 +5350,7 @@ function App() {
               ImGui.EndTabItem();
             }
             if (ImGui.BeginTabItem('2DFX')) {
+              const twoDfxSettings = uiStateRef.current.twoDfx;
               ImGui.TextWrapped('2DFX coronas are billboard sprites sourced from particle.txd-style textures, with optional debug helpers and forced daytime rendering.');
               ImGui.Checkbox(
                 'Render 2DFX',
@@ -5366,6 +5373,16 @@ function App() {
                   return value;
                 },
               );
+              renderImguiSliderRow(ImGui, {
+                id: '2dfx-max-active-coronas',
+                rowPrefix: '2dfx-row',
+                label: 'Max Active Coronas',
+                value: twoDfxSettings.maxActiveCoronas,
+                setValue: (value) => { twoDfxSettings.maxActiveCoronas = Math.round(value); },
+                min: 0,
+                max: 512,
+                format: '%.0f',
+              });
               ImGui.Text(`IDE 2DFX defs: ${statsRef.current.ideEffects}`);
               ImGui.Text(`Active emitters: ${statsRef.current.lightEmitters}`);
               ImGui.Text(`Objects with lights: ${statsRef.current.lightObjects}`);
@@ -5516,6 +5533,16 @@ function App() {
                 setValue: (value) => { shadowSettings.heightBias = value; },
                 min: 0,
                 max: 0.25,
+              });
+              renderImguiSliderRow(ImGui, {
+                id: 'shadow-max-active-shadows',
+                rowPrefix: 'shadow-row',
+                label: 'Max Active Shadows',
+                value: shadowSettings.maxActiveShadows,
+                setValue: (value) => { shadowSettings.maxActiveShadows = Math.round(value); },
+                min: 0,
+                max: 256,
+                format: '%.0f',
               });
               ImGui.Text(`Shadow entries: ${shadowStats.entryCount || 0}`);
               ImGui.Text(`Projected: ${shadowStats.projectedCount || 0}`);

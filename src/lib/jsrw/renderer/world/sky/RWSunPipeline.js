@@ -165,7 +165,9 @@ function findOcclusionFlags(object, stopAt) {
 }
 
 function shouldIgnoreOcclusionHit(object, stopAt) {
-  if (!object?.visible || !object?.isMesh) return true;
+  if (!object?.visible) return true;
+  if (object.userData?.rwCoronaAux || object.userData?.rwShadowAux) return true;
+  if (!object?.isMesh) return true;
   if (object.userData?.rwInstanceSelectionProxy) return true;
 
   const flags = findOcclusionFlags(object, stopAt);
@@ -452,6 +454,7 @@ export class RWSunPipeline {
     if (TMP_CAMERA_DIR.lengthSq() <= 0.0001) return false;
     this.occlusionRaycaster.layers.enableAll();
     this.occlusionRaycaster.set(camera.position, TMP_CAMERA_DIR);
+    this.occlusionRaycaster.camera = camera;
     this.occlusionRaycaster.far = camera.far;
     const hits = this.occlusionRaycaster.intersectObject(worldRoot, true);
     for (const hit of hits) {

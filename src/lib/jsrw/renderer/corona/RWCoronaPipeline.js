@@ -17,6 +17,7 @@ const DEBUG_HELPER_GEOMETRY = new THREE.BoxGeometry(0.18, 0.18, 0.18);
 const MIN_LOS_INTERVAL_MS = 250;
 const DEFAULT_FADE_PER_SECOND = 3;
 const DEFAULT_POINT_LIGHT_INTENSITY = 1.5;
+const MAX_ACTIVE_CORONAS = 96;
 const OFFSCREEN_FADE_MARGIN = 0;
 
 function clamp01(value) {
@@ -458,10 +459,12 @@ export class RWCoronaPipeline {
     };
     const timecycleValues = runtimeContext?.timecycleCurrent?.values || {};
     const foggyness = clamp01(runtimeContext?.timecycleCurrent?.foggyness ?? runtimeContext?.foggyness ?? 0);
-    const spriteBrightness = Math.max(0.25, Number(timecycleValues.spriteBrightness) || 1);
+    const spriteBrightnessValue = Number(timecycleValues.spriteBrightness);
+    const spriteBrightness = Math.max(0, Number.isFinite(spriteBrightnessValue) ? spriteBrightnessValue : 1);
     const spriteSize = Math.max(0.5, Number(timecycleValues.spriteSize) || 1);
     const fadeDelta = Math.max(0, Number(runtimeContext?.dt) || 0) * DEFAULT_FADE_PER_SECOND;
     const timeMs = Number(runtimeContext?.timeMs) || 0;
+    const candidateEntries = [];
 
     for (const entry of this.entries) {
       const emitter = entry.emitter;
@@ -469,7 +472,44 @@ export class RWCoronaPipeline {
       const distance = camera.position.distanceTo(toVector3(emitter.position));
       const drawDistance = Math.max(0, Number(emitter.drawDistance) || 0);
       const withinDrawDistance = drawDistance <= 0 || distance <= drawDistance;
+      const wantsShow = visibility.active && withinDrawDistance;
+      if (wantsShow || entry.fadeAlpha > 0.001) {
+        candidateEntries.push({
+          entry,
+          visibility,
+          distance,
+          drawDistance,
+          withinDrawDistance,
+          wantsShow,
+        });
+      } else {
+        if (entry.sprite) {
+          entry.sprite.visible = false;
+          entry.lastScreen = null;
+        }
+        if (entry.light) entry.light.visible = false;
+      }
+    }
+
+    candidateEntries.sort((a, b) => a.distance - b.distance);
+    let activeBudget = Math.max(0, Math.floor(Number(runtimeContext?.twoDfx?.maxActiveCoronas) || MAX_ACTIVE_CORONAS));
+    const selectedEntries = new Set();
+    for (const item of candidateEntries) {
+      if (item.entry.fadeAlpha > 0.001) {
+        selectedEntries.add(item.entry);
+        continue;
+      }
+      if (item.wantsShow && activeBudget > 0) {
+        selectedEntries.add(item.entry);
+        activeBudget -= 1;
+      }
+    }
+
+    for (const item of candidateEntries) {
+      const { entry, visibility, distance, drawDistance, withinDrawDistance } = item;
+      const emitter = entry.emitter;
       let targetAlpha = visibility.active && withinDrawDistance ? 1 : 0;
+      if (!selectedEntries.has(entry)) targetAlpha = 0;
 
       if (targetAlpha > 0 && emitter.longDistance) {
         if (distance < 35) {
@@ -482,7 +522,8 @@ export class RWCoronaPipeline {
       const losVisible = targetAlpha > 0 ? this.computeLosVisible(entry, camera, timeMs) : true;
       if (!losVisible) targetAlpha = 0;
 
-      const currentScreen = entry.sprite
+      const needsScreenTest = entry.sprite && (targetAlpha > 0 || entry.fadeAlpha > 0.001);
+      const currentScreen = needsScreenTest
         ? calcScreenCoorsLikeRw(camera, toVector3(emitter.position), this.viewportWidth, this.viewportHeight, true)
         : null;
       let screen = currentScreen;
@@ -553,7 +594,7 @@ export class RWCoronaPipeline {
 
       if (entry.light) {
         const lightDescriptor = emitter.light || {};
-        const visible = this.enabled && visibility.active && withinDrawDistance && losVisible;
+        const visible = this.enabled && selectedEntries.has(entry) && visibility.active && withinDrawDistance && losVisible;
         const color = normalizeEmitterColor(emitter.color);
         TMP_COLOR.setRGB(color.r, color.g, color.b, THREE.SRGBColorSpace);
         entry.light.color.copy(TMP_COLOR);
@@ -596,6 +637,15 @@ export class RWCoronaPipeline {
         entry.helperLine.lookAt(TMP_LOOK_TARGET);
         entry.helperLine.material.color.setRGB(color.r, color.g, color.b, THREE.SRGBColorSpace);
       }
+    }
+
+    for (const entry of this.entries) {
+      if (selectedEntries.has(entry)) continue;
+      if (entry.sprite && entry.fadeAlpha <= 0.001) {
+        entry.sprite.visible = false;
+        entry.lastScreen = null;
+      }
+      if (entry.light) entry.light.visible = false;
     }
   }
 

@@ -24,6 +24,8 @@ const EMPTY_BOX = new THREE.Box3();
 const DEFAULT_FADE_PER_SECOND = 3;
 const DEFAULT_SHADOW_Z_DISTANCE = 15;
 const DEFAULT_SHADOW_DRAW_DISTANCE = 40;
+const DEFAULT_MAX_REBUILDS_PER_FRAME = 6;
+const MAX_ACTIVE_SHADOWS = 48;
 const OFFSCREEN_FADE_MARGIN = 0;
 
 function overlapRange(minA, maxA, minB, maxB) {
@@ -233,6 +235,8 @@ export class RWShadowPipeline {
       fallbackCornerCount: 0,
     };
     this.loggedFailureKeys = new Set();
+    this.cachedSceneMeshes = null;
+    this.sceneMeshesDirty = true;
     this.setRoot(options.root || null);
     this.setTextureDictionary(options.textureDictionary || null);
     this.setEmitters(options.emitters || []);
@@ -242,6 +246,8 @@ export class RWShadowPipeline {
     if (this.root === root) return this.root;
     if (this.shadowRoot.parent) this.shadowRoot.parent.remove(this.shadowRoot);
     this.root = root || null;
+    this.sceneMeshesDirty = true;
+    this.cachedSceneMeshes = null;
     if (this.root) this.root.add(this.shadowRoot);
     return this.root;
   }
@@ -285,6 +291,35 @@ export class RWShadowPipeline {
       .map((emitter, index) => this.createEntry(emitter, index))
       .filter(Boolean);
     this.debugStats.entryCount = this.entries.length;
+  }
+
+  getSceneMeshes() {
+    if (!this.root) return [];
+    if (!this.sceneMeshesDirty && Array.isArray(this.cachedSceneMeshes)) return this.cachedSceneMeshes;
+    this.root.updateMatrixWorld(true);
+    const meshes = [];
+    this.root.traverse((object) => {
+      if (!object?.isMesh || !object.geometry) return;
+      let current = object;
+      while (current) {
+        if (current.userData?.rwShadowAux || current.userData?.rwCoronaAux) return;
+        current = current.parent;
+      }
+      const geometry = object.geometry;
+      if (!geometry.boundingBox) geometry.computeBoundingBox();
+      const positionAttribute = geometry.getAttribute?.('position');
+      if (!geometry.boundingBox || !positionAttribute || positionAttribute.count < 3) return;
+      meshes.push({
+        object,
+        geometry,
+        positionAttribute,
+        indexAttribute: geometry.getIndex?.() || null,
+        worldBox: geometry.boundingBox.clone().applyMatrix4(object.matrixWorld),
+      });
+    });
+    this.cachedSceneMeshes = meshes;
+    this.sceneMeshesDirty = false;
+    return meshes;
   }
 
   createEntry(emitter, index) {
@@ -348,24 +383,8 @@ export class RWShadowPipeline {
   }
 
   collectCandidateMeshes(bounds) {
-    if (!this.root) return [];
-    this.root.updateMatrixWorld(true);
-    const candidates = [];
-    this.root.traverse((object) => {
-      if (!object?.isMesh || !object.geometry) return;
-      let current = object;
-      while (current) {
-        if (current.userData?.rwShadowAux || current.userData?.rwCoronaAux) return;
-        current = current.parent;
-      }
-      const geometry = object.geometry;
-      if (!geometry.boundingBox) geometry.computeBoundingBox();
-      if (!geometry.boundingBox) return;
-      const worldBox = TMP_TRIANGLE_BOX.copy(geometry.boundingBox).applyMatrix4(object.matrixWorld);
-      if (!worldBox.intersectsBox(bounds)) return;
-      candidates.push(object);
-    });
-    return candidates;
+    const sceneMeshes = this.getSceneMeshes();
+    return sceneMeshes.filter((entry) => entry.worldBox.intersectsBox(bounds));
   }
 
   getProjectionKey(entry, shadowDebug = null) {
@@ -438,11 +457,8 @@ export class RWShadowPipeline {
     };
 
     let fallbackCornerCount = 0;
-    for (const mesh of candidateMeshes) {
-      const geometry = mesh.geometry;
-      const positionAttribute = geometry.getAttribute?.('position');
-      if (!positionAttribute || positionAttribute.count < 3) continue;
-      const indexAttribute = geometry.getIndex?.() || null;
+    for (const meshEntry of candidateMeshes) {
+      const { object: mesh, positionAttribute, indexAttribute } = meshEntry;
       const triangleCount = indexAttribute ? indexAttribute.count / 3 : positionAttribute.count / 3;
       for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
         const ia = indexAttribute ? indexAttribute.getX((triangleIndex * 3) + 0) : ((triangleIndex * 3) + 0);
@@ -542,7 +558,8 @@ export class RWShadowPipeline {
   update(camera, runtimeContext = {}) {
     const shadowDebug = runtimeContext?.shadows || {};
     const timecycleValues = runtimeContext?.timecycleCurrent?.values || {};
-    const spriteBrightness = Math.max(0.25, Number(timecycleValues.spriteBrightness) || 1);
+    const spriteBrightnessValue = Number(timecycleValues.spriteBrightness);
+    const spriteBrightness = Math.max(0, Number.isFinite(spriteBrightnessValue) ? spriteBrightnessValue : 1);
     const lightOnGroundBrightness = Math.max(0, Number(timecycleValues.lightOnGround) || 0);
     const trafficLightBrightness = computeTrafficLightBrightness(runtimeContext);
     const fadeDelta = Math.max(0, Number(runtimeContext?.dt) || 0) * DEFAULT_FADE_PER_SECOND;
@@ -554,6 +571,8 @@ export class RWShadowPipeline {
     let outOfRangeCount = 0;
     let rebuildFailedCount = 0;
     let fallbackCornerCount = 0;
+    let rebuildBudget = DEFAULT_MAX_REBUILDS_PER_FRAME;
+    const candidateEntries = [];
 
     for (const entry of this.entries) {
       const emitter = entry.emitter;
@@ -570,13 +589,16 @@ export class RWShadowPipeline {
         (Number(shadowSettings.drawDistance) || DEFAULT_SHADOW_DRAW_DISTANCE)
           * Math.max(0, Number(shadowDebug.drawDistanceScale) || 1),
       );
-      const screen = calcScreenCoorsLikeRw(
-        camera,
-        toVector3(emitter.position),
-        runtimeContext?.viewportWidth || 1,
-        runtimeContext?.viewportHeight || 1,
-        true,
-      );
+      const needsScreenTest = this.enabled && (visibility.active || entry.fadeAlpha > 0.001);
+      const screen = needsScreenTest
+        ? calcScreenCoorsLikeRw(
+          camera,
+          toVector3(emitter.position),
+          runtimeContext?.viewportWidth || 1,
+          runtimeContext?.viewportHeight || 1,
+          true,
+        )
+        : null;
       const screenVisible = Boolean(
         screen
         && screen.x >= -OFFSCREEN_FADE_MARGIN
@@ -588,7 +610,7 @@ export class RWShadowPipeline {
       if (shadowIntensity <= 0) zeroIntensityCount += 1;
       if (drawDistance > 0 && distance > drawDistance) outOfRangeCount += 1;
       const trafficLightShadowVisible = emitter.sourceType !== 'trafficLightShadow' || trafficLightBrightness > 0.05;
-      const targetAlpha = (
+      const wantsShow = (
         this.enabled
         && visibility.active
         && shadowIntensity > 0
@@ -597,7 +619,39 @@ export class RWShadowPipeline {
         && (drawDistance <= 0 || distance <= drawDistance)
         && screenVisible
         && trafficLightShadowVisible
-      ) ? 1 : 0;
+      );
+
+      if (wantsShow || entry.fadeAlpha > 0.001 || entry.projected) {
+        candidateEntries.push({
+          entry,
+          emitter,
+          shadowSettings,
+          shadowIntensity,
+          distance,
+          wantsShow,
+        });
+      } else {
+        entry.shadowMesh.visible = false;
+      }
+    }
+
+    candidateEntries.sort((a, b) => a.distance - b.distance);
+    let activeShadowBudget = Math.max(0, Math.floor(Number(shadowDebug.maxActiveShadows) || MAX_ACTIVE_SHADOWS));
+    const selectedEntries = new Set();
+    for (const item of candidateEntries) {
+      if (item.entry.fadeAlpha > 0.001) {
+        selectedEntries.add(item.entry);
+        continue;
+      }
+      if (item.wantsShow && activeShadowBudget > 0) {
+        selectedEntries.add(item.entry);
+        activeShadowBudget -= 1;
+      }
+    }
+
+    for (const item of candidateEntries) {
+      const { entry, emitter, shadowSettings, shadowIntensity, distance, wantsShow } = item;
+      const targetAlpha = wantsShow && selectedEntries.has(entry) ? 1 : 0;
 
       entry.fadeAlpha = approach(entry.fadeAlpha, targetAlpha, fadeDelta);
       if (entry.fadeAlpha <= 0.001) {
@@ -607,12 +661,18 @@ export class RWShadowPipeline {
 
       const projectionKey = this.getProjectionKey(entry, shadowDebug);
       if (shadowDebug.rebuildEveryFrame === true || !entry.projected || entry.lastProjectionKey !== projectionKey) {
-        entry.projected = false;
+        if (shadowDebug.rebuildEveryFrame !== true && rebuildBudget <= 0) {
+          entry.shadowMesh.visible = entry.projected;
+          continue;
+        }
+        const previousProjected = entry.projected;
         if (!this.rebuildProjectedGeometry(entry, shadowDebug)) {
           rebuildFailedCount += 1;
+          entry.projected = previousProjected;
           entry.shadowMesh.visible = false;
           continue;
         }
+        if (shadowDebug.rebuildEveryFrame !== true) rebuildBudget -= 1;
         rebuiltCount += 1;
         fallbackCornerCount += entry.lastFallbackCornerCount || 0;
       }
@@ -624,10 +684,11 @@ export class RWShadowPipeline {
 
       const color = normalizeEmitterColor(emitter.color);
       const debugIntensityScale = Math.max(0, Number(shadowDebug.intensityScale) || 1);
-      const baseBrightness = shadowSettings.colorScale === 'trafficLightGround'
+      const fixedIntensityWeight = shadowIntensity / 255;
+      const timecycleBrightness = shadowSettings.colorScale === 'trafficLightGround'
         ? ((lightOnGroundBrightness / 8) * trafficLightBrightness)
         : spriteBrightness;
-      const brightnessScale = clamp01(baseBrightness * (shadowIntensity / 255) * debugIntensityScale);
+      const resolvedBrightness = Math.max(0, timecycleBrightness * fixedIntensityWeight * debugIntensityScale);
       const alphaScale = clamp01(entry.fadeAlpha * ((Number(shadowSettings.alpha) || 128) / 255) * debugIntensityScale);
       entry.shadowMesh.visible = true;
       visibleCount += 1;
@@ -636,13 +697,18 @@ export class RWShadowPipeline {
       entry.shadowMesh.scale.set(1, 1, 1);
       entry.shadowMesh.material.wireframe = shadowDebug.wireframe === true;
       TMP_COLOR.setRGB(
-        color.r * brightnessScale,
-        color.g * brightnessScale,
-        color.b * brightnessScale,
+        color.r * resolvedBrightness,
+        color.g * resolvedBrightness,
+        color.b * resolvedBrightness,
         THREE.SRGBColorSpace,
       );
       entry.shadowMesh.material.color.copy(TMP_COLOR);
       entry.shadowMesh.material.opacity = alphaScale;
+    }
+
+    for (const entry of this.entries) {
+      if (selectedEntries.has(entry)) continue;
+      if (entry.fadeAlpha <= 0.001) entry.shadowMesh.visible = false;
     }
 
     this.debugStats.visibleCount = visibleCount;
