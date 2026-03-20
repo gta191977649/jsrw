@@ -2,6 +2,12 @@ import * as THREE from 'three';
 import { calcScreenCoorsLikeRw, prepareRwSpriteTexture } from '../world/sky/RWSpriteUtils.js';
 import { computeTrafficLightBrightness, resolveTrafficLightPhase } from '../corona/TrafficLights.js';
 import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
+import {
+  DISTANCE_FADE_DEFAULTS,
+  approachValue,
+  computeDistanceFadeAlpha,
+  isDistanceWithinFadeWindow,
+} from '../../../renderDistanceFade.js';
 
 const TMP_POSITION = new THREE.Vector3();
 const TMP_FRONT = new THREE.Vector3();
@@ -22,7 +28,6 @@ const CORNER_OFFSETS = [
   { front: -1, side: -1, uv: [0, 1] },
 ];
 const EMPTY_BOX = new THREE.Box3();
-const DEFAULT_FADE_PER_SECOND = 3;
 const DEFAULT_SHADOW_Z_DISTANCE = 15;
 const DEFAULT_SHADOW_DRAW_DISTANCE = 40;
 const DEFAULT_MAX_REBUILDS_PER_FRAME = 6;
@@ -117,12 +122,6 @@ function normalizeEmitterColor(color) {
     g: THREE.MathUtils.clamp(Number.isFinite(g) ? (g > 1 ? (g / 255) : g) : 1, 0, 1),
     b: THREE.MathUtils.clamp(Number.isFinite(b) ? (b > 1 ? (b / 255) : b) : 1, 0, 1),
   };
-}
-
-function approach(current, target, delta) {
-  if (current < target) return Math.min(current + delta, target);
-  if (current > target) return Math.max(current - delta, target);
-  return current;
 }
 
 function isNightHour(hour) {
@@ -374,6 +373,7 @@ export class RWShadowPipeline {
       emitter,
       index,
       fadeAlpha: 0,
+      streamAlpha: 0,
       shadowMesh,
       projected: false,
       lastProjectionKey: '',
@@ -578,7 +578,9 @@ export class RWShadowPipeline {
     const spriteBrightness = Math.max(0, Number.isFinite(spriteBrightnessValue) ? spriteBrightnessValue : 1);
     const lightOnGroundBrightness = Math.max(0, Number(timecycleValues.lightOnGround) || 0);
     const trafficLightBrightness = computeTrafficLightBrightness(runtimeContext);
-    const fadeDelta = Math.max(0, Number(runtimeContext?.dt) || 0) * DEFAULT_FADE_PER_SECOND;
+    const fadeConfig = runtimeContext?.distanceFade || DISTANCE_FADE_DEFAULTS;
+    const fadeDelta = Math.max(0, Number(runtimeContext?.dt) || 0)
+      * Math.max(0, Number(fadeConfig?.streamAlphaPerSecond) || DISTANCE_FADE_DEFAULTS.streamAlphaPerSecond);
     let visibleCount = 0;
     let projectedCount = 0;
     let rebuiltCount = 0;
@@ -605,7 +607,11 @@ export class RWShadowPipeline {
         (Number(shadowSettings.drawDistance) || DEFAULT_SHADOW_DRAW_DISTANCE)
           * Math.max(0, Number(shadowDebug.drawDistanceScale) || 1),
       );
-      const needsScreenTest = this.enabled && (visibility.active || entry.fadeAlpha > 0.001);
+      const needsScreenTest = this.enabled && (
+        visibility.active
+        || entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+      );
       const screen = needsScreenTest
         ? calcScreenCoorsLikeRw(
           camera,
@@ -624,7 +630,7 @@ export class RWShadowPipeline {
       );
       if (!shadowTexture) missingTextureCount += 1;
       if (shadowIntensity <= 0) zeroIntensityCount += 1;
-      if (drawDistance > 0 && distance > drawDistance) outOfRangeCount += 1;
+      if (drawDistance > 0 && !isDistanceWithinFadeWindow(distance, drawDistance, fadeConfig)) outOfRangeCount += 1;
       const trafficLightShadowVisible = emitter.sourceType !== 'trafficLightShadow' || trafficLightBrightness > 0.05;
       const wantsShow = (
         this.enabled
@@ -632,17 +638,18 @@ export class RWShadowPipeline {
         && shadowIntensity > 0
         && shadowTexture
         && (Number(shadowSettings.size) || 0) > 0
-        && (drawDistance <= 0 || distance <= drawDistance)
+        && isDistanceWithinFadeWindow(distance, drawDistance, fadeConfig)
         && screenVisible
         && trafficLightShadowVisible
       );
 
-      if (wantsShow || entry.fadeAlpha > 0.001 || entry.projected) {
+      if (wantsShow || entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon || entry.projected) {
         candidateEntries.push({
           entry,
           emitter,
           shadowSettings,
           shadowIntensity,
+          drawDistance,
           distance,
           wantsShow,
         });
@@ -655,7 +662,7 @@ export class RWShadowPipeline {
     let activeShadowBudget = Math.max(0, Math.floor(Number(shadowDebug.maxActiveShadows) || MAX_ACTIVE_SHADOWS));
     const selectedEntries = new Set();
     for (const item of candidateEntries) {
-      if (item.entry.fadeAlpha > 0.001) {
+      if (item.entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon || item.entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
         selectedEntries.add(item.entry);
         continue;
       }
@@ -666,11 +673,12 @@ export class RWShadowPipeline {
     }
 
     for (const item of candidateEntries) {
-      const { entry, emitter, shadowSettings, shadowIntensity, distance, wantsShow } = item;
-      const targetAlpha = wantsShow && selectedEntries.has(entry) ? 1 : 0;
+      const { entry, emitter, shadowSettings, shadowIntensity, drawDistance, distance, wantsShow } = item;
+      const targetStreamAlpha = wantsShow && selectedEntries.has(entry) ? 1 : 0;
 
-      entry.fadeAlpha = approach(entry.fadeAlpha, targetAlpha, fadeDelta);
-      if (entry.fadeAlpha <= 0.001) {
+      entry.streamAlpha = approachValue(entry.streamAlpha, targetStreamAlpha, fadeDelta);
+      entry.fadeAlpha = clamp01(entry.streamAlpha * computeDistanceFadeAlpha(distance, drawDistance, fadeConfig));
+      if (entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) {
         entry.shadowMesh.visible = false;
         continue;
       }
@@ -724,7 +732,7 @@ export class RWShadowPipeline {
 
     for (const entry of this.entries) {
       if (selectedEntries.has(entry)) continue;
-      if (entry.fadeAlpha <= 0.001) entry.shadowMesh.visible = false;
+      if (entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) entry.shadowMesh.visible = false;
     }
 
     this.debugStats.visibleCount = visibleCount;

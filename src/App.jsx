@@ -7,6 +7,12 @@ import WebGPU from 'three/addons/capabilities/WebGPU.js';
 import { playerController as createExternalPlayerController } from 'three-player-controller';
 import { formatConsoleArg } from './lib/console';
 import { buildFileIndex } from './lib/fileIndex';
+import {
+  DISTANCE_FADE_DEFAULTS,
+  approachValue,
+  computeDistanceFadeAlpha,
+  resolveRenderableDistance,
+} from './lib/renderDistanceFade';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from './lib/gtaTransforms';
 import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE, normalizePath } from './lib/gta/loaders/SectionLoader';
 import { sampleTimecyc, TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/Timecycle';
@@ -70,9 +76,9 @@ const CHUNK_SPHERE_PADDING = WORLD_CHUNK_SIZE * 0.75;
 const ENABLE_WORLD_INSTANCING = true;
 const STREAMING_BUILD_PLACEMENT_BUDGET = 8;
 const STREAMING_BUILD_FRAME_BUDGET_MS = 8;
-const RW_DISTANCE_FADE_WINDOW = 20;
-const RW_STREAM_ALPHA_PER_SECOND = 3.2;
-const RW_FADE_EPSILON = 0.001;
+const RW_DISTANCE_FADE_WINDOW = DISTANCE_FADE_DEFAULTS.window;
+const RW_STREAM_ALPHA_PER_SECOND = DISTANCE_FADE_DEFAULTS.streamAlphaPerSecond;
+const RW_FADE_EPSILON = DISTANCE_FADE_DEFAULTS.epsilon;
 const HIDDEN_INSTANCE_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 const SKY_SMALL_STRIP_HEIGHT = 4 / 400;
 const SKY_HORIZON_STRIP_HEIGHT = 48 / 400;
@@ -340,23 +346,6 @@ function getTimecyclePostFxControlSignature(values) {
   const postFx = getTimecyclePostFxControlValues(values);
   if (!postFx) return 'none';
   return JSON.stringify(postFx);
-}
-
-function approachValue(current, target, delta) {
-  if (current < target) return Math.min(current + delta, target);
-  if (current > target) return Math.max(current - delta, target);
-  return current;
-}
-
-function resolveRenderableDistance(value, fallback) {
-  if (Number.isFinite(value) && value > 0) return value;
-  return fallback;
-}
-
-function computeDistanceFadeAlpha(distance, endDistance) {
-  if (!Number.isFinite(endDistance) || endDistance <= 0) return 1;
-  if (distance <= endDistance) return 1;
-  return clamp01((endDistance + RW_DISTANCE_FADE_WINDOW - distance) / RW_DISTANCE_FADE_WINDOW);
 }
 
 function disposeObjectMaterialsOnly(root) {

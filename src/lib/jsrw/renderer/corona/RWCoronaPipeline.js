@@ -6,6 +6,12 @@ import {
 } from '../world/sky/RWSpriteUtils.js';
 import { resolveTrafficLightPhase } from './TrafficLights.js';
 import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
+import {
+  DISTANCE_FADE_DEFAULTS,
+  approachValue,
+  computeDistanceFadeAlpha,
+  isDistanceWithinFadeWindow,
+} from '../../../renderDistanceFade.js';
 
 const TMP_POSITION = new THREE.Vector3();
 const TMP_DIRECTION = new THREE.Vector3();
@@ -16,7 +22,6 @@ const TMP_COLOR = new THREE.Color();
 const TMP_CAMERA_FORWARD = new THREE.Vector3();
 const DEBUG_HELPER_GEOMETRY = new THREE.BoxGeometry(0.18, 0.18, 0.18);
 const MIN_LOS_INTERVAL_MS = 250;
-const DEFAULT_FADE_PER_SECOND = 3;
 const DEFAULT_POINT_LIGHT_INTENSITY = 1.5;
 const MAX_ACTIVE_CORONAS = 96;
 const OFFSCREEN_FADE_MARGIN = 0;
@@ -61,12 +66,6 @@ function hashEmitterId(id) {
     hash |= 0;
   }
   return Math.abs(hash);
-}
-
-function approach(current, target, delta) {
-  if (current < target) return Math.min(current + delta, target);
-  if (current > target) return Math.max(current - delta, target);
-  return current;
 }
 
 function calculateSpotAngle(directionAngle) {
@@ -323,6 +322,7 @@ export class RWCoronaPipeline {
       flashOffset2: index * 0x100,
       flashOffset3: index * 0x200,
       fadeAlpha: 0,
+      streamAlpha: 0,
       lastLosCheckMs: 0,
       losVisible: true,
       sprite: null,
@@ -497,7 +497,9 @@ export class RWCoronaPipeline {
     const spriteBrightnessValue = Number(timecycleValues.spriteBrightness);
     const spriteBrightness = Math.max(0, Number.isFinite(spriteBrightnessValue) ? spriteBrightnessValue : 1);
     const spriteSize = Math.max(0.5, Number(timecycleValues.spriteSize) || 1);
-    const fadeDelta = Math.max(0, Number(runtimeContext?.dt) || 0) * DEFAULT_FADE_PER_SECOND;
+    const fadeConfig = runtimeContext?.distanceFade || DISTANCE_FADE_DEFAULTS;
+    const fadeDelta = Math.max(0, Number(runtimeContext?.dt) || 0)
+      * Math.max(0, Number(fadeConfig?.streamAlphaPerSecond) || DISTANCE_FADE_DEFAULTS.streamAlphaPerSecond);
     const timeMs = Number(runtimeContext?.timeMs) || 0;
     const candidateEntries = [];
 
@@ -506,9 +508,9 @@ export class RWCoronaPipeline {
       const visibility = shouldEmitterBeActive(entry, updateContext);
       const distance = camera.position.distanceTo(toVector3(emitter.position));
       const drawDistance = Math.max(0, Number(emitter.drawDistance) || 0);
-      const withinDrawDistance = drawDistance <= 0 || distance <= drawDistance;
+      const withinDrawDistance = isDistanceWithinFadeWindow(distance, drawDistance, fadeConfig);
       const wantsShow = visibility.active && withinDrawDistance;
-      if (wantsShow || entry.fadeAlpha > 0.001) {
+      if (wantsShow || entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
         candidateEntries.push({
           entry,
           visibility,
@@ -530,7 +532,7 @@ export class RWCoronaPipeline {
     let activeBudget = Math.max(0, Math.floor(Number(runtimeContext?.twoDfx?.maxActiveCoronas) || MAX_ACTIVE_CORONAS));
     const selectedEntries = new Set();
     for (const item of candidateEntries) {
-      if (item.entry.fadeAlpha > 0.001) {
+      if (item.entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon || item.entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
         selectedEntries.add(item.entry);
         continue;
       }
@@ -543,27 +545,31 @@ export class RWCoronaPipeline {
     for (const item of candidateEntries) {
       const { entry, visibility, distance, drawDistance, withinDrawDistance } = item;
       const emitter = entry.emitter;
-      let targetAlpha = visibility.active && withinDrawDistance ? 1 : 0;
-      if (!selectedEntries.has(entry)) targetAlpha = 0;
+      let targetStreamAlpha = visibility.active && withinDrawDistance ? 1 : 0;
+      if (!selectedEntries.has(entry)) targetStreamAlpha = 0;
 
-      if (targetAlpha > 0 && emitter.longDistance) {
+      if (targetStreamAlpha > 0 && emitter.longDistance) {
         if (distance < 35) {
-          targetAlpha = 0;
+          targetStreamAlpha = 0;
         } else if (distance < 50) {
-          targetAlpha *= clamp01((distance - 35) / 15);
+          targetStreamAlpha *= clamp01((distance - 35) / 15);
         }
       }
 
-      const losVisible = targetAlpha > 0 ? this.computeLosVisible(entry, camera, timeMs) : true;
-      if (!losVisible) targetAlpha = 0;
+      const losVisible = targetStreamAlpha > 0 ? this.computeLosVisible(entry, camera, timeMs) : true;
+      if (!losVisible) targetStreamAlpha = 0;
 
-      const needsScreenTest = entry.sprite && (targetAlpha > 0 || entry.fadeAlpha > 0.001);
+      const needsScreenTest = entry.sprite && (
+        targetStreamAlpha > 0
+        || entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+      );
       const currentScreen = needsScreenTest
         ? calcScreenCoorsLikeRw(camera, toVector3(emitter.position), this.viewportWidth, this.viewportHeight, true)
         : null;
       let screen = currentScreen;
       let screenVisible = Boolean(screen);
-      if (entry.sprite && !screen) targetAlpha = 0;
+      if (entry.sprite && !screen) targetStreamAlpha = 0;
       if (entry.sprite && screen) {
         const offscreen = (
           screen.x < -OFFSCREEN_FADE_MARGIN
@@ -572,15 +578,16 @@ export class RWCoronaPipeline {
           || screen.y > (this.viewportHeight + OFFSCREEN_FADE_MARGIN)
         );
         if (offscreen) {
-          targetAlpha = 0;
+          targetStreamAlpha = 0;
           screenVisible = false;
         }
       } else if (entry.sprite) {
         screenVisible = false;
       }
 
-      entry.fadeAlpha = approach(entry.fadeAlpha, targetAlpha, fadeDelta);
-      if (entry.sprite && screenVisible && screen) {
+      entry.streamAlpha = approachValue(entry.streamAlpha, targetStreamAlpha, fadeDelta);
+      entry.fadeAlpha = clamp01(entry.streamAlpha * computeDistanceFadeAlpha(distance, drawDistance, fadeConfig));
+      if (entry.sprite && screenVisible && screen && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
         entry.lastScreen = {
           x: screen.x,
           y: screen.y,
@@ -589,12 +596,12 @@ export class RWCoronaPipeline {
           spriteW: screen.spriteW,
           spriteH: screen.spriteH,
         };
-      } else if (entry.sprite && entry.fadeAlpha > 0.001 && entry.lastScreen) {
+      } else if (entry.sprite && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon && entry.lastScreen) {
         screen = entry.lastScreen;
       }
 
       if (entry.sprite) {
-        const visible = this.enabled && entry.fadeAlpha > 0.001 && screenVisible;
+        const visible = this.enabled && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon && screenVisible;
         entry.sprite.visible = Boolean(visible);
         if (visible) {
           const color = normalizeEmitterColor(emitter.color);
@@ -603,10 +610,6 @@ export class RWCoronaPipeline {
           const trafficLightColorScale = emitter.sourceType === 'trafficLight'
             ? (spriteBrightness * Math.max(0, Number(trafficLightSettings?.brightnessScale) || 0.7))
             : 1;
-          const fadeDistance = drawDistance > 0 ? (drawDistance * 0.5) : 0;
-          const distanceFade = fadeDistance > 0
-            ? (screen.z < fadeDistance ? 1 : clamp01(1 - ((screen.z - fadeDistance) / fadeDistance)))
-            : 1;
           const fogScale = (foggyness * Math.min(screen.z, 40) / 40) + 1;
           entry.sprite.material.color.setRGB(
             (color.r * trafficLightColorScale) / fogScale,
@@ -614,7 +617,7 @@ export class RWCoronaPipeline {
             (color.b * trafficLightColorScale) / fogScale,
             THREE.SRGBColorSpace,
           );
-          entry.sprite.material.opacity = clamp01(entry.fadeAlpha * distanceFade * coronaAlpha);
+          entry.sprite.material.opacity = clamp01(entry.fadeAlpha * coronaAlpha);
           entry.sprite.material.rotation = 20 * screen.recipZ;
           const trafficLightSizeScale = emitter.sourceType === 'trafficLight'
             ? spriteSize * Math.max(0.1, Number(trafficLightSettings?.sizeScale) || 1.75)
@@ -622,14 +625,19 @@ export class RWCoronaPipeline {
           const worldSize = Math.max(0.01, Number(emitter.size) || 1) * trafficLightSizeScale * fogScale * 2;
           entry.sprite.position.copy(toVector3(emitter.position));
           entry.sprite.scale.set(worldSize, worldSize, 1);
-        } else if (entry.fadeAlpha <= 0.001) {
+        } else if (entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) {
           entry.lastScreen = null;
         }
       }
 
       if (entry.light) {
         const lightDescriptor = emitter.light || {};
-        const visible = this.enabled && selectedEntries.has(entry) && visibility.active && withinDrawDistance && losVisible;
+        const visible = this.enabled
+          && selectedEntries.has(entry)
+          && visibility.active
+          && withinDrawDistance
+          && losVisible
+          && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon;
         const color = normalizeEmitterColor(emitter.color);
         TMP_COLOR.setRGB(color.r, color.g, color.b, THREE.SRGBColorSpace);
         entry.light.color.copy(TMP_COLOR);
@@ -638,7 +646,7 @@ export class RWCoronaPipeline {
           ? spriteBrightness
           : 1;
         entry.light.intensity = visible
-          ? (Number(lightDescriptor.intensity) || DEFAULT_POINT_LIGHT_INTENSITY) * brightnessScale
+          ? (Number(lightDescriptor.intensity) || DEFAULT_POINT_LIGHT_INTENSITY) * brightnessScale * entry.fadeAlpha
           : 0;
         entry.light.position.copy(toVector3(emitter.position));
         if ('distance' in entry.light) {
@@ -676,7 +684,7 @@ export class RWCoronaPipeline {
 
     for (const entry of this.entries) {
       if (selectedEntries.has(entry)) continue;
-      if (entry.sprite && entry.fadeAlpha <= 0.001) {
+      if (entry.sprite && entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) {
         entry.sprite.visible = false;
         entry.lastScreen = null;
       }
