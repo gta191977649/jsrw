@@ -195,6 +195,13 @@ export class RWCoronaPipeline {
     };
     this.debugShowAll = false;
     this.entries = [];
+    this.entryByEmitter = new WeakMap();
+    this.activeEntries = new Set();
+    this.debugStats = {
+      entryCount: 0,
+      candidateCount: 0,
+      activeCount: 0,
+    };
     this.raycaster = new THREE.Raycaster();
     this.cachedOccluderMeshes = null;
     this.occludersDirty = true;
@@ -307,7 +314,36 @@ export class RWCoronaPipeline {
 
   setEmitters(emitters = []) {
     this.disposeEntries();
+    this.entryByEmitter = new WeakMap();
+    this.activeEntries.clear();
     this.entries = (emitters || []).map((emitter, index) => this.createEntry(emitter, index)).filter(Boolean);
+    for (const entry of this.entries) {
+      this.entryByEmitter.set(entry.emitter, entry);
+    }
+    this.debugStats.entryCount = this.entries.length;
+  }
+
+  getFrameEntries(frameVisibility = null) {
+    if (frameVisibility?.computed !== true) {
+      return this.entries;
+    }
+    const frameVisibilityCandidates = Array.isArray(frameVisibility?.coronaCandidates)
+      ? frameVisibility.coronaCandidates
+      : [];
+    const entries = [];
+    const seen = new Set();
+    for (const emitter of frameVisibilityCandidates) {
+      const entry = this.entryByEmitter.get(emitter);
+      if (!entry || seen.has(entry)) continue;
+      seen.add(entry);
+      entries.push(entry);
+    }
+    for (const entry of this.activeEntries) {
+      if (!entry || seen.has(entry)) continue;
+      seen.add(entry);
+      entries.push(entry);
+    }
+    return entries;
   }
 
   createEntry(emitter, index) {
@@ -497,9 +533,11 @@ export class RWCoronaPipeline {
     const spriteSize = Math.max(0.5, Number(timecycleValues.spriteSize) || 1);
     const fadeConfig = runtimeContext?.distanceFade || DISTANCE_FADE_DEFAULTS;
     const timeMs = Number(runtimeContext?.timeMs) || 0;
+    const sourceEntries = this.getFrameEntries(runtimeContext?.frameVisibility);
     const candidateEntries = [];
+    const nextActiveEntries = new Set();
 
-    for (const entry of this.entries) {
+    for (const entry of sourceEntries) {
       const emitter = entry.emitter;
       const visibility = shouldEmitterBeActive(entry, updateContext);
       const distance = camera.position.distanceTo(toVector3(emitter.position));
@@ -671,16 +709,34 @@ export class RWCoronaPipeline {
         entry.helperLine.lookAt(TMP_LOOK_TARGET);
         entry.helperLine.material.color.setRGB(color.r, color.g, color.b, THREE.SRGBColorSpace);
       }
+
+      if (
+        entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.sprite?.visible
+        || entry.light?.visible
+      ) {
+        nextActiveEntries.add(entry);
+      }
     }
 
-    for (const entry of this.entries) {
+    for (const entry of sourceEntries) {
       if (selectedEntries.has(entry)) continue;
       if (entry.sprite && entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) {
         entry.sprite.visible = false;
         entry.lastScreen = null;
       }
       if (entry.light) entry.light.visible = false;
+      if (
+        entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+      ) {
+        nextActiveEntries.add(entry);
+      }
     }
+    this.activeEntries = nextActiveEntries;
+    this.debugStats.candidateCount = candidateEntries.length;
+    this.debugStats.activeCount = this.activeEntries.size;
   }
 
   render(renderer, camera) {
@@ -708,6 +764,8 @@ export class RWCoronaPipeline {
       entry.helperLine = null;
     }
     this.entries = [];
+    this.entryByEmitter = new WeakMap();
+    this.activeEntries.clear();
   }
 
   dispose() {

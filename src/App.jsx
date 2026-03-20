@@ -11,6 +11,15 @@ import {
   DISTANCE_FADE_DEFAULTS,
   resolveRenderableDistance,
 } from './lib/renderDistanceFade';
+import {
+  addCoronaCandidate,
+  addShadowCandidate,
+  addVisibleChunk,
+  addVisibleItem,
+  addVisibleQueueMesh,
+  createFrameVisibilityResult,
+  resetFrameVisibilityResult,
+} from './lib/frameVisibility';
 import RenderEntityController from './lib/jsrw/renderer/common/RenderEntityController.js';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from './lib/gtaTransforms';
 import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE, normalizePath } from './lib/gta/loaders/SectionLoader';
@@ -72,6 +81,8 @@ const MAX_FAILED_MODELS = 5000;
 const DEFAULT_SCENE_BACKGROUND = new THREE.Color(0x8ea9b5);
 const CHUNK_ACTIVE_MARGIN = 384;
 const CHUNK_SPHERE_PADDING = WORLD_CHUNK_SIZE * 0.75;
+const CHUNK_CULL_MARGIN_XZ = WORLD_CHUNK_SIZE * 1.0;
+const CHUNK_CULL_MARGIN_Y = WORLD_CHUNK_SIZE * 1.5;
 const ENABLE_WORLD_INSTANCING = true;
 const STREAMING_BUILD_PLACEMENT_BUDGET = 8;
 const STREAMING_BUILD_FRAME_BUDGET_MS = 8;
@@ -213,6 +224,26 @@ function mapDffLightKind(lightType) {
 
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
+}
+
+function collectQueueMeshes(root) {
+  if (!root?.traverse) return [];
+  const meshes = [];
+  root.traverse((node) => {
+    if (!node?.isMesh) return;
+    meshes.push(node);
+  });
+  root.userData = {
+    ...(root.userData || {}),
+    rwQueueMeshes: meshes,
+  };
+  return meshes;
+}
+
+function getCachedQueueMeshes(root) {
+  if (!root?.traverse) return [];
+  if (Array.isArray(root.userData?.rwQueueMeshes)) return root.userData.rwQueueMeshes;
+  return collectQueueMeshes(root);
 }
 
 function getTextureSizeFromSource(textureSource) {
@@ -783,12 +814,16 @@ function App() {
   const jsrwSessionRef = useRef(createJsrwRenderer());
   const renderItemsRef = useRef([]);
   const renderChunksRef = useRef([]);
+  const frameVisibilityRef = useRef(createFrameVisibilityResult());
   const renderMetricsRef = useRef({
     activeChunks: 0,
     frustumChunks: 0,
     activeItems: 0,
     visibleNear: 0,
     visibleLod: 0,
+    visibleQueueMeshes: 0,
+    coronaCandidates: 0,
+    shadowCandidates: 0,
     transparentQueue: 0,
     additiveQueue: 0,
     overlayQueue: 0,
@@ -1197,6 +1232,7 @@ function App() {
     };
     renderItemsRef.current = [];
     renderChunksRef.current = [];
+    resetFrameVisibilityResult(frameVisibilityRef.current);
     worldGameVersionRef.current = String(uiStateRef.current.gameVersion || 'VCS').toUpperCase();
     jsrwSessionRef.current.setBackend(activeBackend || 'WebGL');
     jsrwSessionRef.current.setRoot(worldRoot);
@@ -1214,6 +1250,9 @@ function App() {
       activeItems: 0,
       visibleNear: 0,
       visibleLod: 0,
+      visibleQueueMeshes: 0,
+      coronaCandidates: 0,
+      shadowCandidates: 0,
       transparentQueue: 0,
       additiveQueue: 0,
       overlayQueue: 0,
@@ -1888,9 +1927,12 @@ function App() {
         key: chunkKey,
         center: getChunkCenterFromKey(chunkKey),
         items: [],
+        coronaEmitters: [],
+        shadowEmitters: [],
         active: false,
         boundsMin: new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY),
         boundsMax: new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY),
+        boundingBox: new THREE.Box3(),
         boundingSphere: new THREE.Sphere(),
       };
       renderChunkMap.set(chunkKey, chunk);
@@ -1903,8 +1945,32 @@ function App() {
       chunk.items.push(item);
       chunk.boundsMin.min(item.anchor);
       chunk.boundsMax.max(item.anchor);
+      const expandBoundsWithObject = (object3D) => {
+        if (!object3D?.traverse) return;
+        object3D.updateMatrixWorld(true);
+        object3D.traverse((node) => {
+          if (!node?.isMesh || !node.geometry) return;
+          if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
+          if (!node.geometry.boundingBox) return;
+          const worldBox = node.geometry.boundingBox.clone().applyMatrix4(node.matrixWorld);
+          chunk.boundsMin.min(worldBox.min);
+          chunk.boundsMax.max(worldBox.max);
+        });
+      };
+      expandBoundsWithObject(item.nearObj);
+      expandBoundsWithObject(item.lodObj);
       item.chunkKey = chunk.key;
       return item;
+    };
+
+    const registerChunkEmitter = (emitter) => {
+      if (!emitter?.position) return;
+      const chunk = getRenderChunk(emitter.position);
+      emitter.chunkKey = chunk.key;
+      chunk.coronaEmitters.push(emitter);
+      if (Number(emitter.shadow?.size) > 0) {
+        chunk.shadowEmitters.push(emitter);
+      }
     };
 
     const buildRenderSideState = (obj, handles, drawDistanceValue, defaultIsTobj) => {
@@ -2071,6 +2137,7 @@ function App() {
       const emitters = buildCoronaEmittersForPlacement(placement, placementIndex, worldMatrix, ide, model);
       if (emitters.length > 0) {
         placementsWithLights.add(placementIndex);
+        emitters.forEach((emitter) => registerChunkEmitter(emitter));
         coronaEmitters.push(...emitters);
       }
     };
@@ -2241,6 +2308,7 @@ function App() {
         instance.userData.rwIdeFlags = ide.flags | 0;
         instance.userData.isTobj = ide.section === 'tobjs';
         instance.userData.rwPipelineTarget = createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs');
+        collectQueueMeshes(instance);
         worldRoot.add(instance);
         loaded += 1;
         return instance;
@@ -2378,17 +2446,33 @@ function App() {
 
       for (const chunk of renderChunkMap.values()) {
         if (chunk.items.length === 0) {
+          chunk.boundingBox.setFromCenterAndSize(
+            chunk.center.clone(),
+            new THREE.Vector3(
+              WORLD_CHUNK_SIZE + (CHUNK_CULL_MARGIN_XZ * 2),
+              WORLD_CHUNK_SIZE + (CHUNK_CULL_MARGIN_Y * 2),
+              WORLD_CHUNK_SIZE + (CHUNK_CULL_MARGIN_XZ * 2),
+            ),
+          );
           chunk.boundingSphere.center.copy(chunk.center);
-          chunk.boundingSphere.radius = CHUNK_SPHERE_PADDING;
+          chunk.boundingSphere.radius = CHUNK_SPHERE_PADDING + Math.max(CHUNK_CULL_MARGIN_XZ, CHUNK_CULL_MARGIN_Y);
           continue;
         }
+        chunk.boundingBox.min.copy(chunk.boundsMin);
+        chunk.boundingBox.max.copy(chunk.boundsMax);
+        chunk.boundingBox.min.x -= CHUNK_CULL_MARGIN_XZ;
+        chunk.boundingBox.min.y -= CHUNK_CULL_MARGIN_Y;
+        chunk.boundingBox.min.z -= CHUNK_CULL_MARGIN_XZ;
+        chunk.boundingBox.max.x += CHUNK_CULL_MARGIN_XZ;
+        chunk.boundingBox.max.y += CHUNK_CULL_MARGIN_Y;
+        chunk.boundingBox.max.z += CHUNK_CULL_MARGIN_XZ;
         const sphereCenter = chunk.boundsMin.clone().add(chunk.boundsMax).multiplyScalar(0.5);
         let radiusSq = 0;
         for (const item of chunk.items) {
           radiusSq = Math.max(radiusSq, sphereCenter.distanceToSquared(item.anchor));
         }
         chunk.boundingSphere.center.copy(sphereCenter);
-        chunk.boundingSphere.radius = Math.sqrt(radiusSq) + CHUNK_SPHERE_PADDING;
+        chunk.boundingSphere.radius = Math.sqrt(radiusSq) + CHUNK_SPHERE_PADDING + Math.max(CHUNK_CULL_MARGIN_XZ, CHUNK_CULL_MARGIN_Y);
       }
 
       for (const batch of instancedBatchMap.values()) {
@@ -2683,6 +2767,7 @@ function App() {
       node.material = Array.isArray(node.material) ? nextMaterials : nextMaterials[0];
     });
     proxy.userData.rwFadeMaterials = fadeMaterials;
+    collectQueueMeshes(proxy);
     proxy.updateMatrixWorld(true);
     return proxy;
   }, []);
@@ -2735,6 +2820,7 @@ function App() {
       if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty();
       setRenderSideOriginalVisible(item, side, false, dirtyBatches);
       if (disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty();
+      sideState.currentOpacity = 0;
       return false;
     }
 
@@ -2776,6 +2862,8 @@ function App() {
 
   const hideRenderItemCompletely = useCallback((item, dirtyBatches) => {
     item.mode = 'hidden';
+    if (item?.nearState) item.nearState.currentOpacity = 0;
+    if (item?.lodState) item.lodState.currentOpacity = 0;
     setRenderSideOriginalVisible(item, 'near', false, dirtyBatches);
     setRenderSideOriginalVisible(item, 'lod', false, dirtyBatches);
     let queueDirty = false;
@@ -2793,6 +2881,34 @@ function App() {
   const hasLodRenderable = useCallback((item) => (
     Boolean(item?.lodObj) || (Array.isArray(item?.lodHandles) && item.lodHandles.length > 0)
   ), []);
+
+  const collectRenderSideFrameVisibility = useCallback((frameVisibility, item, side) => {
+    const sideState = side === 'near' ? item?.nearState : item?.lodState;
+    if (!frameVisibility || !sideState) return;
+    if ((sideState.currentOpacity ?? 0) <= RW_FADE_EPSILON) return;
+
+    addVisibleItem(frameVisibility, item);
+
+    if (sideState.proxyRoot?.visible) {
+      for (const mesh of getCachedQueueMeshes(sideState.proxyRoot)) {
+        addVisibleQueueMesh(frameVisibility, mesh);
+      }
+      return;
+    }
+
+    if (sideState.renderObject?.visible) {
+      for (const mesh of getCachedQueueMeshes(sideState.renderObject)) {
+        addVisibleQueueMesh(frameVisibility, mesh);
+      }
+    }
+
+    const handles = side === 'near' ? item?.nearHandles : item?.lodHandles;
+    if (!Array.isArray(handles) || handles.length === 0) return;
+    for (const handle of handles) {
+      if (!handle?.visible || !handle?.batch?.mesh?.visible) continue;
+      addVisibleQueueMesh(frameVisibility, handle.batch.mesh);
+    }
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -3080,6 +3196,7 @@ function App() {
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       hudCamera.updateProjectionMatrix();
+      lodUpdateStateRef.current.needsRefresh = true;
       if (!rendererReady) return;
       renderer.setPixelRatio(dpr);
       renderer.setSize(width, height, false);
@@ -3088,6 +3205,12 @@ function App() {
 
     resize();
     window.addEventListener('resize', resize);
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(() => {
+        resize();
+      })
+      : null;
+    resizeObserver?.observe(container);
 
     const setKeyState = (code, value) => {
       const move = moveStateRef.current;
@@ -3795,6 +3918,7 @@ function App() {
         lodUpdateAccumulatorRef.current = 0;
         const distanceFadeConfig = DISTANCE_FADE_DEFAULTS;
         const fadeEpsilon = RenderEntityController.getEpsilon(distanceFadeConfig);
+        const frameVisibility = resetFrameVisibilityResult(frameVisibilityRef.current);
         const chunkActiveDist = renderingDistance + CHUNK_ACTIVE_MARGIN;
         const chunkActiveDistSq = chunkActiveDist * chunkActiveDist;
         const chunkFrustum = chunkFrustumRef.current;
@@ -3810,7 +3934,11 @@ function App() {
         let activeFades = 0;
         for (const chunk of renderChunksRef.current) {
           const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
-          const chunkInFrustum = chunkInRange && chunkFrustum.intersectsSphere(chunk.boundingSphere);
+          const chunkInFrustum = chunkInRange && (
+            chunk.boundingBox?.isBox3
+              ? chunkFrustum.intersectsBox(chunk.boundingBox)
+              : chunkFrustum.intersectsSphere(chunk.boundingSphere)
+          );
           if (chunkInRange) frustumChunks += chunkInFrustum ? 1 : 0;
           if (!chunkInFrustum) {
             if (chunk.active) {
@@ -3825,6 +3953,9 @@ function App() {
           chunk.active = true;
           activeChunks += 1;
           activeItems += chunk.items.length;
+          addVisibleChunk(frameVisibility, chunk);
+          for (const emitter of chunk.coronaEmitters) addCoronaCandidate(frameVisibility, emitter);
+          for (const emitter of chunk.shadowEmitters) addShadowCandidate(frameVisibility, emitter);
           for (const item of chunk.items) {
             const distSq = camera.position.distanceToSquared(item.anchor);
             const hasNear = hasNearRenderable(item);
@@ -3928,6 +4059,8 @@ function App() {
 
             applyRenderSideOpacity(item, 'near', nearOpacity, dirtyBatches);
             applyRenderSideOpacity(item, 'lod', lodOpacity, dirtyBatches);
+            collectRenderSideFrameVisibility(frameVisibility, item, 'near');
+            collectRenderSideFrameVisibility(frameVisibility, item, 'lod');
 
             if (
               (nearOpacity > fadeEpsilon && nearOpacity < (1 - fadeEpsilon))
@@ -3953,7 +4086,11 @@ function App() {
           activeItems,
           visibleNear,
           visibleLod,
+          visibleQueueMeshes: frameVisibility.visibleQueueMeshes.length,
+          coronaCandidates: frameVisibility.coronaCandidates.length,
+          shadowCandidates: frameVisibility.shadowCandidates.length,
         };
+        frameVisibility.computed = true;
         activeFadeCountRef.current = activeFades;
         lodState.needsRefresh = activeFades > 0;
       }
@@ -4027,6 +4164,7 @@ function App() {
         const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
         const coronaRuntime = jsrwSessionRef.current.getCoronaRuntime();
         const shadowRuntime = jsrwSessionRef.current.getShadowRuntime();
+        const frameVisibility = frameVisibilityRef.current;
         const renderStages = uiStateRef.current.renderStages || FRAME_STAGE_DEBUG_DEFAULTS;
         coronaRuntime?.setEnabled(uiStateRef.current.render2dfx);
         shadowRuntime?.setEnabled(uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled);
@@ -4039,6 +4177,7 @@ function App() {
         coronaRuntime?.setViewport(viewportWidth, viewportHeight);
         coronaRuntime?.update(camera, {
           ...pipelineRuntimeContext,
+          frameVisibility,
           timeMs: time,
           dt,
           viewportWidth,
@@ -4049,6 +4188,7 @@ function App() {
         });
         shadowRuntime?.update(camera, {
           ...pipelineRuntimeContext,
+          frameVisibility,
           timeMs: time,
           dt,
           viewportWidth,
@@ -4070,7 +4210,7 @@ function App() {
               viewportHeight,
             })
             : null;
-          rwRenderQueue?.prepareFrame(camera);
+          rwRenderQueue?.prepareFrame(camera, frameVisibility);
           const queueStats = rwRenderQueue?.debugStats || {};
           const hasBlendQueue = (queueStats.transparentCount || 0) > 0;
           const hasAdditiveQueue = (queueStats.additiveCount || 0) > 0;
@@ -5829,6 +5969,7 @@ function App() {
       cancelled = true;
       window.cancelAnimationFrame(rafId);
       window.removeEventListener('resize', resize);
+      resizeObserver?.disconnect();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('mouseup', onMouseUp);

@@ -61,6 +61,7 @@ export class RWRenderQueue {
   constructor(root) {
     this.root = root;
     this.entries = [];
+    this.entryByMesh = new WeakMap();
     this.tempWorldPos = new THREE.Vector3();
     this.tempProjScreenMatrix = new THREE.Matrix4();
     this.tempFrustum = new THREE.Frustum();
@@ -109,6 +110,7 @@ export class RWRenderQueue {
   rebuild(root = this.root) {
     this.root = root;
     this.entries = [];
+    this.entryByMesh = new WeakMap();
     this.activeOpaqueEntries = [];
     this.activeTransparentEntries = [];
     this.opaqueRoot.clear();
@@ -120,19 +122,34 @@ export class RWRenderQueue {
 
     root.traverse((node) => {
       if (!node.isMesh) return;
-      this.entries.push({
+      const bucket = getMeshBucket(node);
+      const entry = {
         mesh: node,
-        bucket: 'opaque',
+        bucket,
         distanceSq: Number.POSITIVE_INFINITY,
         proxy: null,
-        proxyBucket: '',
-      });
+        proxyBucket: bucket,
+      };
+      this.entries.push(entry);
+      this.entryByMesh.set(node, entry);
     });
 
     this.dirty = false;
   }
 
-  prepareFrame(camera) {
+  getEntriesForFrame(frameVisibility) {
+    if (frameVisibility?.computed !== true) return this.entries;
+    const meshes = Array.isArray(frameVisibility?.visibleQueueMeshes) ? frameVisibility.visibleQueueMeshes : [];
+    const visibleEntries = [];
+    for (const mesh of meshes) {
+      const entry = this.entryByMesh.get(mesh);
+      if (!entry) continue;
+      visibleEntries.push(entry);
+    }
+    return visibleEntries;
+  }
+
+  prepareFrame(camera, frameVisibility = null) {
     if (this.dirty) this.rebuild();
     if (camera?.projectionMatrix && camera?.matrixWorldInverse) {
       this.tempProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -158,10 +175,12 @@ export class RWRenderQueue {
       if (entry.proxy) entry.proxy.visible = false;
     }
 
-    for (const entry of this.entries) {
+    const sourceEntries = this.getEntriesForFrame(frameVisibility);
+    const useFrameVisibility = frameVisibility?.computed === true;
+    for (const entry of sourceEntries) {
       const { mesh } = entry;
       if (!isVisibleInWorld(mesh, this.root)) continue;
-      if (camera && mesh.frustumCulled !== false && mesh.geometry) {
+      if (!useFrameVisibility && camera && mesh.frustumCulled !== false && mesh.geometry) {
         if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
         if (mesh.geometry.boundingSphere) {
           this.tempSphere.copy(mesh.geometry.boundingSphere).applyMatrix4(mesh.matrixWorld);
@@ -169,7 +188,6 @@ export class RWRenderQueue {
         }
       }
 
-      entry.bucket = getMeshBucket(mesh);
       if (this.frameBuckets[entry.bucket]) this.frameBuckets[entry.bucket].push(entry);
       if (entry.bucket === 'opaque') this.debugStats.opaqueCount += 1;
       else if (entry.bucket === 'cutout') this.debugStats.cutoutCount += 1;

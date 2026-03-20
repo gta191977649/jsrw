@@ -214,6 +214,8 @@ export class RWShadowPipeline {
     this.root = null;
     this.textureDictionary = null;
     this.entries = [];
+    this.entryByEmitter = new WeakMap();
+    this.activeEntries = new Set();
     this.shadowRoot = new THREE.Group();
     this.shadowRoot.name = 'rw_shadows';
     this.shadowRoot.userData = {
@@ -289,11 +291,39 @@ export class RWShadowPipeline {
   setEmitters(emitters = []) {
     this.disposeEntries();
     this.loggedFailureKeys.clear();
+    this.entryByEmitter = new WeakMap();
+    this.activeEntries.clear();
     this.entries = (emitters || [])
       .filter((emitter) => Number(emitter?.shadow?.size) > 0)
       .map((emitter, index) => this.createEntry(emitter, index))
       .filter(Boolean);
+    for (const entry of this.entries) {
+      this.entryByEmitter.set(entry.emitter, entry);
+    }
     this.debugStats.entryCount = this.entries.length;
+  }
+
+  getFrameEntries(frameVisibility = null) {
+    if (frameVisibility?.computed !== true) {
+      return this.entries;
+    }
+    const frameVisibilityCandidates = Array.isArray(frameVisibility?.shadowCandidates)
+      ? frameVisibility.shadowCandidates
+      : [];
+    const entries = [];
+    const seen = new Set();
+    for (const emitter of frameVisibilityCandidates) {
+      const entry = this.entryByEmitter.get(emitter);
+      if (!entry || seen.has(entry)) continue;
+      seen.add(entry);
+      entries.push(entry);
+    }
+    for (const entry of this.activeEntries) {
+      if (!entry || seen.has(entry)) continue;
+      seen.add(entry);
+      entries.push(entry);
+    }
+    return entries;
   }
 
   getSceneMeshes() {
@@ -586,9 +616,11 @@ export class RWShadowPipeline {
     let rebuildFailedCount = 0;
     let fallbackCornerCount = 0;
     let rebuildBudget = DEFAULT_MAX_REBUILDS_PER_FRAME;
+    const sourceEntries = this.getFrameEntries(runtimeContext?.frameVisibility);
     const candidateEntries = [];
+    const nextActiveEntries = new Set();
 
-    for (const entry of this.entries) {
+    for (const entry of sourceEntries) {
       const emitter = entry.emitter;
       const shadowSettings = emitter.shadow || {};
       const shadowTexture = entry.shadowMesh.material?.map || null;
@@ -719,13 +751,28 @@ export class RWShadowPipeline {
       );
       entry.shadowMesh.material.color.copy(TMP_COLOR);
       entry.shadowMesh.material.opacity = alphaScale;
+      if (
+        entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.shadowMesh.visible
+      ) {
+        nextActiveEntries.add(entry);
+      }
     }
 
-    for (const entry of this.entries) {
+    for (const entry of sourceEntries) {
       if (selectedEntries.has(entry)) continue;
       if (entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) entry.shadowMesh.visible = false;
+      if (
+        entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
+        || entry.shadowMesh.visible
+      ) {
+        nextActiveEntries.add(entry);
+      }
     }
 
+    this.activeEntries = nextActiveEntries;
     this.debugStats.visibleCount = visibleCount;
     this.debugStats.projectedCount = projectedCount;
     this.debugStats.rebuiltCount = rebuiltCount;
@@ -745,6 +792,8 @@ export class RWShadowPipeline {
       entry.shadowMesh = null;
     }
     this.entries = [];
+    this.entryByEmitter = new WeakMap();
+    this.activeEntries.clear();
   }
 
   dispose() {
