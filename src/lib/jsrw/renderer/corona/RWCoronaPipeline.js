@@ -5,6 +5,7 @@ import {
   prepareRwSpriteTexture,
 } from '../world/sky/RWSpriteUtils.js';
 import { resolveTrafficLightPhase } from './TrafficLights.js';
+import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
 
 const TMP_POSITION = new THREE.Vector3();
 const TMP_DIRECTION = new THREE.Vector3();
@@ -197,6 +198,8 @@ export class RWCoronaPipeline {
     this.debugShowAll = false;
     this.entries = [];
     this.raycaster = new THREE.Raycaster();
+    this.cachedOccluderMeshes = null;
+    this.occludersDirty = true;
     this.setRoot(options.root || null);
     this.setTextureDictionary(options.textureDictionary || null);
     this.setViewport(options.viewportWidth || 1, options.viewportHeight || 1);
@@ -215,12 +218,48 @@ export class RWCoronaPipeline {
       this.debugRoot.parent.remove(this.debugRoot);
     }
     this.root = root || null;
+    this.occludersDirty = true;
+    this.cachedOccluderMeshes = null;
     if (this.root) {
       this.root.add(this.spriteRoot);
       this.root.add(this.lightRoot);
       this.root.add(this.debugRoot);
     }
     return this.root;
+  }
+
+  markOccludersDirty() {
+    this.occludersDirty = true;
+    this.cachedOccluderMeshes = null;
+  }
+
+  getOccluderMeshes() {
+    if (!this.root) return [];
+    if (!this.occludersDirty && Array.isArray(this.cachedOccluderMeshes)) return this.cachedOccluderMeshes;
+    this.root.updateMatrixWorld(true);
+    const occluders = [];
+    this.root.traverse((object) => {
+      if (!object?.isMesh || !object.geometry) return;
+      let current = object;
+      while (current) {
+        if (current.userData?.rwCoronaAux || current.userData?.rwShadowAux || current.userData?.rwQueueProxy) return;
+        current = current.parent;
+      }
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      let blocksLos = false;
+      for (const material of materials) {
+        const bucket = getRWMaterialDescriptor(material)?.renderBucket || 'opaque';
+        if (bucket === 'opaque' || bucket === 'cutout') {
+          blocksLos = true;
+          break;
+        }
+      }
+      if (!blocksLos) return;
+      occluders.push(object);
+    });
+    this.cachedOccluderMeshes = occluders;
+    this.occludersDirty = false;
+    return occluders;
   }
 
   setEnabled(enabled) {
@@ -421,6 +460,12 @@ export class RWCoronaPipeline {
   computeLosVisible(entry, camera, timeMs) {
     if (!entry.emitter.losCheck || !this.root) return true;
     if ((timeMs - entry.lastLosCheckMs) < MIN_LOS_INTERVAL_MS) return entry.losVisible;
+    const occluders = this.getOccluderMeshes();
+    if (occluders.length === 0) {
+      entry.losVisible = true;
+      entry.lastLosCheckMs = timeMs;
+      return true;
+    }
 
     TMP_POSITION.copy(toVector3(entry.emitter.position));
     TMP_RAY_ORIGIN.copy(camera.position);
@@ -436,15 +481,8 @@ export class RWCoronaPipeline {
     this.raycaster.near = 0.01;
     this.raycaster.far = Math.max(0.01, distance - 0.5);
 
-    const hits = this.raycaster.intersectObject(this.root, true);
-    const blockingHit = hits.find((hit) => {
-      let object = hit.object;
-      while (object) {
-        if (object.userData?.rwCoronaAux) return false;
-        object = object.parent;
-      }
-      return true;
-    });
+    const hits = this.raycaster.intersectObjects(occluders, false);
+    const blockingHit = hits[0] || null;
 
     entry.losVisible = !blockingHit;
     entry.lastLosCheckMs = timeMs;

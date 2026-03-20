@@ -25,6 +25,11 @@ function getBucketBaseOrder(bucket) {
   return 0;
 }
 
+function setProxyDefaultLayer(object) {
+  object.layers.disableAll();
+  object.layers.enable(0);
+}
+
 function getMeshBucket(mesh) {
   if (mesh.userData?.rwIsSelectionOverlay) return 'overlay';
   const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
@@ -67,12 +72,19 @@ export class RWRenderQueue {
       additive: [],
       overlay: [],
     };
+    this.opaqueScene = new THREE.Scene();
+    this.opaqueRoot = new THREE.Group();
+    this.opaqueRoot.matrixAutoUpdate = false;
+    this.opaqueRoot.matrixWorldAutoUpdate = false;
+    this.opaqueScene.autoUpdate = false;
+    this.opaqueScene.add(this.opaqueRoot);
     this.transparentScene = new THREE.Scene();
     this.transparentRoot = new THREE.Group();
     this.transparentRoot.matrixAutoUpdate = false;
     this.transparentRoot.matrixWorldAutoUpdate = false;
     this.transparentScene.autoUpdate = false;
     this.transparentScene.add(this.transparentRoot);
+    this.activeOpaqueEntries = [];
     this.activeTransparentEntries = [];
     this.cameraMaskStack = [];
     this.dirty = true;
@@ -97,7 +109,9 @@ export class RWRenderQueue {
   rebuild(root = this.root) {
     this.root = root;
     this.entries = [];
+    this.activeOpaqueEntries = [];
     this.activeTransparentEntries = [];
+    this.opaqueRoot.clear();
     this.transparentRoot.clear();
     if (!root) {
       this.dirty = false;
@@ -133,6 +147,7 @@ export class RWRenderQueue {
     this.frameBuckets.transparent = [];
     this.frameBuckets.additive = [];
     this.frameBuckets.overlay = [];
+    this.activeOpaqueEntries = [];
     this.activeTransparentEntries = [];
     this.debugStats.opaqueCount = 0;
     this.debugStats.cutoutCount = 0;
@@ -173,7 +188,7 @@ export class RWRenderQueue {
       } else {
         entry.distanceSq = Number.POSITIVE_INFINITY;
         mesh.renderOrder = getBucketBaseOrder(entry.bucket);
-        if (entry.proxy) entry.proxy.visible = false;
+        this.activeOpaqueEntries.push(entry);
       }
     }
 
@@ -191,37 +206,79 @@ export class RWRenderQueue {
     overlay.forEach((entry, index) => {
       entry.mesh.renderOrder = getBucketBaseOrder('overlay') + index;
     });
+    for (const entry of this.activeOpaqueEntries) {
+      const proxy = this.ensureProxy(entry);
+      proxy.visible = true;
+      this.syncProxy(entry, proxy);
+      entry.proxyBucket = entry.bucket;
+    }
+
     for (const entry of [...transparent, ...additive, ...overlay]) {
       const proxy = this.ensureProxy(entry);
       proxy.visible = true;
-      proxy.geometry = entry.mesh.geometry;
-      proxy.material = entry.mesh.material;
-      proxy.renderOrder = entry.mesh.renderOrder;
-      proxy.matrix.copy(entry.mesh.matrixWorld);
-      proxy.matrixWorld.copy(entry.mesh.matrixWorld);
-      proxy.matrixAutoUpdate = false;
-      proxy.matrixWorldAutoUpdate = false;
-      proxy.frustumCulled = entry.mesh.frustumCulled;
-      proxy.userData.rwQueueBucket = entry.bucket;
+      this.syncProxy(entry, proxy);
       entry.proxyBucket = entry.bucket;
     }
   }
 
   ensureProxy(entry) {
     if (entry?.proxy) return entry.proxy;
-    const proxy = new THREE.Mesh(entry.mesh.geometry, entry.mesh.material);
-    proxy.name = `${entry.mesh.name || 'mesh'}__transparent_proxy`;
+    const source = entry.mesh;
+    const proxy = source?.isInstancedMesh
+      ? new THREE.InstancedMesh(source.geometry, source.material, source.count)
+      : new THREE.Mesh(source.geometry, source.material);
+    proxy.name = `${entry.mesh.name || 'mesh'}__queue_proxy`;
     proxy.matrixAutoUpdate = false;
     proxy.matrixWorldAutoUpdate = false;
     proxy.visible = false;
-    proxy.frustumCulled = entry.mesh.frustumCulled;
+    proxy.frustumCulled = source.frustumCulled;
+    setProxyDefaultLayer(proxy);
     proxy.userData = {
-      ...(entry.mesh.userData || {}),
-      rwTransparentProxy: true,
+      ...(source.userData || {}),
+      rwQueueProxy: true,
     };
-    this.transparentRoot.add(proxy);
+    if (entry.bucket === 'opaque' || entry.bucket === 'cutout') {
+      this.opaqueRoot.add(proxy);
+    } else {
+      this.transparentRoot.add(proxy);
+    }
     entry.proxy = proxy;
     return proxy;
+  }
+
+  syncProxy(entry, proxy) {
+    const source = entry.mesh;
+    proxy.geometry = source.geometry;
+    proxy.material = source.material;
+    proxy.renderOrder = source.renderOrder;
+    proxy.matrix.copy(source.matrixWorld);
+    proxy.matrixWorld.copy(source.matrixWorld);
+    proxy.matrixAutoUpdate = false;
+    proxy.matrixWorldAutoUpdate = false;
+    proxy.frustumCulled = source.frustumCulled;
+    setProxyDefaultLayer(proxy);
+    proxy.userData.rwQueueBucket = entry.bucket;
+    if (source.isInstancedMesh && proxy.isInstancedMesh) {
+      proxy.count = source.count;
+      proxy.instanceMatrix = source.instanceMatrix;
+      proxy.instanceColor = source.instanceColor || null;
+      proxy.morphTexture = source.morphTexture || null;
+      if (proxy.boundingBox !== source.boundingBox) proxy.boundingBox = source.boundingBox;
+      if (proxy.boundingSphere !== source.boundingSphere) proxy.boundingSphere = source.boundingSphere;
+    }
+  }
+
+  renderOpaque(renderer, camera, options = {}) {
+    if (!renderer || !camera || this.activeOpaqueEntries.length === 0) return;
+    const allowedBuckets = new Set(Array.isArray(options.allowedBuckets) ? options.allowedBuckets : ['opaque', 'cutout']);
+    this.opaqueScene.fog = options.fog || null;
+    const activeEntries = new Set(this.activeOpaqueEntries);
+    for (const entry of this.entries) {
+      if (!entry.proxy) continue;
+      if (entry.bucket !== 'opaque' && entry.bucket !== 'cutout') continue;
+      entry.proxy.visible = activeEntries.has(entry) && allowedBuckets.has(entry.proxyBucket);
+    }
+    renderer.render(this.opaqueScene, camera);
   }
 
   renderTransparent(renderer, camera, options = {}) {

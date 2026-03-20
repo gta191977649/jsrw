@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { calcScreenCoorsLikeRw, prepareRwSpriteTexture } from '../world/sky/RWSpriteUtils.js';
 import { computeTrafficLightBrightness, resolveTrafficLightPhase } from '../corona/TrafficLights.js';
+import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
 
 const TMP_POSITION = new THREE.Vector3();
 const TMP_FRONT = new THREE.Vector3();
@@ -252,6 +253,11 @@ export class RWShadowPipeline {
     return this.root;
   }
 
+  markSceneMeshesDirty() {
+    this.sceneMeshesDirty = true;
+    this.cachedSceneMeshes = null;
+  }
+
   setEnabled(enabled) {
     this.enabled = Boolean(enabled);
     if (!this.enabled) {
@@ -302,9 +308,19 @@ export class RWShadowPipeline {
       if (!object?.isMesh || !object.geometry) return;
       let current = object;
       while (current) {
-        if (current.userData?.rwShadowAux || current.userData?.rwCoronaAux) return;
+        if (current.userData?.rwShadowAux || current.userData?.rwCoronaAux || current.userData?.rwQueueProxy) return;
         current = current.parent;
       }
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      let castsProjection = false;
+      for (const material of materials) {
+        const bucket = getRWMaterialDescriptor(material)?.renderBucket || 'opaque';
+        if (bucket === 'opaque' || bucket === 'cutout') {
+          castsProjection = true;
+          break;
+        }
+      }
+      if (!castsProjection) return;
       const geometry = object.geometry;
       if (!geometry.boundingBox) geometry.computeBoundingBox();
       const positionAttribute = geometry.getAttribute?.('position');

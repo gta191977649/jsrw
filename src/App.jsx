@@ -4027,6 +4027,8 @@ function App() {
         applyGlobalBackfaceCulling(worldRootRef.current, uiStateRef.current.disableBackfaceCulling);
         lastPipelineSelectionSignatureRef.current = pipelineSelectionSignature;
         rwRenderQueueRef.current?.markDirty();
+        jsrwSessionRef.current.getCoronaRuntime()?.markOccludersDirty?.();
+        jsrwSessionRef.current.getShadowRuntime()?.markSceneMeshesDirty?.();
       } else {
         jsrwSessionRef.current.updateRuntime(pipelineRuntimeContext);
       }
@@ -4118,9 +4120,10 @@ function App() {
 
               if (renderStages.sceneOpaque) {
                 waterStage = 'renderSceneOpaque';
-                rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout']);
-                renderer.render(scene, camera);
-                rwRenderQueue?.popCameraBucketMask(camera);
+                rwRenderQueue?.renderOpaque(renderer, camera, {
+                  allowedBuckets: ['opaque', 'cutout'],
+                  fog: scene.fog || null,
+                });
               }
 
               if (renderStages.waterFar) {
@@ -4181,9 +4184,10 @@ function App() {
                 const opaqueBuckets = fallbackBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
                 const transparentFallbackBuckets = fallbackBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
                 if (opaqueBuckets.length > 0) {
-                  rwRenderQueue?.pushCameraBucketMask(camera, opaqueBuckets);
-                  renderer.render(scene, camera);
-                  rwRenderQueue?.popCameraBucketMask(camera);
+                  rwRenderQueue?.renderOpaque(renderer, camera, {
+                    allowedBuckets: opaqueBuckets,
+                    fog: scene.fog || null,
+                  });
                 }
                 if (transparentFallbackBuckets.length > 0) {
                   rwRenderQueue?.renderTransparent(renderer, camera, {
@@ -4205,9 +4209,10 @@ function App() {
               const opaqueBuckets = sceneBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
               const transparentSceneBuckets = sceneBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
               if (opaqueBuckets.length > 0) {
-                rwRenderQueue?.pushCameraBucketMask(camera, opaqueBuckets);
-                renderer.render(scene, camera);
-                rwRenderQueue?.popCameraBucketMask(camera);
+                rwRenderQueue?.renderOpaque(renderer, camera, {
+                  allowedBuckets: opaqueBuckets,
+                  fog: scene.fog || null,
+                });
               }
               if (transparentSceneBuckets.length > 0) {
                 rwRenderQueue?.renderTransparent(renderer, camera, {
