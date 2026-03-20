@@ -8,10 +8,8 @@ import { resolveTrafficLightPhase } from './TrafficLights.js';
 import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
 import {
   DISTANCE_FADE_DEFAULTS,
-  approachValue,
-  computeDistanceFadeAlpha,
-  isDistanceWithinFadeWindow,
 } from '../../../renderDistanceFade.js';
+import RenderEntityController from '../common/RenderEntityController.js';
 
 const TMP_POSITION = new THREE.Vector3();
 const TMP_DIRECTION = new THREE.Vector3();
@@ -498,8 +496,6 @@ export class RWCoronaPipeline {
     const spriteBrightness = Math.max(0, Number.isFinite(spriteBrightnessValue) ? spriteBrightnessValue : 1);
     const spriteSize = Math.max(0.5, Number(timecycleValues.spriteSize) || 1);
     const fadeConfig = runtimeContext?.distanceFade || DISTANCE_FADE_DEFAULTS;
-    const fadeDelta = Math.max(0, Number(runtimeContext?.dt) || 0)
-      * Math.max(0, Number(fadeConfig?.streamAlphaPerSecond) || DISTANCE_FADE_DEFAULTS.streamAlphaPerSecond);
     const timeMs = Number(runtimeContext?.timeMs) || 0;
     const candidateEntries = [];
 
@@ -508,9 +504,9 @@ export class RWCoronaPipeline {
       const visibility = shouldEmitterBeActive(entry, updateContext);
       const distance = camera.position.distanceTo(toVector3(emitter.position));
       const drawDistance = Math.max(0, Number(emitter.drawDistance) || 0);
-      const withinDrawDistance = isDistanceWithinFadeWindow(distance, drawDistance, fadeConfig);
+      const withinDrawDistance = RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig);
       const wantsShow = visibility.active && withinDrawDistance;
-      if (wantsShow || entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
+      if (wantsShow || RenderEntityController.isActive(entry, fadeConfig)) {
         candidateEntries.push({
           entry,
           visibility,
@@ -528,19 +524,8 @@ export class RWCoronaPipeline {
       }
     }
 
-    candidateEntries.sort((a, b) => a.distance - b.distance);
     let activeBudget = Math.max(0, Math.floor(Number(runtimeContext?.twoDfx?.maxActiveCoronas) || MAX_ACTIVE_CORONAS));
-    const selectedEntries = new Set();
-    for (const item of candidateEntries) {
-      if (item.entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon || item.entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
-        selectedEntries.add(item.entry);
-        continue;
-      }
-      if (item.wantsShow && activeBudget > 0) {
-        selectedEntries.add(item.entry);
-        activeBudget -= 1;
-      }
-    }
+    const selectedEntries = RenderEntityController.selectClosest(candidateEntries, activeBudget, fadeConfig);
 
     for (const item of candidateEntries) {
       const { entry, visibility, distance, drawDistance, withinDrawDistance } = item;
@@ -585,8 +570,14 @@ export class RWCoronaPipeline {
         screenVisible = false;
       }
 
-      entry.streamAlpha = approachValue(entry.streamAlpha, targetStreamAlpha, fadeDelta);
-      entry.fadeAlpha = clamp01(entry.streamAlpha * computeDistanceFadeAlpha(distance, drawDistance, fadeConfig));
+      RenderEntityController.updateFade(entry, {
+        targetVisible: targetStreamAlpha > 0,
+        distance,
+        drawDistance,
+        dt: Number(runtimeContext?.dt) || 0,
+        config: fadeConfig,
+        extraAlpha: 1,
+      });
       if (entry.sprite && screenVisible && screen && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
         entry.lastScreen = {
           x: screen.x,

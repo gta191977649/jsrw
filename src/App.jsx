@@ -9,10 +9,9 @@ import { formatConsoleArg } from './lib/console';
 import { buildFileIndex } from './lib/fileIndex';
 import {
   DISTANCE_FADE_DEFAULTS,
-  approachValue,
-  computeDistanceFadeAlpha,
   resolveRenderableDistance,
 } from './lib/renderDistanceFade';
+import RenderEntityController from './lib/jsrw/renderer/common/RenderEntityController.js';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from './lib/gtaTransforms';
 import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE, normalizePath } from './lib/gta/loaders/SectionLoader';
 import { sampleTimecyc, TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/Timecycle';
@@ -1913,6 +1912,7 @@ function App() {
       const placementMatrix = obj?.userData?.placementMatrix || firstHandle?.placementMatrix || null;
       return {
         streamAlpha: (obj || firstHandle) ? 0 : 1,
+        fadeAlpha: (obj || firstHandle) ? 0 : 1,
         currentOpacity: 0,
         renderObject: obj || null,
         fadeBindings: null,
@@ -3793,6 +3793,8 @@ function App() {
       const needsFadeTick = activeFadeCountRef.current > 0;
       if ((lodState.needsRefresh || needsFadeTick) && lodUpdateAccumulatorRef.current >= 0.02) {
         lodUpdateAccumulatorRef.current = 0;
+        const distanceFadeConfig = DISTANCE_FADE_DEFAULTS;
+        const fadeEpsilon = RenderEntityController.getEpsilon(distanceFadeConfig);
         const chunkActiveDist = renderingDistance + CHUNK_ACTIVE_MARGIN;
         const chunkActiveDistSq = chunkActiveDist * chunkActiveDist;
         const chunkFrustum = chunkFrustumRef.current;
@@ -3829,7 +3831,7 @@ function App() {
             const hasLod = hasLodRenderable(item);
             const tobjAllowed = !item.isTobj || showTobjs;
             const dist = Math.sqrt(distSq);
-            if (!tobjAllowed || dist > (renderingDistance + RW_DISTANCE_FADE_WINDOW)) {
+            if (!tobjAllowed || !RenderEntityController.isWithinDrawDistance(dist, renderingDistance, distanceFadeConfig)) {
               hideRenderItemCompletely(item, dirtyBatches);
               continue;
             }
@@ -3852,43 +3854,40 @@ function App() {
 
             if (pairedItem && showLods && !forceLodOnly) {
               const nearCoreRange = dist <= drawDistance;
-              const nearFadeRange = dist <= (drawDistance + RW_DISTANCE_FADE_WINDOW);
-              const lodVisibleRange = dist <= (lodEndDistance + RW_DISTANCE_FADE_WINDOW);
+              const nearFadeRange = RenderEntityController.isWithinDrawDistance(dist, drawDistance, distanceFadeConfig);
+              const lodVisibleRange = RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig);
 
-              if (nearFadeRange && item.nearState) {
-                item.nearState.streamAlpha = approachValue(
-                  item.nearState.streamAlpha,
-                  1,
-                  dt * RW_STREAM_ALPHA_PER_SECOND,
-                );
+              if (item.nearState) {
+                nearOpacity = RenderEntityController.updateFade(item.nearState, {
+                  targetVisible: nearFadeRange,
+                  distance: dist,
+                  drawDistance,
+                  dt,
+                  config: distanceFadeConfig,
+                });
               }
-              if (lodVisibleRange && item.lodState) {
-                item.lodState.streamAlpha = approachValue(
-                  item.lodState.streamAlpha,
-                  1,
-                  dt * RW_STREAM_ALPHA_PER_SECOND,
-                );
+              if (item.lodState) {
+                lodOpacity = RenderEntityController.updateFade(item.lodState, {
+                  targetVisible: lodVisibleRange,
+                  distance: dist,
+                  drawDistance: lodEndDistance,
+                  dt,
+                  config: distanceFadeConfig,
+                });
               }
 
               const nearStreamAlpha = item.nearState?.streamAlpha ?? 1;
-              const lodStreamAlpha = item.lodState?.streamAlpha ?? 1;
-              const nearDistanceAlpha = nearCoreRange ? 1 : computeDistanceFadeAlpha(dist, drawDistance);
-              const lodDistanceAlpha = lodVisibleRange ? computeDistanceFadeAlpha(dist, lodEndDistance) : 0;
-
-              nearOpacity = nearFadeRange ? clamp01(nearStreamAlpha * nearDistanceAlpha) : 0;
               if (nearCoreRange) {
                 lodOpacity = lodVisibleRange
-                  ? clamp01((nearStreamAlpha < (1 - RW_FADE_EPSILON) ? 1 : 0) * lodStreamAlpha * lodDistanceAlpha)
+                  ? clamp01((nearStreamAlpha < (1 - fadeEpsilon) ? 1 : 0) * lodOpacity)
                   : 0;
-              } else {
-                lodOpacity = lodVisibleRange ? clamp01(lodStreamAlpha * lodDistanceAlpha) : 0;
               }
-              nearShouldShow = nearOpacity > RW_FADE_EPSILON;
-              lodShouldShow = lodOpacity > RW_FADE_EPSILON;
+              nearShouldShow = nearOpacity > fadeEpsilon;
+              lodShouldShow = lodOpacity > fadeEpsilon;
             } else {
               nearShouldShow = hasNear
                 && !forceLodOnly
-                && dist <= (nearEndDistance + RW_DISTANCE_FADE_WINDOW);
+                && RenderEntityController.isWithinDrawDistance(dist, nearEndDistance, distanceFadeConfig);
               const lodShouldShowBase = hasLod
                 && (
                   forceLodOnly
@@ -3896,53 +3895,47 @@ function App() {
                   || (showLods && (!hasNear || dist > drawDistance))
                 );
 
-              if (nearShouldShow && item.nearState) {
-                item.nearState.streamAlpha = approachValue(
-                  item.nearState.streamAlpha,
-                  1,
-                  dt * RW_STREAM_ALPHA_PER_SECOND,
-                );
+              if (item.nearState) {
+                nearOpacity = RenderEntityController.updateFade(item.nearState, {
+                  targetVisible: nearShouldShow,
+                  distance: dist,
+                  drawDistance: nearEndDistance,
+                  dt,
+                  config: distanceFadeConfig,
+                });
               }
-              const nearDistanceAlpha = nearShouldShow
-                ? computeDistanceFadeAlpha(dist, nearEndDistance)
-                : 0;
-              nearOpacity = nearShouldShow
-                ? clamp01((item.nearState?.streamAlpha ?? 1) * nearDistanceAlpha)
-                : 0;
 
               lodShouldShow = hasLod
-                && dist <= (lodEndDistance + RW_DISTANCE_FADE_WINDOW)
+                && RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig)
                 && lodShouldShowBase;
-              if (lodShouldShow && item.lodState) {
-                item.lodState.streamAlpha = approachValue(
-                  item.lodState.streamAlpha,
-                  1,
-                  dt * RW_STREAM_ALPHA_PER_SECOND,
-                );
+              if (item.lodState) {
+                lodOpacity = RenderEntityController.updateFade(item.lodState, {
+                  targetVisible: lodShouldShow,
+                  distance: dist,
+                  drawDistance: lodEndDistance,
+                  dt,
+                  config: distanceFadeConfig,
+                });
               }
-              const lodDistanceAlpha = lodShouldShow
-                ? computeDistanceFadeAlpha(dist, lodEndDistance)
-                : 0;
-              lodOpacity = lodShouldShow
-                ? clamp01((item.lodState?.streamAlpha ?? 1) * lodDistanceAlpha)
-                : 0;
             }
 
-            item.mode = nearOpacity > RW_FADE_EPSILON
-              ? (lodOpacity > RW_FADE_EPSILON ? 'near+lod' : 'near')
-              : (lodOpacity > RW_FADE_EPSILON ? 'lod' : 'hidden');
+            item.mode = nearOpacity > fadeEpsilon
+              ? (lodOpacity > fadeEpsilon ? 'near+lod' : 'near')
+              : (lodOpacity > fadeEpsilon ? 'lod' : 'hidden');
 
-            if (nearOpacity > RW_FADE_EPSILON) visibleNear += 1;
-            if (lodOpacity > RW_FADE_EPSILON) visibleLod += 1;
+            if (nearOpacity > fadeEpsilon) visibleNear += 1;
+            if (lodOpacity > fadeEpsilon) visibleLod += 1;
 
             applyRenderSideOpacity(item, 'near', nearOpacity, dirtyBatches);
             applyRenderSideOpacity(item, 'lod', lodOpacity, dirtyBatches);
 
             if (
-              (nearOpacity > RW_FADE_EPSILON && nearOpacity < (1 - RW_FADE_EPSILON))
-              || (lodOpacity > RW_FADE_EPSILON && lodOpacity < (1 - RW_FADE_EPSILON))
-              || (nearShouldShow && (item.nearState?.streamAlpha ?? 1) < (1 - RW_FADE_EPSILON))
-              || (lodShouldShow && (item.lodState?.streamAlpha ?? 1) < (1 - RW_FADE_EPSILON))
+              (nearOpacity > fadeEpsilon && nearOpacity < (1 - fadeEpsilon))
+              || (lodOpacity > fadeEpsilon && lodOpacity < (1 - fadeEpsilon))
+              || (nearShouldShow && (item.nearState?.streamAlpha ?? 1) < (1 - fadeEpsilon))
+              || (lodShouldShow && (item.lodState?.streamAlpha ?? 1) < (1 - fadeEpsilon))
+              || (!nearShouldShow && (item.nearState?.streamAlpha ?? 0) > fadeEpsilon)
+              || (!lodShouldShow && (item.lodState?.streamAlpha ?? 0) > fadeEpsilon)
             ) {
               activeFades += 1;
             }
@@ -3988,6 +3981,7 @@ function App() {
       const pipelineRuntimeContext = {
         activeBackend,
         worldGameVersion: worldGameVersionRef.current,
+        distanceFade: DISTANCE_FADE_DEFAULTS,
         postFxDebugCapture: isWindowOpen('rendering'),
         timecycleCurrent,
         ambientColor: timecycleCurrent?.values?.ambient

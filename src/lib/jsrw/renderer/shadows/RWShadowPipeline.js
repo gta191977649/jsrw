@@ -4,10 +4,8 @@ import { computeTrafficLightBrightness, resolveTrafficLightPhase } from '../coro
 import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
 import {
   DISTANCE_FADE_DEFAULTS,
-  approachValue,
-  computeDistanceFadeAlpha,
-  isDistanceWithinFadeWindow,
 } from '../../../renderDistanceFade.js';
+import RenderEntityController from '../common/RenderEntityController.js';
 
 const TMP_POSITION = new THREE.Vector3();
 const TMP_FRONT = new THREE.Vector3();
@@ -579,8 +577,6 @@ export class RWShadowPipeline {
     const lightOnGroundBrightness = Math.max(0, Number(timecycleValues.lightOnGround) || 0);
     const trafficLightBrightness = computeTrafficLightBrightness(runtimeContext);
     const fadeConfig = runtimeContext?.distanceFade || DISTANCE_FADE_DEFAULTS;
-    const fadeDelta = Math.max(0, Number(runtimeContext?.dt) || 0)
-      * Math.max(0, Number(fadeConfig?.streamAlphaPerSecond) || DISTANCE_FADE_DEFAULTS.streamAlphaPerSecond);
     let visibleCount = 0;
     let projectedCount = 0;
     let rebuiltCount = 0;
@@ -630,7 +626,7 @@ export class RWShadowPipeline {
       );
       if (!shadowTexture) missingTextureCount += 1;
       if (shadowIntensity <= 0) zeroIntensityCount += 1;
-      if (drawDistance > 0 && !isDistanceWithinFadeWindow(distance, drawDistance, fadeConfig)) outOfRangeCount += 1;
+      if (drawDistance > 0 && !RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig)) outOfRangeCount += 1;
       const trafficLightShadowVisible = emitter.sourceType !== 'trafficLightShadow' || trafficLightBrightness > 0.05;
       const wantsShow = (
         this.enabled
@@ -638,12 +634,12 @@ export class RWShadowPipeline {
         && shadowIntensity > 0
         && shadowTexture
         && (Number(shadowSettings.size) || 0) > 0
-        && isDistanceWithinFadeWindow(distance, drawDistance, fadeConfig)
+        && RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig)
         && screenVisible
         && trafficLightShadowVisible
       );
 
-      if (wantsShow || entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon || entry.projected) {
+      if (wantsShow || RenderEntityController.isActive(entry, fadeConfig) || entry.projected) {
         candidateEntries.push({
           entry,
           emitter,
@@ -658,26 +654,21 @@ export class RWShadowPipeline {
       }
     }
 
-    candidateEntries.sort((a, b) => a.distance - b.distance);
     let activeShadowBudget = Math.max(0, Math.floor(Number(shadowDebug.maxActiveShadows) || MAX_ACTIVE_SHADOWS));
-    const selectedEntries = new Set();
-    for (const item of candidateEntries) {
-      if (item.entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon || item.entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
-        selectedEntries.add(item.entry);
-        continue;
-      }
-      if (item.wantsShow && activeShadowBudget > 0) {
-        selectedEntries.add(item.entry);
-        activeShadowBudget -= 1;
-      }
-    }
+    const selectedEntries = RenderEntityController.selectClosest(candidateEntries, activeShadowBudget, fadeConfig);
 
     for (const item of candidateEntries) {
       const { entry, emitter, shadowSettings, shadowIntensity, drawDistance, distance, wantsShow } = item;
       const targetStreamAlpha = wantsShow && selectedEntries.has(entry) ? 1 : 0;
 
-      entry.streamAlpha = approachValue(entry.streamAlpha, targetStreamAlpha, fadeDelta);
-      entry.fadeAlpha = clamp01(entry.streamAlpha * computeDistanceFadeAlpha(distance, drawDistance, fadeConfig));
+      RenderEntityController.updateFade(entry, {
+        targetVisible: targetStreamAlpha > 0,
+        distance,
+        drawDistance,
+        dt: Number(runtimeContext?.dt) || 0,
+        config: fadeConfig,
+        extraAlpha: 1,
+      });
       if (entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) {
         entry.shadowMesh.visible = false;
         continue;
