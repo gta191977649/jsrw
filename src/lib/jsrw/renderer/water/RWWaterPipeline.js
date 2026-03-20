@@ -4,6 +4,7 @@ import { getWaterLevelIndex } from '../../../waterpro.js';
 const DEFAULT_WATER_COLOR = new THREE.Color(0xffffff);
 const RW_DEFAULT_WAVE_HEIGHT = 35.0;
 const RW_DEFAULT_WIND = 0.0;
+const MIN_FAR_RENDER_DISTANCE = 512;
 
 function createFallbackTexture() {
   const data = new Uint8Array([255, 255, 255, 255]);
@@ -162,12 +163,12 @@ function countValidFineSectors(parsed) {
   return count;
 }
 
-function populateSectorInstances(mesh, parsed, bounds, toThreePosition) {
+function buildSectorEntries(parsed, bounds, toThreePosition) {
   const cellCount = 128;
   const cellSizeX = (bounds.end.x - bounds.start.x) / cellCount;
   const cellSizeY = (bounds.end.y - bounds.start.y) / cellCount;
-  const matrix = new THREE.Matrix4();
-  let instanceIndex = 0;
+  const radius = Math.sqrt((cellSizeX * cellSizeX) + (cellSizeY * cellSizeY)) * 0.5;
+  const sectors = [];
 
   for (let x = 0; x < cellCount; x += 1) {
     for (let y = 0; y < cellCount; y += 1) {
@@ -180,14 +181,15 @@ function populateSectorInstances(mesh, parsed, bounds, toThreePosition) {
         bounds.start.y + (y * cellSizeY),
         waterZ,
       );
-      matrix.makeTranslation(world.x, world.y, world.z);
-      mesh.setMatrixAt(instanceIndex, matrix);
-      instanceIndex += 1;
+      const matrix = new THREE.Matrix4().makeTranslation(world.x, world.y, world.z);
+      sectors.push({
+        matrix,
+        center: world.clone(),
+        radius,
+      });
     }
   }
-
-  mesh.count = instanceIndex;
-  mesh.instanceMatrix.needsUpdate = true;
+  return sectors;
 }
 
 function createFarMaterial(texture, options = {}) {
@@ -275,9 +277,14 @@ export class RWWaterPipeline {
     const cellSizeY = (bounds.end.y - bounds.start.y) / 128;
     const sectorGeometry = buildRwSectorPatchGeometry(options.toThreePosition, cellSizeX, cellSizeY, 8);
     const sectorCount = countValidFineSectors(this.parsed);
+    this.sectorEntries = buildSectorEntries(this.parsed, bounds, options.toThreePosition);
+    this.tempProjScreenMatrix = new THREE.Matrix4();
+    this.tempFrustum = new THREE.Frustum();
+    this.tempSphere = new THREE.Sphere();
     this.farMesh = new THREE.InstancedMesh(sectorGeometry, this.farMaterial, sectorCount);
     this.farMesh.frustumCulled = false;
-    populateSectorInstances(this.farMesh, this.parsed, bounds, options.toThreePosition);
+    this.farMesh.count = 0;
+    this.farMesh.instanceMatrix.needsUpdate = true;
     this.farScene.add(this.farMesh);
 
     this.nearMesh = new THREE.Mesh(createEmptyGeometry(), new THREE.MeshBasicMaterial({ visible: false }));
@@ -289,6 +296,7 @@ export class RWWaterPipeline {
 
     this.visibleNearCells = 0;
     this.visibleWavyCells = 0;
+    this.visibleFarCells = 0;
     this.waterCellCount = sectorCount;
 
     this.applySettings(options.settings || null);
@@ -336,6 +344,35 @@ export class RWWaterPipeline {
     return this.waterCellCount;
   }
 
+  getVisibleFarCellCount() {
+    return this.visibleFarCells;
+  }
+
+  updateVisibleFarSectors(camera) {
+    if (!camera || !this.farMesh || !Array.isArray(this.sectorEntries)) return;
+    this.tempProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this.tempFrustum.setFromProjectionMatrix(this.tempProjScreenMatrix);
+    const renderDistance = Math.max(
+      MIN_FAR_RENDER_DISTANCE,
+      (Number(camera.far) || MIN_FAR_RENDER_DISTANCE) * 1.1,
+    );
+    const renderDistanceSq = renderDistance * renderDistance;
+    let visibleCount = 0;
+    for (const sector of this.sectorEntries) {
+      if (camera.position.distanceToSquared(sector.center) > (renderDistanceSq + (sector.radius * sector.radius))) {
+        continue;
+      }
+      this.tempSphere.center.copy(sector.center);
+      this.tempSphere.radius = sector.radius;
+      if (!this.tempFrustum.intersectsSphere(this.tempSphere)) continue;
+      this.farMesh.setMatrixAt(visibleCount, sector.matrix);
+      visibleCount += 1;
+    }
+    this.visibleFarCells = visibleCount;
+    this.farMesh.count = visibleCount;
+    this.farMesh.instanceMatrix.needsUpdate = true;
+  }
+
   update(camera, timeMs, dt) {
     if (!this.enabled || !this.hasRenderableWater()) return;
 
@@ -374,11 +411,12 @@ export class RWWaterPipeline {
       this.farScene.fog = null;
     }
 
-    this.farMesh.visible = this.enabled;
+    this.updateVisibleFarSectors(camera);
+    this.farMesh.visible = this.enabled && this.visibleFarCells > 0;
   }
 
   renderFar(renderer, camera, background = null) {
-    if (!this.enabled || !this.farMesh.visible) return;
+    if (!this.enabled || !this.farMesh.visible || this.visibleFarCells <= 0) return;
     this.farScene.background = background ?? null;
     renderer.render(this.farScene, camera);
   }
