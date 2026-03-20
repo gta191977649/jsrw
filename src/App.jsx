@@ -114,6 +114,9 @@ const FRAME_STAGE_DEBUG_DEFAULTS = Object.freeze({
   waterWavy: true,
   waterWake: true,
   sceneTransparent: true,
+  sceneBlend: true,
+  sceneAdditive: true,
+  sceneOverlay: true,
   coronas: true,
   postFx: true,
   sunBloom: true,
@@ -798,6 +801,9 @@ function App() {
     activeItems: 0,
     visibleNear: 0,
     visibleLod: 0,
+    transparentQueue: 0,
+    additiveQueue: 0,
+    overlayQueue: 0,
     drawCalls: 0,
     triangles: 0,
   });
@@ -1220,6 +1226,9 @@ function App() {
       activeItems: 0,
       visibleNear: 0,
       visibleLod: 0,
+      transparentQueue: 0,
+      additiveQueue: 0,
+      overlayQueue: 0,
       drawCalls: 0,
       triangles: 0,
     };
@@ -4077,6 +4086,14 @@ function App() {
             })
             : null;
           rwRenderQueue?.prepareFrame(camera);
+          const queueStats = rwRenderQueue?.debugStats || {};
+          const hasBlendQueue = (queueStats.transparentCount || 0) > 0;
+          const hasAdditiveQueue = (queueStats.additiveCount || 0) > 0;
+          const hasOverlayQueue = (queueStats.overlayCount || 0) > 0;
+          const transparentBuckets = [];
+          if (renderStages.sceneTransparent && renderStages.sceneBlend && hasBlendQueue) transparentBuckets.push('transparent');
+          if (renderStages.sceneTransparent && renderStages.sceneAdditive && hasAdditiveQueue) transparentBuckets.push('additive');
+          if (renderStages.sceneTransparent && renderStages.sceneOverlay && hasOverlayQueue) transparentBuckets.push('overlay');
           renderer.setRenderTarget(postFxSceneTarget);
           renderer.autoClear = true;
           if (renderStages.skyDome && skyScene && skyCamera) {
@@ -4126,11 +4143,12 @@ function App() {
                 waterPipeline.renderWake(renderer, camera);
               }
 
-              if (renderStages.sceneTransparent) {
+              if (transparentBuckets.length > 0) {
                 waterStage = 'renderSceneTransparent';
-                rwRenderQueue?.pushCameraBucketMask(camera, ['transparent', 'additive', 'overlay']);
-                renderer.render(scene, camera);
-                rwRenderQueue?.popCameraBucketMask(camera);
+                rwRenderQueue?.renderTransparent(renderer, camera, {
+                  allowedBuckets: transparentBuckets,
+                  fog: scene.fog || null,
+                });
               }
               if (renderStages.coronas) {
                 coronaRuntime?.render(renderer);
@@ -4158,11 +4176,21 @@ function App() {
               renderer.autoClear = false;
               const fallbackBuckets = [];
               if (renderStages.sceneOpaque) fallbackBuckets.push('opaque', 'cutout');
-              if (renderStages.sceneTransparent) fallbackBuckets.push('transparent', 'additive', 'overlay');
+              fallbackBuckets.push(...transparentBuckets);
               if (fallbackBuckets.length > 0) {
-                rwRenderQueue?.pushCameraBucketMask(camera, fallbackBuckets);
-                renderer.render(scene, camera);
-                rwRenderQueue?.popCameraBucketMask(camera);
+                const opaqueBuckets = fallbackBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
+                const transparentFallbackBuckets = fallbackBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
+                if (opaqueBuckets.length > 0) {
+                  rwRenderQueue?.pushCameraBucketMask(camera, opaqueBuckets);
+                  renderer.render(scene, camera);
+                  rwRenderQueue?.popCameraBucketMask(camera);
+                }
+                if (transparentFallbackBuckets.length > 0) {
+                  rwRenderQueue?.renderTransparent(renderer, camera, {
+                    allowedBuckets: transparentFallbackBuckets,
+                    fog: scene.fog || null,
+                  });
+                }
               }
               if (renderStages.coronas) {
                 coronaRuntime?.render(renderer);
@@ -4172,11 +4200,21 @@ function App() {
             renderer.autoClear = false;
             const sceneBuckets = [];
             if (renderStages.sceneOpaque) sceneBuckets.push('opaque', 'cutout');
-            if (renderStages.sceneTransparent) sceneBuckets.push('transparent', 'additive', 'overlay');
+            sceneBuckets.push(...transparentBuckets);
             if (sceneBuckets.length > 0) {
-              rwRenderQueue?.pushCameraBucketMask(camera, sceneBuckets);
-              renderer.render(scene, camera);
-              rwRenderQueue?.popCameraBucketMask(camera);
+              const opaqueBuckets = sceneBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
+              const transparentSceneBuckets = sceneBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
+              if (opaqueBuckets.length > 0) {
+                rwRenderQueue?.pushCameraBucketMask(camera, opaqueBuckets);
+                renderer.render(scene, camera);
+                rwRenderQueue?.popCameraBucketMask(camera);
+              }
+              if (transparentSceneBuckets.length > 0) {
+                rwRenderQueue?.renderTransparent(renderer, camera, {
+                  allowedBuckets: transparentSceneBuckets,
+                  fog: scene.fog || null,
+                });
+              }
             }
             if (renderStages.coronas) {
               coronaRuntime?.render(renderer);
@@ -4241,6 +4279,9 @@ function App() {
         }
         renderMetricsRef.current = {
           ...renderMetricsRef.current,
+          transparentQueue: rwRenderQueueRef.current?.debugStats?.transparentCount ?? 0,
+          additiveQueue: rwRenderQueueRef.current?.debugStats?.additiveCount ?? 0,
+          overlayQueue: rwRenderQueueRef.current?.debugStats?.overlayCount ?? 0,
           drawCalls: renderer.info?.render?.calls ?? 0,
           triangles: renderer.info?.render?.triangles ?? 0,
         };
@@ -4847,6 +4888,7 @@ function App() {
             ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
             ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
             ImGui.Text(`Visible: near ${renderMetrics.visibleNear} | lod ${renderMetrics.visibleLod}`);
+            ImGui.Text(`Transparent Queue: blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
             ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
             ImGui.Text(`Lighting: IDE 2DFX ${statsRef.current.ideEffects} | objects ${statsRef.current.lightObjects} | emitters ${statsRef.current.lightEmitters}`);
             ImGui.Text('FPS Graph');
@@ -5070,11 +5112,15 @@ function App() {
                 renderStageCheckbox('waterWavy', 'Water Wavy');
                 renderStageCheckbox('waterWake', 'Water Wake');
                 renderStageCheckbox('sceneTransparent', 'Scene Transparent');
+                renderStageCheckbox('sceneBlend', 'Scene Blend');
+                renderStageCheckbox('sceneAdditive', 'Scene Additive');
+                renderStageCheckbox('sceneOverlay', 'Scene Overlay');
                 renderStageCheckbox('coronas', 'Coronas');
                 renderStageCheckbox('postFx', 'PostFX');
                 renderStageCheckbox('sunBloom', 'Sun Bloom');
                 renderStageCheckbox('sunFinal', 'Sun Final');
                 renderStageCheckbox('hud', 'HUD');
+                ImGui.TextDisabled('Transparent fill-rate gets much worse when Disable Backface Culling is on, because transparent surfaces become double-sided.');
               }
               {
                 const gameOptions = getRWPipelineGameOptions();

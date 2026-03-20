@@ -57,6 +57,9 @@ export class RWRenderQueue {
     this.root = root;
     this.entries = [];
     this.tempWorldPos = new THREE.Vector3();
+    this.tempProjScreenMatrix = new THREE.Matrix4();
+    this.tempFrustum = new THREE.Frustum();
+    this.tempSphere = new THREE.Sphere();
     this.frameBuckets = {
       opaque: [],
       cutout: [],
@@ -64,8 +67,22 @@ export class RWRenderQueue {
       additive: [],
       overlay: [],
     };
+    this.transparentScene = new THREE.Scene();
+    this.transparentRoot = new THREE.Group();
+    this.transparentRoot.matrixAutoUpdate = false;
+    this.transparentRoot.matrixWorldAutoUpdate = false;
+    this.transparentScene.autoUpdate = false;
+    this.transparentScene.add(this.transparentRoot);
+    this.activeTransparentEntries = [];
     this.cameraMaskStack = [];
     this.dirty = true;
+    this.debugStats = {
+      opaqueCount: 0,
+      cutoutCount: 0,
+      transparentCount: 0,
+      additiveCount: 0,
+      overlayCount: 0,
+    };
   }
 
   setRoot(root) {
@@ -80,6 +97,8 @@ export class RWRenderQueue {
   rebuild(root = this.root) {
     this.root = root;
     this.entries = [];
+    this.activeTransparentEntries = [];
+    this.transparentRoot.clear();
     if (!root) {
       this.dirty = false;
       return;
@@ -91,6 +110,8 @@ export class RWRenderQueue {
         mesh: node,
         bucket: 'opaque',
         distanceSq: Number.POSITIVE_INFINITY,
+        proxy: null,
+        proxyBucket: '',
       });
     });
 
@@ -99,6 +120,10 @@ export class RWRenderQueue {
 
   prepareFrame(camera) {
     if (this.dirty) this.rebuild();
+    if (camera?.projectionMatrix && camera?.matrixWorldInverse) {
+      this.tempProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      this.tempFrustum.setFromProjectionMatrix(this.tempProjScreenMatrix);
+    }
 
     const transparent = [];
     const additive = [];
@@ -108,24 +133,47 @@ export class RWRenderQueue {
     this.frameBuckets.transparent = [];
     this.frameBuckets.additive = [];
     this.frameBuckets.overlay = [];
+    this.activeTransparentEntries = [];
+    this.debugStats.opaqueCount = 0;
+    this.debugStats.cutoutCount = 0;
+    this.debugStats.transparentCount = 0;
+    this.debugStats.additiveCount = 0;
+    this.debugStats.overlayCount = 0;
+    for (const entry of this.entries) {
+      if (entry.proxy) entry.proxy.visible = false;
+    }
 
     for (const entry of this.entries) {
       const { mesh } = entry;
       if (!isVisibleInWorld(mesh, this.root)) continue;
+      if (camera && mesh.frustumCulled !== false && mesh.geometry) {
+        if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+        if (mesh.geometry.boundingSphere) {
+          this.tempSphere.copy(mesh.geometry.boundingSphere).applyMatrix4(mesh.matrixWorld);
+          if (!this.tempFrustum.intersectsSphere(this.tempSphere)) continue;
+        }
+      }
 
       entry.bucket = getMeshBucket(mesh);
       if (this.frameBuckets[entry.bucket]) this.frameBuckets[entry.bucket].push(entry);
+      if (entry.bucket === 'opaque') this.debugStats.opaqueCount += 1;
+      else if (entry.bucket === 'cutout') this.debugStats.cutoutCount += 1;
+      else if (entry.bucket === 'transparent') this.debugStats.transparentCount += 1;
+      else if (entry.bucket === 'additive') this.debugStats.additiveCount += 1;
+      else if (entry.bucket === 'overlay') this.debugStats.overlayCount += 1;
       const layer = BUCKET_LAYERS[entry.bucket] ?? 0;
       mesh.layers.set(layer);
       if (entry.bucket === 'transparent' || entry.bucket === 'additive' || entry.bucket === 'overlay') {
         mesh.getWorldPosition(this.tempWorldPos);
         entry.distanceSq = camera.position.distanceToSquared(this.tempWorldPos);
+        this.activeTransparentEntries.push(entry);
         if (entry.bucket === 'transparent') transparent.push(entry);
         else if (entry.bucket === 'additive') additive.push(entry);
         else overlay.push(entry);
       } else {
         entry.distanceSq = Number.POSITIVE_INFINITY;
         mesh.renderOrder = getBucketBaseOrder(entry.bucket);
+        if (entry.proxy) entry.proxy.visible = false;
       }
     }
 
@@ -143,6 +191,49 @@ export class RWRenderQueue {
     overlay.forEach((entry, index) => {
       entry.mesh.renderOrder = getBucketBaseOrder('overlay') + index;
     });
+    for (const entry of [...transparent, ...additive, ...overlay]) {
+      const proxy = this.ensureProxy(entry);
+      proxy.visible = true;
+      proxy.geometry = entry.mesh.geometry;
+      proxy.material = entry.mesh.material;
+      proxy.renderOrder = entry.mesh.renderOrder;
+      proxy.matrix.copy(entry.mesh.matrixWorld);
+      proxy.matrixWorld.copy(entry.mesh.matrixWorld);
+      proxy.matrixAutoUpdate = false;
+      proxy.matrixWorldAutoUpdate = false;
+      proxy.frustumCulled = entry.mesh.frustumCulled;
+      proxy.userData.rwQueueBucket = entry.bucket;
+      entry.proxyBucket = entry.bucket;
+    }
+  }
+
+  ensureProxy(entry) {
+    if (entry?.proxy) return entry.proxy;
+    const proxy = new THREE.Mesh(entry.mesh.geometry, entry.mesh.material);
+    proxy.name = `${entry.mesh.name || 'mesh'}__transparent_proxy`;
+    proxy.matrixAutoUpdate = false;
+    proxy.matrixWorldAutoUpdate = false;
+    proxy.visible = false;
+    proxy.frustumCulled = entry.mesh.frustumCulled;
+    proxy.userData = {
+      ...(entry.mesh.userData || {}),
+      rwTransparentProxy: true,
+    };
+    this.transparentRoot.add(proxy);
+    entry.proxy = proxy;
+    return proxy;
+  }
+
+  renderTransparent(renderer, camera, options = {}) {
+    if (!renderer || !camera || this.activeTransparentEntries.length === 0) return;
+    const allowedBuckets = new Set(Array.isArray(options.allowedBuckets) ? options.allowedBuckets : ['transparent', 'additive', 'overlay']);
+    this.transparentScene.fog = options.fog || null;
+    const activeEntries = new Set(this.activeTransparentEntries);
+    for (const entry of this.entries) {
+      if (!entry.proxy) continue;
+      entry.proxy.visible = activeEntries.has(entry) && allowedBuckets.has(entry.proxyBucket);
+    }
+    renderer.render(this.transparentScene, camera);
   }
 
   pushCameraBucketMask(camera, allowedBuckets) {

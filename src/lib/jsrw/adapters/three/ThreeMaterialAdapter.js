@@ -37,8 +37,30 @@ function mapPixelFormat(rasterFormat, d3dFormat) {
   return `0x${fmt.toString(16).toUpperCase()}`;
 }
 
+function inferAlphaModeFromPixels(texture) {
+  const data = texture?.image?.data;
+  const width = Number(texture?.image?.width) || 0;
+  const height = Number(texture?.image?.height) || 0;
+  if (!data || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  if ((data.length % 4) !== 0) return null;
+
+  const pixelCount = data.length / 4;
+  const sampleStep = Math.max(1, Math.floor(pixelCount / 4096));
+  let midAlphaCount = 0;
+  let sampleCount = 0;
+  for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += sampleStep) {
+    const alpha = data[(pixelIndex * 4) + 3];
+    sampleCount += 1;
+    if (alpha > 16 && alpha < 239) midAlphaCount += 1;
+  }
+  if (sampleCount === 0) return null;
+  return (midAlphaCount / sampleCount) <= 0.02 ? 'cutout' : 'blend';
+}
+
 function decideAlphaMode(_texture, hasAlpha, compressionMethod, pixelFormat) {
   if (!hasAlpha) return 'opaque';
+  const inferredAlphaMode = inferAlphaModeFromPixels(_texture);
+  if (inferredAlphaMode) return inferredAlphaMode;
   if (compressionMethod === 'DXT1') return 'cutout';
   if (compressionMethod === 'DXT3' || compressionMethod === 'DXT5') return 'blend';
   if (pixelFormat === 'A1R5G5B5') return 'cutout';
