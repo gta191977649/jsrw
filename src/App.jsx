@@ -104,6 +104,22 @@ const SHADOW_DEBUG_DEFAULTS = Object.freeze({
   heightBias: 0.03,
   maxActiveShadows: 48,
 });
+const FRAME_STAGE_DEBUG_DEFAULTS = Object.freeze({
+  skyDome: true,
+  skyBackdrop: true,
+  skyClouds: true,
+  sceneOpaque: true,
+  waterFar: true,
+  waterNear: true,
+  waterWavy: true,
+  waterWake: true,
+  sceneTransparent: true,
+  coronas: true,
+  postFx: true,
+  sunBloom: true,
+  sunFinal: true,
+  hud: true,
+});
 const RW_DFF_LIGHT_TYPE = Object.freeze({
   DIRECTIONAL: 0x01,
   AMBIENT: 0x02,
@@ -912,6 +928,7 @@ function App() {
     moon: { ...RW_MOON_DEBUG_DEFAULTS },
     stars: { ...RW_STARS_DEBUG_DEFAULTS },
     sun: { ...RW_SUN_DEBUG_DEFAULTS },
+    renderStages: { ...FRAME_STAGE_DEBUG_DEFAULTS },
     pipelineDebug: cloneRWPipelineSelections(RW_PIPELINE_SELECTION_DEFAULTS),
     appMode: APP_MODE_EDITOR,
     backendSelection: 'WebGL',
@@ -4016,6 +4033,7 @@ function App() {
         const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
         const coronaRuntime = jsrwSessionRef.current.getCoronaRuntime();
         const shadowRuntime = jsrwSessionRef.current.getShadowRuntime();
+        const renderStages = uiStateRef.current.renderStages || FRAME_STAGE_DEBUG_DEFAULTS;
         coronaRuntime?.setEnabled(uiStateRef.current.render2dfx);
         shadowRuntime?.setEnabled(uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled);
         coronaRuntime?.setDebugShowAll(uiStateRef.current.debug2dfx);
@@ -4051,15 +4069,17 @@ function App() {
         const farBackgroundColor = skyBottomColor;
         try {
           const rwRenderQueue = rwRenderQueueRef.current;
-          const postFxSceneTarget = jsrwSessionRef.current.beginPostFxSceneCapture({
-            ...pipelineRuntimeContext,
-            viewportWidth,
-            viewportHeight,
-          });
+          const postFxSceneTarget = renderStages.postFx
+            ? jsrwSessionRef.current.beginPostFxSceneCapture({
+              ...pipelineRuntimeContext,
+              viewportWidth,
+              viewportHeight,
+            })
+            : null;
           rwRenderQueue?.prepareFrame(camera);
           renderer.setRenderTarget(postFxSceneTarget);
           renderer.autoClear = true;
-          if (skyScene && skyCamera) {
+          if (renderStages.skyDome && skyScene && skyCamera) {
             renderer.render(skyScene, skyCamera);
           } else {
             renderer.setClearColor(farBackgroundColor, 1);
@@ -4067,8 +4087,10 @@ function App() {
           }
           renderer.autoClear = false;
           renderer.clearDepth();
-          skyFeature?.renderBackground(renderer);
-          if (skyCloudScene) {
+          if (renderStages.skyBackdrop) {
+            skyFeature?.renderBackground(renderer);
+          }
+          if (renderStages.skyClouds && skyCloudScene) {
             renderer.render(skyCloudScene, camera);
             renderer.clearDepth();
           }
@@ -4077,28 +4099,42 @@ function App() {
             try {
               waterPipeline.update(camera, time, dt);
 
-              waterStage = 'renderSceneOpaque';
-              rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout']);
-              renderer.render(scene, camera);
-              rwRenderQueue?.popCameraBucketMask(camera);
+              if (renderStages.sceneOpaque) {
+                waterStage = 'renderSceneOpaque';
+                rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout']);
+                renderer.render(scene, camera);
+                rwRenderQueue?.popCameraBucketMask(camera);
+              }
 
-              waterStage = 'renderFar';
-              waterPipeline.renderFar(renderer, camera, null);
+              if (renderStages.waterFar) {
+                waterStage = 'renderFar';
+                waterPipeline.renderFar(renderer, camera, null);
+              }
 
-              waterStage = 'renderNear';
-              waterPipeline.renderNear(renderer, camera);
+              if (renderStages.waterNear) {
+                waterStage = 'renderNear';
+                waterPipeline.renderNear(renderer, camera);
+              }
 
-              waterStage = 'renderWavy';
-              waterPipeline.renderWavy(renderer, camera);
+              if (renderStages.waterWavy) {
+                waterStage = 'renderWavy';
+                waterPipeline.renderWavy(renderer, camera);
+              }
 
-              waterStage = 'renderWake';
-              waterPipeline.renderWake(renderer, camera);
+              if (renderStages.waterWake) {
+                waterStage = 'renderWake';
+                waterPipeline.renderWake(renderer, camera);
+              }
 
-              waterStage = 'renderSceneTransparent';
-              rwRenderQueue?.pushCameraBucketMask(camera, ['transparent', 'additive', 'overlay']);
-              renderer.render(scene, camera);
-              rwRenderQueue?.popCameraBucketMask(camera);
-              coronaRuntime?.render(renderer);
+              if (renderStages.sceneTransparent) {
+                waterStage = 'renderSceneTransparent';
+                rwRenderQueue?.pushCameraBucketMask(camera, ['transparent', 'additive', 'overlay']);
+                renderer.render(scene, camera);
+                rwRenderQueue?.popCameraBucketMask(camera);
+              }
+              if (renderStages.coronas) {
+                coronaRuntime?.render(renderer);
+              }
               renderer.autoClear = true;
             } catch (waterError) {
               rwRenderQueue?.popCameraBucketMask(camera);
@@ -4120,19 +4156,33 @@ function App() {
               setStatus(`Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}. Water disabled.`);
               jsrwSessionRef.current.disposeWaterRuntime();
               renderer.autoClear = false;
-              rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
-              renderer.render(scene, camera);
-              rwRenderQueue?.popCameraBucketMask(camera);
-              coronaRuntime?.render(renderer);
+              const fallbackBuckets = [];
+              if (renderStages.sceneOpaque) fallbackBuckets.push('opaque', 'cutout');
+              if (renderStages.sceneTransparent) fallbackBuckets.push('transparent', 'additive', 'overlay');
+              if (fallbackBuckets.length > 0) {
+                rwRenderQueue?.pushCameraBucketMask(camera, fallbackBuckets);
+                renderer.render(scene, camera);
+                rwRenderQueue?.popCameraBucketMask(camera);
+              }
+              if (renderStages.coronas) {
+                coronaRuntime?.render(renderer);
+              }
             }
           } else {
             renderer.autoClear = false;
-            rwRenderQueue?.pushCameraBucketMask(camera, ['opaque', 'cutout', 'transparent', 'additive', 'overlay']);
-            renderer.render(scene, camera);
-            rwRenderQueue?.popCameraBucketMask(camera);
-            coronaRuntime?.render(renderer);
+            const sceneBuckets = [];
+            if (renderStages.sceneOpaque) sceneBuckets.push('opaque', 'cutout');
+            if (renderStages.sceneTransparent) sceneBuckets.push('transparent', 'additive', 'overlay');
+            if (sceneBuckets.length > 0) {
+              rwRenderQueue?.pushCameraBucketMask(camera, sceneBuckets);
+              renderer.render(scene, camera);
+              rwRenderQueue?.popCameraBucketMask(camera);
+            }
+            if (renderStages.coronas) {
+              coronaRuntime?.render(renderer);
+            }
           }
-          if (postFxSceneTarget && postFxSunCoronaEnabled) {
+          if (postFxSceneTarget && postFxSunCoronaEnabled && renderStages.sunBloom) {
             renderer.clearDepth();
             skyFeature?.renderSun(renderer, { mode: 'bloom' });
           }
@@ -4144,8 +4194,10 @@ function App() {
               viewportHeight,
             });
           }
-          renderer.clearDepth();
-          skyFeature?.renderSun(renderer, { mode: 'full' });
+          if (renderStages.sunFinal) {
+            renderer.clearDepth();
+            skyFeature?.renderSun(renderer, { mode: 'full' });
+          }
 
           const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
           gameIconSprite.material.map = iconTextures[activeIcon];
@@ -4163,10 +4215,12 @@ function App() {
             (2 * iconPx) / viewportHeight,
             1,
           );
-          renderer.autoClear = false;
-          renderer.clearDepth();
-          renderer.render(hudScene, hudCamera);
-          renderer.autoClear = true;
+          if (renderStages.hud) {
+            renderer.autoClear = false;
+            renderer.clearDepth();
+            renderer.render(hudScene, hudCamera);
+            renderer.autoClear = true;
+          }
         } catch (error) {
           console.error('Renderer runtime error:', error);
           if (!backendRuntimeFailed) {
@@ -4994,6 +5048,33 @@ function App() {
                   min: 0,
                   max: 4,
                 });
+              }
+              if (ImGui.CollapsingHeader('Frame Stages', defaultOpen)) {
+                ImGui.TextWrapped('Debug toggles for the per-frame render path. Disabling a stage skips that pass without changing the pipeline profile selection.');
+                const renderStages = uiStateRef.current.renderStages;
+                const renderStageCheckbox = (key, label) => {
+                  ImGui.Checkbox(
+                    `${label}##frame-stage-${key}`,
+                    (value = renderStages[key]) => {
+                      renderStages[key] = value;
+                      return value;
+                    },
+                  );
+                };
+                renderStageCheckbox('skyDome', 'Sky Dome');
+                renderStageCheckbox('skyBackdrop', 'Sky Backdrop');
+                renderStageCheckbox('skyClouds', 'Sky Clouds');
+                renderStageCheckbox('sceneOpaque', 'Scene Opaque');
+                renderStageCheckbox('waterFar', 'Water Far');
+                renderStageCheckbox('waterNear', 'Water Near');
+                renderStageCheckbox('waterWavy', 'Water Wavy');
+                renderStageCheckbox('waterWake', 'Water Wake');
+                renderStageCheckbox('sceneTransparent', 'Scene Transparent');
+                renderStageCheckbox('coronas', 'Coronas');
+                renderStageCheckbox('postFx', 'PostFX');
+                renderStageCheckbox('sunBloom', 'Sun Bloom');
+                renderStageCheckbox('sunFinal', 'Sun Final');
+                renderStageCheckbox('hud', 'HUD');
               }
               {
                 const gameOptions = getRWPipelineGameOptions();
