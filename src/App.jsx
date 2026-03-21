@@ -89,6 +89,10 @@ const CHUNK_ACTIVE_MARGIN = 384;
 const CHUNK_SPHERE_PADDING = WORLD_CHUNK_SIZE * 0.75;
 const CHUNK_CULL_MARGIN_XZ = WORLD_CHUNK_SIZE * 1.0;
 const CHUNK_CULL_MARGIN_Y = WORLD_CHUNK_SIZE * 1.5;
+const BIG_BUILDING_MIN_HEIGHT = WORLD_CHUNK_SIZE * 1.5;
+const BIG_BUILDING_MIN_SPAN = WORLD_CHUNK_SIZE * 1.25;
+const BIG_BUILDING_MIN_AREA = WORLD_CHUNK_SIZE * WORLD_CHUNK_SIZE * 0.75;
+const BIG_BUILDING_MIN_LOD_DISTANCE = 400;
 const ENABLE_WORLD_INSTANCING = true;
 const STREAMING_BUILD_PLACEMENT_BUDGET = 8;
 const STREAMING_BUILD_FRAME_BUDGET_MS = 8;
@@ -338,6 +342,48 @@ function triangleIntersectsChunkXZ(a, b, c, minX, minZ, maxX, maxZ) {
     }
   }
   return false;
+}
+
+function takeRenderStatsSnapshot(renderer) {
+  return {
+    calls: renderer?.info?.render?.calls ?? 0,
+    triangles: renderer?.info?.render?.triangles ?? 0,
+  };
+}
+
+function accumulateRenderStatsDelta(renderer, bucket, beforeSnapshot) {
+  const after = takeRenderStatsSnapshot(renderer);
+  bucket.drawCalls += Math.max(0, after.calls - (beforeSnapshot?.calls ?? 0));
+  bucket.triangles += Math.max(0, after.triangles - (beforeSnapshot?.triangles ?? 0));
+  return after;
+}
+
+function hasRenderableObject(object3D, handles) {
+  return Boolean(object3D) || (Array.isArray(handles) && handles.length > 0);
+}
+
+function classifyBigBuildingItem(item) {
+  if (!item || item.isTobj) return false;
+  const hasNear = hasRenderableObject(item.nearObj, item.nearHandles);
+  const hasLod = hasRenderableObject(item.lodObj, item.lodHandles);
+  if (!hasLod) return false;
+  if (!hasNear) return true;
+
+  const min = item.boundsMin || item.anchor || { x: 0, y: 0, z: 0 };
+  const max = item.boundsMax || item.anchor || { x: 0, y: 0, z: 0 };
+  const sizeX = Math.max(0, (max.x ?? 0) - (min.x ?? 0));
+  const sizeY = Math.max(0, (max.y ?? 0) - (min.y ?? 0));
+  const sizeZ = Math.max(0, (max.z ?? 0) - (min.z ?? 0));
+  const horizontalSpan = Math.max(sizeX, sizeZ);
+  const horizontalArea = sizeX * sizeZ;
+  const lodDistance = Number.isFinite(item.lodDrawDistance) ? item.lodDrawDistance : 0;
+
+  return (
+    sizeY >= BIG_BUILDING_MIN_HEIGHT
+    || horizontalSpan >= BIG_BUILDING_MIN_SPAN
+    || horizontalArea >= BIG_BUILDING_MIN_AREA
+    || lodDistance >= BIG_BUILDING_MIN_LOD_DISTANCE
+  );
 }
 
 function getTextureSizeFromSource(textureSource) {
@@ -907,6 +953,7 @@ function App() {
   const rwRenderQueueRef = useRef(null);
   const jsrwSessionRef = useRef(createJsrwRenderer());
   const renderItemsRef = useRef([]);
+  const bigBuildingItemsRef = useRef([]);
   const renderChunksRef = useRef([]);
   const renderChunkLookupRef = useRef(new Map());
   const activeRenderChunksRef = useRef(new Set());
@@ -926,6 +973,12 @@ function App() {
     overlayQueue: 0,
     drawCalls: 0,
     triangles: 0,
+    worldDrawCalls: 0,
+    worldTriangles: 0,
+    waterDrawCalls: 0,
+    waterTriangles: 0,
+    skyDrawCalls: 0,
+    skyTriangles: 0,
   });
   const selectedObjectRootRef = useRef(null);
   const selectedInstanceHighlightRef = useRef(null);
@@ -1328,6 +1381,7 @@ function App() {
       },
     };
     renderItemsRef.current = [];
+    bigBuildingItemsRef.current = [];
     renderChunksRef.current = [];
     renderChunkLookupRef.current = new Map();
     activeRenderChunksRef.current = new Set();
@@ -1358,6 +1412,12 @@ function App() {
       overlayQueue: 0,
       drawCalls: 0,
       triangles: 0,
+      worldDrawCalls: 0,
+      worldTriangles: 0,
+      waterDrawCalls: 0,
+      waterTriangles: 0,
+      skyDrawCalls: 0,
+      skyTriangles: 0,
     };
     rwRenderQueueRef.current?.markDirty();
     lodUpdateStateRef.current.needsRefresh = true;
@@ -2013,6 +2073,7 @@ function App() {
       placement.position.z,
     ));
     const renderItems = [];
+    const bigBuildingItems = [];
     const renderChunkMap = new Map();
     const instancedBatchMap = new Map();
     const coronaEmitters = [];
@@ -2034,6 +2095,8 @@ function App() {
         active: false,
         boundsMin: new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY),
         boundsMax: new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY),
+        occlusionBox: new THREE.Box3(),
+        occlusionSphere: new THREE.Sphere(),
         boundingBox: new THREE.Box3(),
         boundingSphere: new THREE.Sphere(),
       };
@@ -2107,6 +2170,10 @@ function App() {
         chunk.boundsMax.max(item.boundingBox.max);
       }
       item.chunkKey = chunk.key;
+      item.isBigBuilding = classifyBigBuildingItem(item);
+      if (item.isBigBuilding) {
+        bigBuildingItems.push(item);
+      }
       return item;
     };
 
@@ -2597,6 +2664,12 @@ function App() {
 
       for (const chunk of renderChunkMap.values()) {
         if (chunk.items.length === 0) {
+          chunk.occlusionBox.setFromCenterAndSize(
+            chunk.center.clone(),
+            new THREE.Vector3(WORLD_CHUNK_SIZE, WORLD_CHUNK_SIZE, WORLD_CHUNK_SIZE),
+          );
+          chunk.occlusionSphere.center.copy(chunk.center);
+          chunk.occlusionSphere.radius = CHUNK_SPHERE_PADDING;
           chunk.boundingBox.setFromCenterAndSize(
             chunk.center.clone(),
             new THREE.Vector3(
@@ -2609,6 +2682,9 @@ function App() {
           chunk.boundingSphere.radius = CHUNK_SPHERE_PADDING + Math.max(CHUNK_CULL_MARGIN_XZ, CHUNK_CULL_MARGIN_Y);
           continue;
         }
+        chunk.occlusionBox.min.copy(chunk.boundsMin);
+        chunk.occlusionBox.max.copy(chunk.boundsMax);
+        chunk.occlusionBox.getBoundingSphere(chunk.occlusionSphere);
         chunk.boundingBox.min.copy(chunk.boundsMin);
         chunk.boundingBox.max.copy(chunk.boundsMax);
         chunk.boundingBox.min.x -= CHUNK_CULL_MARGIN_XZ;
@@ -2697,6 +2773,7 @@ function App() {
         jsrwSessionRef.current.disposeShadowRuntime();
       }
       renderItemsRef.current = renderItems;
+      bigBuildingItemsRef.current = bigBuildingItems;
       renderChunksRef.current = Array.from(renderChunkMap.values());
       renderChunkLookupRef.current = renderChunkMap;
       activeRenderChunksRef.current = new Set();
@@ -3056,11 +3133,10 @@ function App() {
     Boolean(item?.lodObj) || (Array.isArray(item?.lodHandles) && item.lodHandles.length > 0)
   ), []);
 
-  const collectGroundScanChunks = useCallback((camera, renderDistance) => {
+  const collectGroundScanChunks = useCallback((camera, renderDistance, priorityDistance) => {
     const chunkLookup = renderChunkLookupRef.current;
     if (!(chunkLookup instanceof Map) || chunkLookup.size === 0 || !camera) return [];
 
-    const scanDistance = Math.max(WORLD_CHUNK_SIZE, renderDistance + CHUNK_ACTIVE_MARGIN);
     const cameraForward = new THREE.Vector3();
     camera.getWorldDirection(cameraForward);
     const scanNdcY = cameraForward.y > 0 ? -1 : 1;
@@ -3070,32 +3146,47 @@ function App() {
     fallbackDirection.normalize();
 
     const cameraPoint = new THREE.Vector2(camera.position.x, camera.position.z);
-    const leftPoint = toGroundScanPoint(camera, -1, scanNdcY, scanDistance, fallbackDirection);
-    const rightPoint = toGroundScanPoint(camera, 1, scanNdcY, scanDistance, fallbackDirection);
-
-    const minX = Math.min(cameraPoint.x, leftPoint.x, rightPoint.x) - (WORLD_CHUNK_SIZE * 2);
-    const maxX = Math.max(cameraPoint.x, leftPoint.x, rightPoint.x) + (WORLD_CHUNK_SIZE * 2);
-    const minZ = Math.min(cameraPoint.y, leftPoint.y, rightPoint.y) - (WORLD_CHUNK_SIZE * 2);
-    const maxZ = Math.max(cameraPoint.y, leftPoint.y, rightPoint.y) + (WORLD_CHUNK_SIZE * 2);
-    const startCx = Math.floor(minX / WORLD_CHUNK_SIZE) - 1;
-    const endCx = Math.floor(maxX / WORLD_CHUNK_SIZE) + 1;
-    const startCz = Math.floor(minZ / WORLD_CHUNK_SIZE) - 1;
-    const endCz = Math.floor(maxZ / WORLD_CHUNK_SIZE) + 1;
     const chunks = [];
+    const seen = new Set();
 
-    for (let cx = startCx; cx <= endCx; cx += 1) {
-      for (let cz = startCz; cz <= endCz; cz += 1) {
-        const chunk = chunkLookup.get(getChunkKeyFromCoords(cx, cz));
-        if (!chunk) continue;
-        const chunkMinX = (chunk.boundingBox?.min?.x ?? ((cx * WORLD_CHUNK_SIZE) - CHUNK_CULL_MARGIN_XZ));
-        const chunkMaxX = (chunk.boundingBox?.max?.x ?? (((cx + 1) * WORLD_CHUNK_SIZE) + CHUNK_CULL_MARGIN_XZ));
-        const chunkMinZ = (chunk.boundingBox?.min?.z ?? ((cz * WORLD_CHUNK_SIZE) - CHUNK_CULL_MARGIN_XZ));
-        const chunkMaxZ = (chunk.boundingBox?.max?.z ?? (((cz + 1) * WORLD_CHUNK_SIZE) + CHUNK_CULL_MARGIN_XZ));
-        if (!triangleIntersectsChunkXZ(cameraPoint, leftPoint, rightPoint, chunkMinX, chunkMinZ, chunkMaxX, chunkMaxZ)) {
-          continue;
+    const collectTriangleChunks = (distance) => {
+      const scanDistance = Math.max(WORLD_CHUNK_SIZE, distance + CHUNK_ACTIVE_MARGIN);
+      const leftPoint = toGroundScanPoint(camera, -1, scanNdcY, scanDistance, fallbackDirection);
+      const rightPoint = toGroundScanPoint(camera, 1, scanNdcY, scanDistance, fallbackDirection);
+      const minX = Math.min(cameraPoint.x, leftPoint.x, rightPoint.x) - (WORLD_CHUNK_SIZE * 2);
+      const maxX = Math.max(cameraPoint.x, leftPoint.x, rightPoint.x) + (WORLD_CHUNK_SIZE * 2);
+      const minZ = Math.min(cameraPoint.y, leftPoint.y, rightPoint.y) - (WORLD_CHUNK_SIZE * 2);
+      const maxZ = Math.max(cameraPoint.y, leftPoint.y, rightPoint.y) + (WORLD_CHUNK_SIZE * 2);
+      const startCx = Math.floor(minX / WORLD_CHUNK_SIZE) - 1;
+      const endCx = Math.floor(maxX / WORLD_CHUNK_SIZE) + 1;
+      const startCz = Math.floor(minZ / WORLD_CHUNK_SIZE) - 1;
+      const endCz = Math.floor(maxZ / WORLD_CHUNK_SIZE) + 1;
+
+      for (let cx = startCx; cx <= endCx; cx += 1) {
+        for (let cz = startCz; cz <= endCz; cz += 1) {
+          const chunk = chunkLookup.get(getChunkKeyFromCoords(cx, cz));
+          if (!chunk || seen.has(chunk)) continue;
+          const chunkMinX = (chunk.boundingBox?.min?.x ?? ((cx * WORLD_CHUNK_SIZE) - CHUNK_CULL_MARGIN_XZ));
+          const chunkMaxX = (chunk.boundingBox?.max?.x ?? (((cx + 1) * WORLD_CHUNK_SIZE) + CHUNK_CULL_MARGIN_XZ));
+          const chunkMinZ = (chunk.boundingBox?.min?.z ?? ((cz * WORLD_CHUNK_SIZE) - CHUNK_CULL_MARGIN_XZ));
+          const chunkMaxZ = (chunk.boundingBox?.max?.z ?? (((cz + 1) * WORLD_CHUNK_SIZE) + CHUNK_CULL_MARGIN_XZ));
+          if (!triangleIntersectsChunkXZ(cameraPoint, leftPoint, rightPoint, chunkMinX, chunkMinZ, chunkMaxX, chunkMaxZ)) {
+            continue;
+          }
+          seen.add(chunk);
+          chunks.push(chunk);
         }
-        chunks.push(chunk);
       }
+    };
+
+    const resolvedRenderDistance = Math.max(WORLD_CHUNK_SIZE, renderDistance || WORLD_CHUNK_SIZE);
+    const resolvedPriorityDistance = Math.max(
+      WORLD_CHUNK_SIZE,
+      Math.min(resolvedRenderDistance, priorityDistance || Math.min(resolvedRenderDistance, resolvedRenderDistance * 0.2)),
+    );
+    collectTriangleChunks(resolvedPriorityDistance);
+    if (resolvedRenderDistance > resolvedPriorityDistance + 1) {
+      collectTriangleChunks(resolvedRenderDistance);
     }
 
     return chunks;
@@ -4145,21 +4236,169 @@ function App() {
         chunkProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
         chunkFrustum.setFromProjectionMatrix(chunkProjScreenMatrix);
         const dirtyBatches = new Set();
-        const candidateChunks = collectGroundScanChunks(camera, renderingDistance);
+        const chunkScanDistance = (!showLods || forceLodOnly)
+          ? renderingDistance
+          : Math.min(renderingDistance, drawDistance);
+        const candidateChunks = collectGroundScanChunks(camera, chunkScanDistance, drawDistance);
         candidateChunks.sort((a, b) => {
           const da = camera.position.distanceToSquared(a.center);
           const db = camera.position.distanceToSquared(b.center);
           return da - db;
         });
         const occlusionState = resetChunkOcclusionState(chunkOcclusionStateRef.current);
+        const bigBuildingItems = bigBuildingItemsRef.current;
         const previousActiveChunks = activeRenderChunksRef.current;
         const nextActiveChunks = new Set();
+        const protectedItems = new Set();
+        const processedItems = new Set();
         let activeChunks = 0;
         let frustumChunks = 0;
         let activeItems = 0;
         let visibleNear = 0;
         let visibleLod = 0;
         let activeFades = 0;
+        const processRenderItem = (item, { checkOcclusion = false } = {}) => {
+          if (!item || processedItems.has(item)) return;
+          processedItems.add(item);
+
+          const itemInFrustum = item.boundingBox?.isBox3
+            ? chunkFrustum.intersectsBox(item.boundingBox)
+            : chunkFrustum.intersectsSphere(item.boundingSphere);
+          if (!itemInFrustum) {
+            hideRenderItemCompletely(item, dirtyBatches);
+            return;
+          }
+          if (checkOcclusion && isChunkOccluded(occlusionState, camera, item)) {
+            hideRenderItemCompletely(item, dirtyBatches);
+            return;
+          }
+
+          activeItems += 1;
+          const distSq = camera.position.distanceToSquared(item.anchor);
+          const hasNear = hasNearRenderable(item);
+          const hasLod = hasLodRenderable(item);
+          const tobjAllowed = !item.isTobj || showTobjs;
+          const dist = Math.sqrt(distSq);
+          if (!tobjAllowed || !RenderEntityController.isWithinDrawDistance(dist, renderingDistance, distanceFadeConfig)) {
+            hideRenderItemCompletely(item, dirtyBatches);
+            return;
+          }
+
+          const pairedItem = hasNear && hasLod;
+          const nearConfiguredDistance = resolveRenderableDistance(
+            item.nearState?.drawDistance,
+            showLods ? drawDistance : renderingDistance,
+          );
+          const nearEndDistance = Math.min(nearConfiguredDistance, renderingDistance);
+          const lodEndDistance = Math.min(
+            resolveRenderableDistance(item.lodState?.drawDistance, renderingDistance),
+            renderingDistance,
+          );
+
+          let nearShouldShow = false;
+          let lodShouldShow = false;
+          let nearOpacity = 0;
+          let lodOpacity = 0;
+
+          if (pairedItem && showLods && !forceLodOnly) {
+            const nearCoreRange = dist <= drawDistance;
+            const nearFadeRange = RenderEntityController.isWithinDrawDistance(dist, drawDistance, distanceFadeConfig);
+            const lodVisibleRange = RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig);
+
+            if (item.nearState) {
+              nearOpacity = RenderEntityController.updateFade(item.nearState, {
+                targetVisible: nearFadeRange,
+                distance: dist,
+                drawDistance,
+                dt,
+                config: distanceFadeConfig,
+              });
+            }
+            if (item.lodState) {
+              lodOpacity = RenderEntityController.updateFade(item.lodState, {
+                targetVisible: lodVisibleRange,
+                distance: dist,
+                drawDistance: lodEndDistance,
+                dt,
+                config: distanceFadeConfig,
+              });
+            }
+
+            const nearStreamAlpha = item.nearState?.streamAlpha ?? 1;
+            if (nearCoreRange) {
+              lodOpacity = lodVisibleRange
+                ? clamp01((nearStreamAlpha < (1 - fadeEpsilon) ? 1 : 0) * lodOpacity)
+                : 0;
+            }
+            nearShouldShow = nearOpacity > fadeEpsilon;
+            lodShouldShow = lodOpacity > fadeEpsilon;
+          } else {
+            nearShouldShow = hasNear
+              && !forceLodOnly
+              && RenderEntityController.isWithinDrawDistance(dist, nearEndDistance, distanceFadeConfig);
+            const lodShouldShowBase = hasLod
+              && (
+                forceLodOnly
+                || (!showLods && !hasNear)
+                || (showLods && (!hasNear || dist > drawDistance))
+              );
+
+            if (item.nearState) {
+              nearOpacity = RenderEntityController.updateFade(item.nearState, {
+                targetVisible: nearShouldShow,
+                distance: dist,
+                drawDistance: nearEndDistance,
+                dt,
+                config: distanceFadeConfig,
+              });
+            }
+
+            lodShouldShow = hasLod
+              && RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig)
+              && lodShouldShowBase;
+            if (item.lodState) {
+              lodOpacity = RenderEntityController.updateFade(item.lodState, {
+                targetVisible: lodShouldShow,
+                distance: dist,
+                drawDistance: lodEndDistance,
+                dt,
+                config: distanceFadeConfig,
+              });
+            }
+          }
+
+          item.mode = nearOpacity > fadeEpsilon
+            ? (lodOpacity > fadeEpsilon ? 'near+lod' : 'near')
+            : (lodOpacity > fadeEpsilon ? 'lod' : 'hidden');
+
+          if (nearOpacity > fadeEpsilon) visibleNear += 1;
+          if (lodOpacity > fadeEpsilon) visibleLod += 1;
+
+          applyRenderSideOpacity(item, 'near', nearOpacity, dirtyBatches);
+          applyRenderSideOpacity(item, 'lod', lodOpacity, dirtyBatches);
+          collectRenderSideFrameVisibility(frameVisibility, item, 'near');
+          collectRenderSideFrameVisibility(frameVisibility, item, 'lod');
+
+          const itemHasActiveFade = (
+            (nearOpacity > fadeEpsilon && nearOpacity < (1 - fadeEpsilon))
+            || (lodOpacity > fadeEpsilon && lodOpacity < (1 - fadeEpsilon))
+            || (nearShouldShow && (item.nearState?.streamAlpha ?? 1) < (1 - fadeEpsilon))
+            || (lodShouldShow && (item.lodState?.streamAlpha ?? 1) < (1 - fadeEpsilon))
+            || (!nearShouldShow && (item.nearState?.streamAlpha ?? 0) > fadeEpsilon)
+            || (!lodShouldShow && (item.lodState?.streamAlpha ?? 0) > fadeEpsilon)
+          );
+          if (itemHasActiveFade) {
+            activeFades += 1;
+          }
+          if (
+            nearOpacity > fadeEpsilon
+            || lodOpacity > fadeEpsilon
+            || (item.nearState?.streamAlpha ?? 0) > fadeEpsilon
+            || (item.lodState?.streamAlpha ?? 0) > fadeEpsilon
+          ) {
+            protectedItems.add(item);
+          }
+        };
         for (const chunk of candidateChunks) {
           const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
           const chunkInFrustum = chunkInRange && (
@@ -4194,137 +4433,19 @@ function App() {
           for (const emitter of chunk.coronaEmitters) addCoronaCandidate(frameVisibility, emitter);
           for (const emitter of chunk.shadowEmitters) addShadowCandidate(frameVisibility, emitter);
           for (const item of chunk.items) {
-            const itemInFrustum = item.boundingBox?.isBox3
-              ? chunkFrustum.intersectsBox(item.boundingBox)
-              : chunkFrustum.intersectsSphere(item.boundingSphere);
-            if (!itemInFrustum) {
-              hideRenderItemCompletely(item, dirtyBatches);
-              continue;
-            }
-            activeItems += 1;
-            const distSq = camera.position.distanceToSquared(item.anchor);
-            const hasNear = hasNearRenderable(item);
-            const hasLod = hasLodRenderable(item);
-            const tobjAllowed = !item.isTobj || showTobjs;
-            const dist = Math.sqrt(distSq);
-            if (!tobjAllowed || !RenderEntityController.isWithinDrawDistance(dist, renderingDistance, distanceFadeConfig)) {
-              hideRenderItemCompletely(item, dirtyBatches);
-              continue;
-            }
-
-            const pairedItem = hasNear && hasLod;
-            const nearConfiguredDistance = resolveRenderableDistance(
-              item.nearState?.drawDistance,
-              showLods ? drawDistance : renderingDistance,
-            );
-            const nearEndDistance = Math.min(nearConfiguredDistance, renderingDistance);
-            const lodEndDistance = Math.min(
-              resolveRenderableDistance(item.lodState?.drawDistance, renderingDistance),
-              renderingDistance,
-            );
-
-            let nearShouldShow = false;
-            let lodShouldShow = false;
-            let nearOpacity = 0;
-            let lodOpacity = 0;
-
-            if (pairedItem && showLods && !forceLodOnly) {
-              const nearCoreRange = dist <= drawDistance;
-              const nearFadeRange = RenderEntityController.isWithinDrawDistance(dist, drawDistance, distanceFadeConfig);
-              const lodVisibleRange = RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig);
-
-              if (item.nearState) {
-                nearOpacity = RenderEntityController.updateFade(item.nearState, {
-                  targetVisible: nearFadeRange,
-                  distance: dist,
-                  drawDistance,
-                  dt,
-                  config: distanceFadeConfig,
-                });
-              }
-              if (item.lodState) {
-                lodOpacity = RenderEntityController.updateFade(item.lodState, {
-                  targetVisible: lodVisibleRange,
-                  distance: dist,
-                  drawDistance: lodEndDistance,
-                  dt,
-                  config: distanceFadeConfig,
-                });
-              }
-
-              const nearStreamAlpha = item.nearState?.streamAlpha ?? 1;
-              if (nearCoreRange) {
-                lodOpacity = lodVisibleRange
-                  ? clamp01((nearStreamAlpha < (1 - fadeEpsilon) ? 1 : 0) * lodOpacity)
-                  : 0;
-              }
-              nearShouldShow = nearOpacity > fadeEpsilon;
-              lodShouldShow = lodOpacity > fadeEpsilon;
-            } else {
-              nearShouldShow = hasNear
-                && !forceLodOnly
-                && RenderEntityController.isWithinDrawDistance(dist, nearEndDistance, distanceFadeConfig);
-              const lodShouldShowBase = hasLod
-                && (
-                  forceLodOnly
-                  || (!showLods && !hasNear)
-                  || (showLods && (!hasNear || dist > drawDistance))
-                );
-
-              if (item.nearState) {
-                nearOpacity = RenderEntityController.updateFade(item.nearState, {
-                  targetVisible: nearShouldShow,
-                  distance: dist,
-                  drawDistance: nearEndDistance,
-                  dt,
-                  config: distanceFadeConfig,
-                });
-              }
-
-              lodShouldShow = hasLod
-                && RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig)
-                && lodShouldShowBase;
-              if (item.lodState) {
-                lodOpacity = RenderEntityController.updateFade(item.lodState, {
-                  targetVisible: lodShouldShow,
-                  distance: dist,
-                  drawDistance: lodEndDistance,
-                  dt,
-                  config: distanceFadeConfig,
-                });
-              }
-            }
-
-            item.mode = nearOpacity > fadeEpsilon
-              ? (lodOpacity > fadeEpsilon ? 'near+lod' : 'near')
-              : (lodOpacity > fadeEpsilon ? 'lod' : 'hidden');
-
-            if (nearOpacity > fadeEpsilon) visibleNear += 1;
-            if (lodOpacity > fadeEpsilon) visibleLod += 1;
-
-            applyRenderSideOpacity(item, 'near', nearOpacity, dirtyBatches);
-            applyRenderSideOpacity(item, 'lod', lodOpacity, dirtyBatches);
-            collectRenderSideFrameVisibility(frameVisibility, item, 'near');
-            collectRenderSideFrameVisibility(frameVisibility, item, 'lod');
-
-            if (
-              (nearOpacity > fadeEpsilon && nearOpacity < (1 - fadeEpsilon))
-              || (lodOpacity > fadeEpsilon && lodOpacity < (1 - fadeEpsilon))
-              || (nearShouldShow && (item.nearState?.streamAlpha ?? 1) < (1 - fadeEpsilon))
-              || (lodShouldShow && (item.lodState?.streamAlpha ?? 1) < (1 - fadeEpsilon))
-              || (!nearShouldShow && (item.nearState?.streamAlpha ?? 0) > fadeEpsilon)
-              || (!lodShouldShow && (item.lodState?.streamAlpha ?? 0) > fadeEpsilon)
-            ) {
-              activeFades += 1;
-            }
+            processRenderItem(item);
           }
           registerChunkOccluder(occlusionState, camera, chunk);
+        }
+        for (const item of bigBuildingItems) {
+          processRenderItem(item, { checkOcclusion: true });
         }
         for (const chunk of previousActiveChunks) {
           if (nextActiveChunks.has(chunk)) continue;
           if (!chunk?.active) continue;
           chunk.active = false;
           for (const item of chunk.items) {
+            if (protectedItems.has(item)) continue;
             hideRenderItemCompletely(item, dirtyBatches);
           }
         }
@@ -4417,6 +4538,9 @@ function App() {
         const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
         const coronaRuntime = jsrwSessionRef.current.getCoronaRuntime();
         const shadowRuntime = jsrwSessionRef.current.getShadowRuntime();
+        const stageWorldStats = { drawCalls: 0, triangles: 0 };
+        const stageWaterStats = { drawCalls: 0, triangles: 0 };
+        const stageSkyStats = { drawCalls: 0, triangles: 0 };
         const frameVisibility = frameVisibilityRef.current;
         const renderStages = uiStateRef.current.renderStages || FRAME_STAGE_DEBUG_DEFAULTS;
         coronaRuntime?.setEnabled(uiStateRef.current.render2dfx);
@@ -4475,7 +4599,9 @@ function App() {
           renderer.setRenderTarget(postFxSceneTarget);
           renderer.autoClear = true;
           if (renderStages.skyDome && skyScene && skyCamera) {
+            const beforeSkyDome = takeRenderStatsSnapshot(renderer);
             renderer.render(skyScene, skyCamera);
+            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSkyDome);
           } else {
             renderer.setClearColor(farBackgroundColor, 1);
             renderer.clear(true, true, true);
@@ -4483,10 +4609,14 @@ function App() {
           renderer.autoClear = false;
           renderer.clearDepth();
           if (renderStages.skyBackdrop) {
+            const beforeBackdrop = takeRenderStatsSnapshot(renderer);
             skyFeature?.renderBackground(renderer);
+            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeBackdrop);
           }
           if (renderStages.skyClouds && skyCloudScene) {
+            const beforeClouds = takeRenderStatsSnapshot(renderer);
             renderer.render(skyCloudScene, camera);
+            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeClouds);
             renderer.clearDepth();
           }
           if (waterPipeline?.hasRenderableWater() && uiStateRef.current.renderWater) {
@@ -4496,41 +4626,55 @@ function App() {
 
               if (renderStages.sceneOpaque) {
                 waterStage = 'renderSceneOpaque';
+                const beforeOpaque = takeRenderStatsSnapshot(renderer);
                 rwRenderQueue?.renderOpaque(renderer, camera, {
                   allowedBuckets: ['opaque', 'cutout'],
                   fog: scene.fog || null,
                 });
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaque);
               }
 
               if (renderStages.waterFar) {
                 waterStage = 'renderFar';
+                const beforeWaterFar = takeRenderStatsSnapshot(renderer);
                 waterPipeline.renderFar(renderer, camera, null);
+                accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterFar);
               }
 
               if (renderStages.waterNear) {
                 waterStage = 'renderNear';
+                const beforeWaterNear = takeRenderStatsSnapshot(renderer);
                 waterPipeline.renderNear(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterNear);
               }
 
               if (renderStages.waterWavy) {
                 waterStage = 'renderWavy';
+                const beforeWaterWavy = takeRenderStatsSnapshot(renderer);
                 waterPipeline.renderWavy(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterWavy);
               }
 
               if (renderStages.waterWake) {
                 waterStage = 'renderWake';
+                const beforeWaterWake = takeRenderStatsSnapshot(renderer);
                 waterPipeline.renderWake(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterWake);
               }
 
               if (transparentBuckets.length > 0) {
                 waterStage = 'renderSceneTransparent';
+                const beforeTransparent = takeRenderStatsSnapshot(renderer);
                 rwRenderQueue?.renderTransparent(renderer, camera, {
                   allowedBuckets: transparentBuckets,
                   fog: scene.fog || null,
                 });
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparent);
               }
               if (renderStages.coronas) {
+                const beforeCoronas = takeRenderStatsSnapshot(renderer);
                 coronaRuntime?.render(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCoronas);
               }
               renderer.autoClear = true;
             } catch (waterError) {
@@ -4560,20 +4704,26 @@ function App() {
                 const opaqueBuckets = fallbackBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
                 const transparentFallbackBuckets = fallbackBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
                 if (opaqueBuckets.length > 0) {
+                  const beforeOpaqueFallback = takeRenderStatsSnapshot(renderer);
                   rwRenderQueue?.renderOpaque(renderer, camera, {
                     allowedBuckets: opaqueBuckets,
                     fog: scene.fog || null,
                   });
+                  accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaqueFallback);
                 }
                 if (transparentFallbackBuckets.length > 0) {
+                  const beforeTransparentFallback = takeRenderStatsSnapshot(renderer);
                   rwRenderQueue?.renderTransparent(renderer, camera, {
                     allowedBuckets: transparentFallbackBuckets,
                     fog: scene.fog || null,
                   });
+                  accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparentFallback);
                 }
               }
               if (renderStages.coronas) {
+                const beforeCoronasFallback = takeRenderStatsSnapshot(renderer);
                 coronaRuntime?.render(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCoronasFallback);
               }
             }
           } else {
@@ -4585,25 +4735,33 @@ function App() {
               const opaqueBuckets = sceneBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
               const transparentSceneBuckets = sceneBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
               if (opaqueBuckets.length > 0) {
+                const beforeOpaqueNoWater = takeRenderStatsSnapshot(renderer);
                 rwRenderQueue?.renderOpaque(renderer, camera, {
                   allowedBuckets: opaqueBuckets,
                   fog: scene.fog || null,
                 });
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaqueNoWater);
               }
               if (transparentSceneBuckets.length > 0) {
+                const beforeTransparentNoWater = takeRenderStatsSnapshot(renderer);
                 rwRenderQueue?.renderTransparent(renderer, camera, {
                   allowedBuckets: transparentSceneBuckets,
                   fog: scene.fog || null,
                 });
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparentNoWater);
               }
             }
             if (renderStages.coronas) {
+              const beforeCoronasNoWater = takeRenderStatsSnapshot(renderer);
               coronaRuntime?.render(renderer, camera);
+              accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCoronasNoWater);
             }
           }
           if (postFxSceneTarget && postFxSunCoronaEnabled && renderStages.sunBloom) {
             renderer.clearDepth();
+            const beforeSunBloom = takeRenderStatsSnapshot(renderer);
             skyFeature?.renderSun(renderer, { mode: 'bloom' });
+            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSunBloom);
           }
           renderer.setRenderTarget(null);
           if (postFxSceneTarget) {
@@ -4615,7 +4773,9 @@ function App() {
           }
           if (renderStages.sunFinal) {
             renderer.clearDepth();
+            const beforeSunFinal = takeRenderStatsSnapshot(renderer);
             skyFeature?.renderSun(renderer, { mode: 'full' });
+            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSunFinal);
           }
 
           const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
@@ -4637,7 +4797,9 @@ function App() {
           if (renderStages.hud) {
             renderer.autoClear = false;
             renderer.clearDepth();
+            const beforeHud = takeRenderStatsSnapshot(renderer);
             renderer.render(hudScene, hudCamera);
+            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeHud);
             renderer.autoClear = true;
           }
         } catch (error) {
@@ -4665,6 +4827,12 @@ function App() {
           overlayQueue: rwRenderQueueRef.current?.debugStats?.overlayCount ?? 0,
           drawCalls: renderer.info?.render?.calls ?? 0,
           triangles: renderer.info?.render?.triangles ?? 0,
+          worldDrawCalls: stageWorldStats.drawCalls,
+          worldTriangles: stageWorldStats.triangles,
+          waterDrawCalls: stageWaterStats.drawCalls,
+          waterTriangles: stageWaterStats.triangles,
+          skyDrawCalls: stageSkyStats.drawCalls,
+          skyTriangles: stageSkyStats.triangles,
         };
       }
 
@@ -5266,6 +5434,9 @@ function App() {
             ImGui.Text(`FPS: ${fpsCurrent.toFixed(1)} | avg ${fpsAvg.toFixed(1)} | min ${fpsCount > 0 ? fpsMin.toFixed(1) : '0.0'} | max ${fpsMax.toFixed(1)}`);
             ImGui.Text(`Draw Calls: ${renderMetrics.drawCalls}`);
             ImGui.Text(`Triangles: ${renderMetrics.triangles}`);
+            ImGui.Text(`World: calls ${renderMetrics.worldDrawCalls} | tris ${renderMetrics.worldTriangles}`);
+            ImGui.Text(`Water: calls ${renderMetrics.waterDrawCalls} | tris ${renderMetrics.waterTriangles}`);
+            ImGui.Text(`Sky/HUD: calls ${renderMetrics.skyDrawCalls} | tris ${renderMetrics.skyTriangles}`);
             ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
             ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
             ImGui.Text(`Visible: near ${renderMetrics.visibleNear} | lod ${renderMetrics.visibleLod}`);

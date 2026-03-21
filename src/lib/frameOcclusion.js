@@ -11,6 +11,10 @@ const BOX_CORNERS = [
   new THREE.Vector3(),
 ];
 
+const BOX_OCCLUSION_TEST_CORNER_INDICES = [0, 3, 5, 6];
+const CLIP_POINT = new THREE.Vector4();
+const BOX_CENTER = new THREE.Vector3();
+
 const SCREEN_RECT_EPSILON = 0.015;
 const DEPTH_EPSILON = 0.02;
 const MIN_OCCLUDER_WIDTH = 0.14;
@@ -41,9 +45,42 @@ function fillBoxCorners(box) {
   return BOX_CORNERS;
 }
 
-function projectBoxToScreenRect(camera, box) {
-  if (!camera?.projectionMatrix || !camera?.matrixWorldInverse || !box?.isBox3) return null;
+function projectPointToViewport(camera, point) {
+  if (!camera?.projectionMatrix || !camera?.matrixWorldInverse || !point?.isVector3) return null;
+  CLIP_POINT.set(point.x, point.y, point.z, 1);
+  CLIP_POINT.applyMatrix4(camera.matrixWorldInverse);
+  CLIP_POINT.applyMatrix4(camera.projectionMatrix);
+  if (!Number.isFinite(CLIP_POINT.x) || !Number.isFinite(CLIP_POINT.y) || !Number.isFinite(CLIP_POINT.z) || !Number.isFinite(CLIP_POINT.w)) {
+    return null;
+  }
+  if (CLIP_POINT.w <= 1e-6) return null;
+  const invW = 1 / CLIP_POINT.w;
+  const ndcX = CLIP_POINT.x * invW;
+  const ndcY = CLIP_POINT.y * invW;
+  const ndcZ = CLIP_POINT.z * invW;
+  if (!Number.isFinite(ndcX) || !Number.isFinite(ndcY) || !Number.isFinite(ndcZ)) return null;
+  return {
+    ndcX,
+    ndcY,
+    depth: ndcZ,
+    x: (ndcX * 0.5) + 0.5,
+    y: (ndcY * -0.5) + 0.5,
+  };
+}
+
+function getChunkOcclusionBox(chunk) {
+  if (chunk?.occlusionBox?.isBox3) return chunk.occlusionBox;
+  if (chunk?.boundingBox?.isBox3) return chunk.boundingBox;
+  return null;
+}
+
+function projectBoxOcclusionData(camera, box) {
+  if (!box?.isBox3) return null;
   const corners = fillBoxCorners(box);
+  const center = box.getCenter(BOX_CENTER);
+  const centerProjection = projectPointToViewport(camera, center);
+  if (!centerProjection) return null;
+
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
@@ -51,21 +88,27 @@ function projectBoxToScreenRect(camera, box) {
   let minDepth = Number.POSITIVE_INFINITY;
   let maxDepth = Number.NEGATIVE_INFINITY;
   let projectedCount = 0;
+  const testPoints = [];
 
-  for (const corner of corners) {
-    const ndc = corner.clone().project(camera);
-    if (!Number.isFinite(ndc.x) || !Number.isFinite(ndc.y) || !Number.isFinite(ndc.z)) continue;
-    minX = Math.min(minX, (ndc.x * 0.5) + 0.5);
-    minY = Math.min(minY, (ndc.y * -0.5) + 0.5);
-    maxX = Math.max(maxX, (ndc.x * 0.5) + 0.5);
-    maxY = Math.max(maxY, (ndc.y * -0.5) + 0.5);
-    minDepth = Math.min(minDepth, ndc.z);
-    maxDepth = Math.max(maxDepth, ndc.z);
+  for (let index = 0; index < corners.length; index += 1) {
+    const projection = projectPointToViewport(camera, corners[index]);
+    if (BOX_OCCLUSION_TEST_CORNER_INDICES.includes(index)) {
+      testPoints.push(projection);
+    }
+    if (!projection) continue;
+    minX = Math.min(minX, projection.x);
+    minY = Math.min(minY, projection.y);
+    maxX = Math.max(maxX, projection.x);
+    maxY = Math.max(maxY, projection.y);
+    minDepth = Math.min(minDepth, projection.depth);
+    maxDepth = Math.max(maxDepth, projection.depth);
     projectedCount += 1;
   }
 
   if (projectedCount === 0) return null;
   return {
+    center: centerProjection,
+    testPoints,
     minX,
     minY,
     maxX,
@@ -77,36 +120,54 @@ function projectBoxToScreenRect(camera, box) {
   };
 }
 
-function canRegisterOccluder(rect) {
-  if (!rect) return false;
-  if (rect.minX < 0 || rect.minY < 0 || rect.maxX > 1 || rect.maxY > 1) return false;
-  if (rect.minDepth < -1 || rect.maxDepth > 1) return false;
-  if (rect.width < MIN_OCCLUDER_WIDTH || rect.height < MIN_OCCLUDER_HEIGHT) return false;
-  if ((rect.width * rect.height) < MIN_OCCLUDER_AREA) return false;
+function canRegisterOccluder(data) {
+  if (!data?.center) return false;
+  if (data.center.x < 0 || data.center.y < 0 || data.center.x > 1 || data.center.y > 1) return false;
+  if (data.minX < 0 || data.minY < 0 || data.maxX > 1 || data.maxY > 1) return false;
+  if (data.minDepth < -1 || data.maxDepth > 1) return false;
+  if (data.width < MIN_OCCLUDER_WIDTH || data.height < MIN_OCCLUDER_HEIGHT) return false;
+  if ((data.width * data.height) < MIN_OCCLUDER_AREA) return false;
   return true;
 }
 
+function isPointWithinRect(point, rect, epsilon = 0) {
+  if (!point || !rect) return false;
+  return (
+    point.x >= (rect.minX - epsilon)
+    && point.x <= (rect.maxX + epsilon)
+    && point.y >= (rect.minY - epsilon)
+    && point.y <= (rect.maxY + epsilon)
+  );
+}
+
 export function registerChunkOccluder(state, camera, chunk) {
-  if (!state || !chunk?.boundingBox?.isBox3) return null;
-  const rect = projectBoxToScreenRect(camera, chunk.boundingBox);
-  if (!canRegisterOccluder(rect)) return null;
-  state.occluders.push(rect);
-  return rect;
+  const box = getChunkOcclusionBox(chunk);
+  if (!state || !box) return null;
+  const data = projectBoxOcclusionData(camera, box);
+  if (!canRegisterOccluder(data)) return null;
+  state.occluders.push(data);
+  return data;
 }
 
 export function isChunkOccluded(state, camera, chunk) {
-  if (!state || state.occluders.length === 0 || !chunk?.boundingBox?.isBox3) return false;
-  const rect = projectBoxToScreenRect(camera, chunk.boundingBox);
-  if (!rect) return false;
+  const box = getChunkOcclusionBox(chunk);
+  if (!state || state.occluders.length === 0 || !box) return false;
+  const data = projectBoxOcclusionData(camera, box);
+  if (!data?.center) return false;
   for (const occluder of state.occluders) {
-    const insideRect = (
-      rect.minX >= (occluder.minX - SCREEN_RECT_EPSILON)
-      && rect.maxX <= (occluder.maxX + SCREEN_RECT_EPSILON)
-      && rect.minY >= (occluder.minY - SCREEN_RECT_EPSILON)
-      && rect.maxY <= (occluder.maxY + SCREEN_RECT_EPSILON)
-    );
-    if (!insideRect) continue;
-    if (rect.minDepth <= (occluder.maxDepth + DEPTH_EPSILON)) continue;
+    if (!isPointWithinRect(data.center, occluder, SCREEN_RECT_EPSILON)) continue;
+    if (data.center.depth <= (occluder.maxDepth + DEPTH_EPSILON)) continue;
+    let allTestPointsInside = true;
+    let testedPointCount = 0;
+    for (const point of data.testPoints) {
+      if (!point) continue;
+      testedPointCount += 1;
+      if (!isPointWithinRect(point, occluder, 0)) {
+        allTestPointsInside = false;
+        break;
+      }
+    }
+    if (testedPointCount === 0 || !allTestPointsInside) continue;
     return true;
   }
   return false;
