@@ -26,8 +26,8 @@ export class ShadowRuntime {
     this.pipeline.update(camera, runtimeContext);
   }
 
-  render(renderer) {
-    this.pipeline.render(renderer);
+  render(renderer, camera) {
+    this.pipeline.render(renderer, camera);
   }
 
   dispose() {

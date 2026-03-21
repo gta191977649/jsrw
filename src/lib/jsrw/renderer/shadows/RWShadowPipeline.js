@@ -216,6 +216,9 @@ export class RWShadowPipeline {
     this.entries = [];
     this.entryByEmitter = new WeakMap();
     this.activeEntries = new Set();
+    this.renderScene = new THREE.Scene();
+    this.renderScene.name = 'rw_shadows_scene';
+    this.renderScene.autoUpdate = true;
     this.shadowRoot = new THREE.Group();
     this.shadowRoot.name = 'rw_shadows';
     this.shadowRoot.userData = {
@@ -223,6 +226,7 @@ export class RWShadowPipeline {
       rwShadowAux: true,
       rwCoronaAux: true,
     };
+    this.renderScene.add(this.shadowRoot);
     this.debugStats = {
       entryCount: 0,
       visibleCount: 0,
@@ -244,11 +248,9 @@ export class RWShadowPipeline {
 
   setRoot(root) {
     if (this.root === root) return this.root;
-    if (this.shadowRoot.parent) this.shadowRoot.parent.remove(this.shadowRoot);
     this.root = root || null;
     this.sceneMeshesDirty = true;
     this.cachedSceneMeshes = null;
-    if (this.root) this.root.add(this.shadowRoot);
     return this.root;
   }
 
@@ -388,7 +390,7 @@ export class RWShadowPipeline {
     shadowMesh.visible = false;
     shadowMesh.frustumCulled = false;
     shadowMesh.renderOrder = 10;
-    shadowMesh.layers.set(4);
+    shadowMesh.layers.enable(0);
     shadowMesh.userData = {
       ...(shadowMesh.userData || {}),
       rwShadowAux: true,
@@ -783,7 +785,11 @@ export class RWShadowPipeline {
     this.debugStats.fallbackCornerCount = fallbackCornerCount;
   }
 
-  render() {}
+  render(renderer, camera) {
+    if (!renderer || !camera || !this.enabled) return;
+    this.renderScene.updateMatrixWorld(true);
+    renderer.render(this.renderScene, camera);
+  }
 
   disposeEntries() {
     for (const entry of this.entries) {

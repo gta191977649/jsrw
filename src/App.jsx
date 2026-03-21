@@ -363,9 +363,16 @@ function hasRenderableObject(object3D, handles) {
 }
 
 function classifyBigBuildingItem(item) {
-  if (!item || item.isTobj) return false;
+  if (!item) return false;
   const hasNear = hasRenderableObject(item.nearObj, item.nearHandles);
   const hasLod = hasRenderableObject(item.lodObj, item.lodHandles);
+  const farDistance = Math.max(
+    Number.isFinite(item.nearDrawDistance) ? item.nearDrawDistance : 0,
+    Number.isFinite(item.lodDrawDistance) ? item.lodDrawDistance : 0,
+  );
+  if (item.isTobj) {
+    return farDistance >= BIG_BUILDING_MIN_LOD_DISTANCE || hasLod;
+  }
   if (!hasLod) return false;
   if (!hasNear) return true;
 
@@ -376,7 +383,7 @@ function classifyBigBuildingItem(item) {
   const sizeZ = Math.max(0, (max.z ?? 0) - (min.z ?? 0));
   const horizontalSpan = Math.max(sizeX, sizeZ);
   const horizontalArea = sizeX * sizeZ;
-  const lodDistance = Number.isFinite(item.lodDrawDistance) ? item.lodDrawDistance : 0;
+  const lodDistance = Number.isFinite(item.lodDrawDistance) ? item.lodDrawDistance : farDistance;
 
   return (
     sizeY >= BIG_BUILDING_MIN_HEIGHT
@@ -4671,6 +4678,11 @@ function App() {
                 });
                 accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparent);
               }
+              if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
+                const beforeShadows = takeRenderStatsSnapshot(renderer);
+                shadowRuntime?.render(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadows);
+              }
               if (renderStages.coronas) {
                 const beforeCoronas = takeRenderStatsSnapshot(renderer);
                 coronaRuntime?.render(renderer, camera);
@@ -4720,6 +4732,11 @@ function App() {
                   accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparentFallback);
                 }
               }
+              if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
+                const beforeShadowsFallback = takeRenderStatsSnapshot(renderer);
+                shadowRuntime?.render(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsFallback);
+              }
               if (renderStages.coronas) {
                 const beforeCoronasFallback = takeRenderStatsSnapshot(renderer);
                 coronaRuntime?.render(renderer, camera);
@@ -4750,6 +4767,11 @@ function App() {
                 });
                 accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparentNoWater);
               }
+            }
+            if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
+              const beforeShadowsNoWater = takeRenderStatsSnapshot(renderer);
+              shadowRuntime?.render(renderer, camera);
+              accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsNoWater);
             }
             if (renderStages.coronas) {
               const beforeCoronasNoWater = takeRenderStatsSnapshot(renderer);
