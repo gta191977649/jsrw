@@ -2042,6 +2042,47 @@ function App() {
     };
 
     const registerRenderItem = (item) => {
+      item.boundsMin = new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+      item.boundsMax = new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+      item.boundingBox = new THREE.Box3();
+      item.boundingSphere = new THREE.Sphere(item.anchor.clone(), WORLD_CHUNK_SIZE * 0.5);
+      const expandItemBoundsWithObject = (object3D) => {
+        if (!object3D?.traverse) return;
+        object3D.updateMatrixWorld(true);
+        object3D.traverse((node) => {
+          if (!node?.isMesh || !node.geometry) return;
+          if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
+          if (!node.geometry.boundingBox) return;
+          const worldBox = node.geometry.boundingBox.clone().applyMatrix4(node.matrixWorld);
+          item.boundsMin.min(worldBox.min);
+          item.boundsMax.max(worldBox.max);
+        });
+      };
+      const expandItemBoundsWithHandles = (handles) => {
+        if (!Array.isArray(handles)) return;
+        for (const handle of handles) {
+          const geometry = handle?.batch?.mesh?.geometry;
+          if (!geometry) continue;
+          if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+          if (!geometry.boundingSphere) continue;
+          const worldSphere = geometry.boundingSphere.clone().applyMatrix4(handle.matrix);
+          item.boundsMin.min(worldSphere.center.clone().addScalar(-worldSphere.radius));
+          item.boundsMax.max(worldSphere.center.clone().addScalar(worldSphere.radius));
+        }
+      };
+      expandItemBoundsWithObject(item.nearObj);
+      expandItemBoundsWithObject(item.lodObj);
+      expandItemBoundsWithHandles(item.nearHandles);
+      expandItemBoundsWithHandles(item.lodHandles);
+      if (
+        Number.isFinite(item.boundsMin.x)
+        && Number.isFinite(item.boundsMax.x)
+        && item.boundsMin.x <= item.boundsMax.x
+      ) {
+        item.boundingBox.min.copy(item.boundsMin);
+        item.boundingBox.max.copy(item.boundsMax);
+        item.boundingBox.getBoundingSphere(item.boundingSphere);
+      }
       renderItems.push(item);
       const chunk = getRenderChunk(item.anchor);
       chunk.items.push(item);
@@ -2061,6 +2102,10 @@ function App() {
       };
       expandBoundsWithObject(item.nearObj);
       expandBoundsWithObject(item.lodObj);
+      if (item.boundingBox?.isBox3) {
+        chunk.boundsMin.min(item.boundingBox.min);
+        chunk.boundsMax.max(item.boundingBox.max);
+      }
       item.chunkKey = chunk.key;
       return item;
     };
@@ -4145,11 +4190,18 @@ function App() {
           chunk.active = true;
           nextActiveChunks.add(chunk);
           activeChunks += 1;
-          activeItems += chunk.items.length;
           addVisibleChunk(frameVisibility, chunk);
           for (const emitter of chunk.coronaEmitters) addCoronaCandidate(frameVisibility, emitter);
           for (const emitter of chunk.shadowEmitters) addShadowCandidate(frameVisibility, emitter);
           for (const item of chunk.items) {
+            const itemInFrustum = item.boundingBox?.isBox3
+              ? chunkFrustum.intersectsBox(item.boundingBox)
+              : chunkFrustum.intersectsSphere(item.boundingSphere);
+            if (!itemInFrustum) {
+              hideRenderItemCompletely(item, dirtyBatches);
+              continue;
+            }
+            activeItems += 1;
             const distSq = camera.position.distanceToSquared(item.anchor);
             const hasNear = hasNearRenderable(item);
             const hasLod = hasLodRenderable(item);
