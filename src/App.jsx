@@ -20,6 +20,12 @@ import {
   createFrameVisibilityResult,
   resetFrameVisibilityResult,
 } from './lib/frameVisibility';
+import {
+  createChunkOcclusionState,
+  isChunkOccluded,
+  registerChunkOccluder,
+  resetChunkOcclusionState,
+} from './lib/frameOcclusion';
 import RenderEntityController from './lib/jsrw/renderer/common/RenderEntityController.js';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from './lib/gtaTransforms';
 import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE, normalizePath } from './lib/gta/loaders/SectionLoader';
@@ -89,7 +95,6 @@ const STREAMING_BUILD_FRAME_BUDGET_MS = 8;
 const RW_DISTANCE_FADE_WINDOW = DISTANCE_FADE_DEFAULTS.window;
 const RW_STREAM_ALPHA_PER_SECOND = DISTANCE_FADE_DEFAULTS.streamAlphaPerSecond;
 const RW_FADE_EPSILON = DISTANCE_FADE_DEFAULTS.epsilon;
-const HIDDEN_INSTANCE_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 const SKY_SMALL_STRIP_HEIGHT = 4 / 400;
 const SKY_HORIZON_STRIP_HEIGHT = 48 / 400;
 const SKY_DEFAULT_TOP = DEFAULT_SCENE_BACKGROUND.clone().offsetHSL(0, 0, -0.08);
@@ -244,6 +249,95 @@ function getCachedQueueMeshes(root) {
   if (!root?.traverse) return [];
   if (Array.isArray(root.userData?.rwQueueMeshes)) return root.userData.rwQueueMeshes;
   return collectQueueMeshes(root);
+}
+
+function getChunkKeyFromCoords(cx, cz) {
+  return `${cx},${cz}`;
+}
+
+function toGroundScanPoint(camera, ndcX, ndcY, distance, fallbackDirection, target = new THREE.Vector2()) {
+  const worldPoint = new THREE.Vector3(ndcX, ndcY, 1).unproject(camera);
+  worldPoint.sub(camera.position);
+  worldPoint.y = 0;
+  if (worldPoint.lengthSq() <= 1e-6) {
+    worldPoint.copy(fallbackDirection);
+  }
+  if (worldPoint.lengthSq() <= 1e-6) {
+    worldPoint.set(0, 0, 1);
+  }
+  worldPoint.normalize().multiplyScalar(distance);
+  target.set(camera.position.x + worldPoint.x, camera.position.z + worldPoint.z);
+  return target;
+}
+
+function signedArea2D(a, b, c) {
+  return ((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x));
+}
+
+function pointInTriangle2D(point, a, b, c) {
+  const ab = signedArea2D(a, b, point);
+  const bc = signedArea2D(b, c, point);
+  const ca = signedArea2D(c, a, point);
+  const hasNegative = ab < 0 || bc < 0 || ca < 0;
+  const hasPositive = ab > 0 || bc > 0 || ca > 0;
+  return !(hasNegative && hasPositive);
+}
+
+function pointInRect2D(point, minX, minY, maxX, maxY) {
+  return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY;
+}
+
+function segmentsIntersect2D(a, b, c, d) {
+  const abC = signedArea2D(a, b, c);
+  const abD = signedArea2D(a, b, d);
+  const cdA = signedArea2D(c, d, a);
+  const cdB = signedArea2D(c, d, b);
+  if (abC === 0 && abD === 0 && cdA === 0 && cdB === 0) {
+    const minAx = Math.min(a.x, b.x);
+    const maxAx = Math.max(a.x, b.x);
+    const minAy = Math.min(a.y, b.y);
+    const maxAy = Math.max(a.y, b.y);
+    const minCx = Math.min(c.x, d.x);
+    const maxCx = Math.max(c.x, d.x);
+    const minCy = Math.min(c.y, d.y);
+    const maxCy = Math.max(c.y, d.y);
+    return !(maxAx < minCx || maxCx < minAx || maxAy < minCy || maxCy < minAy);
+  }
+  return ((abC <= 0 && abD >= 0) || (abC >= 0 && abD <= 0))
+    && ((cdA <= 0 && cdB >= 0) || (cdA >= 0 && cdB <= 0));
+}
+
+function triangleIntersectsChunkXZ(a, b, c, minX, minZ, maxX, maxZ) {
+  if (pointInRect2D(a, minX, minZ, maxX, maxZ)) return true;
+  if (pointInRect2D(b, minX, minZ, maxX, maxZ)) return true;
+  if (pointInRect2D(c, minX, minZ, maxX, maxZ)) return true;
+
+  const rect0 = new THREE.Vector2(minX, minZ);
+  const rect1 = new THREE.Vector2(maxX, minZ);
+  const rect2 = new THREE.Vector2(maxX, maxZ);
+  const rect3 = new THREE.Vector2(minX, maxZ);
+  if (pointInTriangle2D(rect0, a, b, c)) return true;
+  if (pointInTriangle2D(rect1, a, b, c)) return true;
+  if (pointInTriangle2D(rect2, a, b, c)) return true;
+  if (pointInTriangle2D(rect3, a, b, c)) return true;
+
+  const rectEdges = [
+    [rect0, rect1],
+    [rect1, rect2],
+    [rect2, rect3],
+    [rect3, rect0],
+  ];
+  const triEdges = [
+    [a, b],
+    [b, c],
+    [c, a],
+  ];
+  for (const [t0, t1] of triEdges) {
+    for (const [r0, r1] of rectEdges) {
+      if (segmentsIntersect2D(t0, t1, r0, r1)) return true;
+    }
+  }
+  return false;
 }
 
 function getTextureSizeFromSource(textureSource) {
@@ -814,7 +908,10 @@ function App() {
   const jsrwSessionRef = useRef(createJsrwRenderer());
   const renderItemsRef = useRef([]);
   const renderChunksRef = useRef([]);
+  const renderChunkLookupRef = useRef(new Map());
+  const activeRenderChunksRef = useRef(new Set());
   const frameVisibilityRef = useRef(createFrameVisibilityResult());
+  const chunkOcclusionStateRef = useRef(createChunkOcclusionState());
   const renderMetricsRef = useRef({
     activeChunks: 0,
     frustumChunks: 0,
@@ -1232,7 +1329,10 @@ function App() {
     };
     renderItemsRef.current = [];
     renderChunksRef.current = [];
+    renderChunkLookupRef.current = new Map();
+    activeRenderChunksRef.current = new Set();
     resetFrameVisibilityResult(frameVisibilityRef.current);
+    resetChunkOcclusionState(chunkOcclusionStateRef.current);
     worldGameVersionRef.current = String(uiStateRef.current.gameVersion || 'VCS').toUpperCase();
     jsrwSessionRef.current.setBackend(activeBackend || 'WebGL');
     jsrwSessionRef.current.setRoot(worldRoot);
@@ -1925,6 +2025,8 @@ function App() {
       if (renderChunkMap.has(chunkKey)) return renderChunkMap.get(chunkKey);
       const chunk = {
         key: chunkKey,
+        cx: Math.floor(anchor.x / WORLD_CHUNK_SIZE),
+        cz: Math.floor(anchor.z / WORLD_CHUNK_SIZE),
         center: getChunkCenterFromKey(chunkKey),
         items: [],
         coronaEmitters: [],
@@ -2206,6 +2308,7 @@ function App() {
         ...(mesh.userData || {}),
         rwPipelineTarget: createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs'),
         isTobj: ide.section === 'tobjs',
+        rwQueueRenderClass: 'building',
       };
       applyRwIdeFlagsToInstance(mesh, ide.flags);
       worldRoot.add(mesh);
@@ -2214,6 +2317,7 @@ function App() {
         mesh,
         entries: [],
         visibleCount: 0,
+        activeEntries: [],
       };
       instancedBatchMap.set(batchKey, batch);
       return batch;
@@ -2240,6 +2344,7 @@ function App() {
           const handle = {
             batch,
             index: -1,
+            activeIndex: -1,
             matrix,
             placementMatrix: worldMatrix.clone(),
             visible: false,
@@ -2308,6 +2413,7 @@ function App() {
         instance.userData.rwIdeFlags = ide.flags | 0;
         instance.userData.isTobj = ide.section === 'tobjs';
         instance.userData.rwPipelineTarget = createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs');
+        instance.userData.rwQueueRenderClass = 'building';
         collectQueueMeshes(instance);
         worldRoot.add(instance);
         loaded += 1;
@@ -2480,7 +2586,7 @@ function App() {
         const sourceGeometry = batch.mesh.geometry;
         const sourceMaterial = batch.mesh.material;
         const instancedMesh = new THREE.InstancedMesh(sourceGeometry, sourceMaterial, Math.max(1, entryCount));
-        instancedMesh.count = entryCount;
+        instancedMesh.count = 0;
         instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         instancedMesh.frustumCulled = false;
         instancedMesh.matrixAutoUpdate = false;
@@ -2489,7 +2595,7 @@ function App() {
         instancedMesh.material = sourceMaterial;
         instancedMesh.userData = {
           ...(batch.mesh.userData || {}),
-          rwInstanceEntries: batch.entries,
+          rwInstanceEntries: [],
         };
         worldRoot.remove(batch.mesh);
         batch.mesh = instancedMesh;
@@ -2497,9 +2603,8 @@ function App() {
         for (let index = 0; index < batch.entries.length; index += 1) {
           const entry = batch.entries[index];
           entry.index = index;
-          instancedMesh.setMatrixAt(index, HIDDEN_INSTANCE_MATRIX);
+          entry.activeIndex = -1;
         }
-        instancedMesh.instanceMatrix.needsUpdate = true;
       }
 
       jsrwSessionRef.current.setWaterRuntime(pendingWaterPipeline);
@@ -2548,6 +2653,8 @@ function App() {
       }
       renderItemsRef.current = renderItems;
       renderChunksRef.current = Array.from(renderChunkMap.values());
+      renderChunkLookupRef.current = renderChunkMap;
+      activeRenderChunksRef.current = new Set();
       jsrwSessionRef.current.setBackend(activeBackend);
       jsrwSessionRef.current.setRoot(worldRoot);
       jsrwSessionRef.current.applyToRoot(worldRoot, {
@@ -2654,14 +2761,35 @@ function App() {
     }
   }, []);
 
+  const flushDirtyInstancedBatch = useCallback((batch) => {
+    if (!batch?.mesh || !Array.isArray(batch.entries)) return;
+    let activeIndex = 0;
+    batch.activeEntries.length = 0;
+    for (const handle of batch.entries) {
+      if (!handle?.visible) {
+        if (handle) handle.activeIndex = -1;
+        continue;
+      }
+      batch.mesh.setMatrixAt(activeIndex, handle.matrix);
+      handle.activeIndex = activeIndex;
+      batch.activeEntries.push(handle);
+      activeIndex += 1;
+    }
+    batch.visibleCount = activeIndex;
+    batch.mesh.count = activeIndex;
+    batch.mesh.visible = activeIndex > 0;
+    batch.mesh.userData.rwInstanceEntries = batch.activeEntries;
+    batch.mesh.instanceMatrix.needsUpdate = true;
+    batch.mesh.boundingBox = null;
+    batch.mesh.boundingSphere = null;
+  }, []);
+
   const setInstanceHandlesVisible = useCallback((handles, visible, dirtyBatches) => {
     if (!Array.isArray(handles) || handles.length === 0) return;
     for (const handle of handles) {
       if (!handle?.batch?.mesh || handle.index < 0 || handle.visible === visible) continue;
-      handle.batch.mesh.setMatrixAt(handle.index, visible ? handle.matrix : HIDDEN_INSTANCE_MATRIX);
       handle.visible = visible;
       handle.batch.visibleCount += visible ? 1 : -1;
-      handle.batch.mesh.visible = handle.batch.visibleCount > 0;
       dirtyBatches?.add(handle.batch);
     }
   }, []);
@@ -2748,6 +2876,7 @@ function App() {
       objectDetail: sideState.objectDetail || null,
       isTobj: Boolean(sideState.isTobj),
       rwPipelineTarget: createRwPipelineTarget(worldGameVersionRef.current, sideState.isTobj),
+      rwQueueRenderClass: 'building',
     };
 
     const fadeMaterials = [];
@@ -2882,6 +3011,51 @@ function App() {
     Boolean(item?.lodObj) || (Array.isArray(item?.lodHandles) && item.lodHandles.length > 0)
   ), []);
 
+  const collectGroundScanChunks = useCallback((camera, renderDistance) => {
+    const chunkLookup = renderChunkLookupRef.current;
+    if (!(chunkLookup instanceof Map) || chunkLookup.size === 0 || !camera) return [];
+
+    const scanDistance = Math.max(WORLD_CHUNK_SIZE, renderDistance + CHUNK_ACTIVE_MARGIN);
+    const cameraForward = new THREE.Vector3();
+    camera.getWorldDirection(cameraForward);
+    const scanNdcY = cameraForward.y > 0 ? -1 : 1;
+    const fallbackDirection = cameraForward.clone();
+    fallbackDirection.y = 0;
+    if (fallbackDirection.lengthSq() <= 1e-6) fallbackDirection.set(0, 0, 1);
+    fallbackDirection.normalize();
+
+    const cameraPoint = new THREE.Vector2(camera.position.x, camera.position.z);
+    const leftPoint = toGroundScanPoint(camera, -1, scanNdcY, scanDistance, fallbackDirection);
+    const rightPoint = toGroundScanPoint(camera, 1, scanNdcY, scanDistance, fallbackDirection);
+
+    const minX = Math.min(cameraPoint.x, leftPoint.x, rightPoint.x) - (WORLD_CHUNK_SIZE * 2);
+    const maxX = Math.max(cameraPoint.x, leftPoint.x, rightPoint.x) + (WORLD_CHUNK_SIZE * 2);
+    const minZ = Math.min(cameraPoint.y, leftPoint.y, rightPoint.y) - (WORLD_CHUNK_SIZE * 2);
+    const maxZ = Math.max(cameraPoint.y, leftPoint.y, rightPoint.y) + (WORLD_CHUNK_SIZE * 2);
+    const startCx = Math.floor(minX / WORLD_CHUNK_SIZE) - 1;
+    const endCx = Math.floor(maxX / WORLD_CHUNK_SIZE) + 1;
+    const startCz = Math.floor(minZ / WORLD_CHUNK_SIZE) - 1;
+    const endCz = Math.floor(maxZ / WORLD_CHUNK_SIZE) + 1;
+    const chunks = [];
+
+    for (let cx = startCx; cx <= endCx; cx += 1) {
+      for (let cz = startCz; cz <= endCz; cz += 1) {
+        const chunk = chunkLookup.get(getChunkKeyFromCoords(cx, cz));
+        if (!chunk) continue;
+        const chunkMinX = (chunk.boundingBox?.min?.x ?? ((cx * WORLD_CHUNK_SIZE) - CHUNK_CULL_MARGIN_XZ));
+        const chunkMaxX = (chunk.boundingBox?.max?.x ?? (((cx + 1) * WORLD_CHUNK_SIZE) + CHUNK_CULL_MARGIN_XZ));
+        const chunkMinZ = (chunk.boundingBox?.min?.z ?? ((cz * WORLD_CHUNK_SIZE) - CHUNK_CULL_MARGIN_XZ));
+        const chunkMaxZ = (chunk.boundingBox?.max?.z ?? (((cz + 1) * WORLD_CHUNK_SIZE) + CHUNK_CULL_MARGIN_XZ));
+        if (!triangleIntersectsChunkXZ(cameraPoint, leftPoint, rightPoint, chunkMinX, chunkMinZ, chunkMaxX, chunkMaxZ)) {
+          continue;
+        }
+        chunks.push(chunk);
+      }
+    }
+
+    return chunks;
+  }, []);
+
   const collectRenderSideFrameVisibility = useCallback((frameVisibility, item, side) => {
     const sideState = side === 'near' ? item?.nearState : item?.lodState;
     if (!frameVisibility || !sideState) return;
@@ -2905,7 +3079,7 @@ function App() {
     const handles = side === 'near' ? item?.nearHandles : item?.lodHandles;
     if (!Array.isArray(handles) || handles.length === 0) return;
     for (const handle of handles) {
-      if (!handle?.visible || !handle?.batch?.mesh?.visible) continue;
+      if (!handle?.visible || !handle?.batch?.mesh) continue;
       addVisibleQueueMesh(frameVisibility, handle.batch.mesh);
     }
   }, []);
@@ -3926,13 +4100,22 @@ function App() {
         chunkProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
         chunkFrustum.setFromProjectionMatrix(chunkProjScreenMatrix);
         const dirtyBatches = new Set();
+        const candidateChunks = collectGroundScanChunks(camera, renderingDistance);
+        candidateChunks.sort((a, b) => {
+          const da = camera.position.distanceToSquared(a.center);
+          const db = camera.position.distanceToSquared(b.center);
+          return da - db;
+        });
+        const occlusionState = resetChunkOcclusionState(chunkOcclusionStateRef.current);
+        const previousActiveChunks = activeRenderChunksRef.current;
+        const nextActiveChunks = new Set();
         let activeChunks = 0;
         let frustumChunks = 0;
         let activeItems = 0;
         let visibleNear = 0;
         let visibleLod = 0;
         let activeFades = 0;
-        for (const chunk of renderChunksRef.current) {
+        for (const chunk of candidateChunks) {
           const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
           const chunkInFrustum = chunkInRange && (
             chunk.boundingBox?.isBox3
@@ -3949,8 +4132,18 @@ function App() {
             }
             continue;
           }
+          if (isChunkOccluded(occlusionState, camera, chunk)) {
+            if (chunk.active) {
+              chunk.active = false;
+              for (const item of chunk.items) {
+                hideRenderItemCompletely(item, dirtyBatches);
+              }
+            }
+            continue;
+          }
 
           chunk.active = true;
+          nextActiveChunks.add(chunk);
           activeChunks += 1;
           activeItems += chunk.items.length;
           addVisibleChunk(frameVisibility, chunk);
@@ -4073,11 +4266,19 @@ function App() {
               activeFades += 1;
             }
           }
+          registerChunkOccluder(occlusionState, camera, chunk);
         }
+        for (const chunk of previousActiveChunks) {
+          if (nextActiveChunks.has(chunk)) continue;
+          if (!chunk?.active) continue;
+          chunk.active = false;
+          for (const item of chunk.items) {
+            hideRenderItemCompletely(item, dirtyBatches);
+          }
+        }
+        activeRenderChunksRef.current = nextActiveChunks;
         for (const batch of dirtyBatches) {
-          batch.mesh.instanceMatrix.needsUpdate = true;
-          batch.mesh.boundingBox = null;
-          batch.mesh.boundingSphere = null;
+          flushDirtyInstancedBatch(batch);
         }
         renderMetricsRef.current = {
           ...renderMetricsRef.current,
@@ -6020,6 +6221,7 @@ function App() {
     activeBackend,
     applyRenderSideOpacity,
     clearWorld,
+    flushDirtyInstancedBatch,
     hasLodRenderable,
     hasNearRenderable,
     hideRenderItemCompletely,

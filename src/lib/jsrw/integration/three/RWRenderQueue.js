@@ -9,6 +9,12 @@ const BUCKET_LAYERS = {
   overlay: 5,
 };
 
+const RENDER_CLASS_ORDER = {
+  building: 0,
+  entity: 1,
+  underwater: 2,
+};
+
 function getBucketPriority(bucket) {
   if (bucket === 'overlay') return 4;
   if (bucket === 'additive') return 3;
@@ -23,6 +29,10 @@ function getBucketBaseOrder(bucket) {
   if (bucket === 'additive') return 3000;
   if (bucket === 'overlay') return 9000;
   return 0;
+}
+
+function getRenderClassOrder(renderClass) {
+  return RENDER_CLASS_ORDER[renderClass] ?? RENDER_CLASS_ORDER.entity;
 }
 
 function setProxyDefaultLayer(object) {
@@ -45,6 +55,17 @@ function getMeshBucket(mesh) {
     }
   }
   return bucket;
+}
+
+function getMeshRenderClass(mesh) {
+  const renderClass = String(
+    mesh.userData?.rwQueueRenderClass
+    || (mesh.userData?.water ? 'underwater' : '')
+    || (mesh.userData?.objectDetail || mesh.userData?.rwPipelineTarget?.category === 'building' ? 'building' : 'entity'),
+  ).toLowerCase();
+  if (renderClass === 'underwater') return 'underwater';
+  if (renderClass === 'building') return 'building';
+  return 'entity';
 }
 
 function isVisibleInWorld(mesh, stopAt) {
@@ -95,6 +116,9 @@ export class RWRenderQueue {
       transparentCount: 0,
       additiveCount: 0,
       overlayCount: 0,
+      alphaBuildingCount: 0,
+      alphaEntityCount: 0,
+      alphaUnderwaterCount: 0,
     };
   }
 
@@ -123,9 +147,14 @@ export class RWRenderQueue {
     root.traverse((node) => {
       if (!node.isMesh) return;
       const bucket = getMeshBucket(node);
+      const renderClass = getMeshRenderClass(node);
       const entry = {
         mesh: node,
         bucket,
+        renderClass,
+        baseOrder: getBucketBaseOrder(bucket),
+        renderClassOrder: getRenderClassOrder(renderClass),
+        sortBias: 0,
         distanceSq: Number.POSITIVE_INFINITY,
         proxy: null,
         proxyBucket: bucket,
@@ -171,6 +200,9 @@ export class RWRenderQueue {
     this.debugStats.transparentCount = 0;
     this.debugStats.additiveCount = 0;
     this.debugStats.overlayCount = 0;
+    this.debugStats.alphaBuildingCount = 0;
+    this.debugStats.alphaEntityCount = 0;
+    this.debugStats.alphaUnderwaterCount = 0;
     for (const entry of this.entries) {
       if (entry.proxy) entry.proxy.visible = false;
     }
@@ -194,35 +226,43 @@ export class RWRenderQueue {
       else if (entry.bucket === 'transparent') this.debugStats.transparentCount += 1;
       else if (entry.bucket === 'additive') this.debugStats.additiveCount += 1;
       else if (entry.bucket === 'overlay') this.debugStats.overlayCount += 1;
+      if (entry.bucket === 'transparent' || entry.bucket === 'additive' || entry.bucket === 'overlay') {
+        if (entry.renderClass === 'building') this.debugStats.alphaBuildingCount += 1;
+        else if (entry.renderClass === 'underwater') this.debugStats.alphaUnderwaterCount += 1;
+        else this.debugStats.alphaEntityCount += 1;
+      }
       const layer = BUCKET_LAYERS[entry.bucket] ?? 0;
       mesh.layers.set(layer);
       if (entry.bucket === 'transparent' || entry.bucket === 'additive' || entry.bucket === 'overlay') {
         mesh.getWorldPosition(this.tempWorldPos);
-        entry.distanceSq = camera.position.distanceToSquared(this.tempWorldPos);
+        entry.distanceSq = camera.position.distanceToSquared(this.tempWorldPos) + entry.sortBias;
         this.activeTransparentEntries.push(entry);
         if (entry.bucket === 'transparent') transparent.push(entry);
         else if (entry.bucket === 'additive') additive.push(entry);
         else overlay.push(entry);
       } else {
         entry.distanceSq = Number.POSITIVE_INFINITY;
-        mesh.renderOrder = getBucketBaseOrder(entry.bucket);
+        mesh.renderOrder = entry.baseOrder;
         this.activeOpaqueEntries.push(entry);
       }
     }
 
-    const farToNear = (a, b) => b.distanceSq - a.distanceSq;
+    const farToNear = (a, b) => {
+      if (a.renderClassOrder !== b.renderClassOrder) return a.renderClassOrder - b.renderClassOrder;
+      return b.distanceSq - a.distanceSq;
+    };
     transparent.sort(farToNear);
     additive.sort(farToNear);
     overlay.sort(farToNear);
 
     transparent.forEach((entry, index) => {
-      entry.mesh.renderOrder = getBucketBaseOrder('transparent') + index;
+      entry.mesh.renderOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
     });
     additive.forEach((entry, index) => {
-      entry.mesh.renderOrder = getBucketBaseOrder('additive') + index;
+      entry.mesh.renderOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
     });
     overlay.forEach((entry, index) => {
-      entry.mesh.renderOrder = getBucketBaseOrder('overlay') + index;
+      entry.mesh.renderOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
     });
     for (const entry of this.activeOpaqueEntries) {
       const proxy = this.ensureProxy(entry);
