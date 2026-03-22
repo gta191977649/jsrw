@@ -78,6 +78,18 @@ function isVisibleInWorld(mesh, stopAt) {
   return true;
 }
 
+function isPersistentOverlayEntry(entry) {
+  const mesh = entry?.mesh;
+  if (!mesh) return false;
+  if (mesh.userData?.rwIsSelectionOverlay) return true;
+  let cursor = mesh.parent;
+  while (cursor) {
+    if (cursor.userData?.rwInstanceSelectionProxy) return true;
+    cursor = cursor.parent;
+  }
+  return false;
+}
+
 export class RWRenderQueue {
   constructor(root) {
     this.root = root;
@@ -170,9 +182,16 @@ export class RWRenderQueue {
     if (frameVisibility?.computed !== true) return this.entries;
     const meshes = Array.isArray(frameVisibility?.visibleQueueMeshes) ? frameVisibility.visibleQueueMeshes : [];
     const visibleEntries = [];
+    const seen = new Set();
     for (const mesh of meshes) {
       const entry = this.entryByMesh.get(mesh);
-      if (!entry) continue;
+      if (!entry || seen.has(entry)) continue;
+      seen.add(entry);
+      visibleEntries.push(entry);
+    }
+    for (const entry of this.entries) {
+      if (!isPersistentOverlayEntry(entry) || seen.has(entry)) continue;
+      seen.add(entry);
       visibleEntries.push(entry);
     }
     return visibleEntries;

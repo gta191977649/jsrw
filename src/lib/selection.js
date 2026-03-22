@@ -45,6 +45,7 @@ export function applyObjectSelectionHighlight(root) {
       rwSelectionOverlay: overlay,
     };
   });
+  if (root.userData) delete root.userData.rwQueueMeshes;
 }
 
 export function clearObjectSelectionHighlight(root) {
@@ -57,4 +58,5 @@ export function clearObjectSelectionHighlight(root) {
     node.remove(overlay);
     delete node.userData.rwSelectionOverlay;
   });
+  if (root.userData) delete root.userData.rwQueueMeshes;
 }

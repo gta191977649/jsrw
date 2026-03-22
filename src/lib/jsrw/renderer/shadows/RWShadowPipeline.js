@@ -31,6 +31,7 @@ const DEFAULT_SHADOW_DRAW_DISTANCE = 40;
 const DEFAULT_MAX_REBUILDS_PER_FRAME = 6;
 const MAX_ACTIVE_SHADOWS = 48;
 const OFFSCREEN_FADE_MARGIN = 0;
+const RECEIVER_HEIGHT_EPSILON = 0.25;
 
 function overlapRange(minA, maxA, minB, maxB) {
   return minA <= maxB && maxA >= minB;
@@ -375,6 +376,11 @@ export class RWShadowPipeline {
       transparent: true,
       depthWrite: false,
       depthTest: true,
+      // Projected shadow polygons are generated from clipped quads whose
+      // winding is not guaranteed to match the receiver triangle winding.
+      // RenderWare's shadow pass does not rely on backface culling here, so
+      // keep both sides visible to avoid losing the whole projection.
+      side: THREE.DoubleSide,
       fog: false,
       blending: THREE.CustomBlending,
       toneMapped: false,
@@ -497,12 +503,19 @@ export class RWShadowPipeline {
 
     const positions = [];
     const uvs = [];
-    const pushVertex = (point, uv) => {
-      positions.push(point.x, point.y + vertexBias, point.z);
+    const projectedPolygons = [];
+    const pushVertex = (point, uv, normal) => {
+      const projectionNormal = normal?.isVector3 ? normal : TMP_TRI_NORMAL;
+      positions.push(
+        point.x + (projectionNormal.x * vertexBias),
+        point.y + (projectionNormal.y * vertexBias),
+        point.z + (projectionNormal.z * vertexBias),
+      );
       uvs.push(uv[0], uv[1]);
     };
 
     let fallbackCornerCount = 0;
+    let highestReceiverY = Number.NEGATIVE_INFINITY;
     for (const meshEntry of candidateMeshes) {
       const { object: mesh, positionAttribute, indexAttribute } = meshEntry;
       const triangleCount = indexAttribute ? indexAttribute.count / 3 : positionAttribute.count / 3;
@@ -530,6 +543,7 @@ export class RWShadowPipeline {
 
         TMP_TRI_NORMAL.copy(TMP_WORLD_B).sub(TMP_WORLD_A).cross(TMP_WORLD_C.clone().sub(TMP_WORLD_A)).normalize();
         if (Math.abs(TMP_TRI_NORMAL.y) <= 0.1) continue;
+        if (TMP_TRI_NORMAL.y < 0) TMP_TRI_NORMAL.negate();
 
         const clippedPolygon = clipShadowQuadToTriangle(quad, [
           { x: TMP_WORLD_A.x, y: TMP_WORLD_A.z },
@@ -554,6 +568,7 @@ export class RWShadowPipeline {
           solvePlaneHeight(TMP_TRI_NORMAL, TMP_WORLD_A, centerPolygonPoint.x, centerPolygonPoint.z),
           centerPolygonPoint.z,
         );
+        const polygonVertices = [];
 
         for (let index = 0; index < clippedPolygon.length; index += 1) {
           const current = clippedPolygon[index];
@@ -568,10 +583,34 @@ export class RWShadowPipeline {
             solvePlaneHeight(TMP_TRI_NORMAL, TMP_WORLD_A, next.x, next.z),
             next.z,
           );
-          pushVertex(projectedCenter, [centerPolygonPoint.u, centerPolygonPoint.v]);
-          pushVertex(currentPoint, [current.u, current.v]);
-          pushVertex(nextPoint, [next.u, next.v]);
+          polygonVertices.push([
+            projectedCenter.clone(),
+            [centerPolygonPoint.u, centerPolygonPoint.v],
+          ]);
+          polygonVertices.push([
+            currentPoint,
+            [current.u, current.v],
+          ]);
+          polygonVertices.push([
+            nextPoint,
+            [next.u, next.v],
+          ]);
         }
+        highestReceiverY = Math.max(highestReceiverY, projectedCenter.y);
+        projectedPolygons.push({
+          centerY: projectedCenter.y,
+          normal: TMP_TRI_NORMAL.clone(),
+          vertices: polygonVertices,
+        });
+      }
+    }
+
+    for (const polygon of projectedPolygons) {
+      if (polygon.centerY < (highestReceiverY - RECEIVER_HEIGHT_EPSILON)) {
+        continue;
+      }
+      for (const [point, uv] of polygon.vertices) {
+        pushVertex(point, uv, polygon.normal);
       }
     }
 
@@ -626,7 +665,14 @@ export class RWShadowPipeline {
       const emitter = entry.emitter;
       const shadowSettings = emitter.shadow || {};
       const shadowTexture = entry.shadowMesh.material?.map || null;
-      const shadowIntensity = Math.max(0, Number(shadowSettings.intensity) || 0);
+      const rawShadowIntensity = Number(shadowSettings.intensity);
+      const rawShadowAlpha = Number(shadowSettings.alpha);
+      const shadowIntensity = Math.max(
+        0,
+        rawShadowIntensity > 0
+          ? rawShadowIntensity
+          : (rawShadowAlpha > 0 ? rawShadowAlpha : 0),
+      );
       const distance = camera.position.distanceTo(TMP_POSITION.copy(toVector3(emitter.position)));
       const visibility = shouldShadowEmitterBeActive(entry, {
         ...runtimeContext,
@@ -658,6 +704,7 @@ export class RWShadowPipeline {
         && screen.y >= -OFFSCREEN_FADE_MARGIN
         && screen.y <= ((runtimeContext?.viewportHeight || 1) + OFFSCREEN_FADE_MARGIN),
       );
+      const relaxedScreenVisible = screenVisible || !screen;
       if (!shadowTexture) missingTextureCount += 1;
       if (shadowIntensity <= 0) zeroIntensityCount += 1;
       if (drawDistance > 0 && !RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig)) outOfRangeCount += 1;
@@ -669,7 +716,7 @@ export class RWShadowPipeline {
         && shadowTexture
         && (Number(shadowSettings.size) || 0) > 0
         && RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig)
-        && screenVisible
+        && relaxedScreenVisible
         && trafficLightShadowVisible
       );
 

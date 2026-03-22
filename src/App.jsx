@@ -3588,6 +3588,10 @@ function App() {
         if (!node.isMesh) return;
         const proxyMesh = new THREE.Mesh(node.geometry, INSTANCE_SELECTION_MATERIAL);
         proxyMesh.name = `${node.name || 'mesh'}__instance_selection`;
+        proxyMesh.userData = {
+          ...(proxyMesh.userData || {}),
+          rwIsSelectionOverlay: true,
+        };
         proxyMesh.matrixAutoUpdate = false;
         proxyMesh.matrixWorldAutoUpdate = false;
         proxyMesh.frustumCulled = false;
