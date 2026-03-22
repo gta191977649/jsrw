@@ -4673,6 +4673,11 @@ function App() {
                 accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterWake);
               }
 
+              if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
+                const beforeShadows = takeRenderStatsSnapshot(renderer);
+                shadowRuntime?.render(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadows);
+              }
               if (transparentBuckets.length > 0) {
                 waterStage = 'renderSceneTransparent';
                 const beforeTransparent = takeRenderStatsSnapshot(renderer);
@@ -4681,11 +4686,6 @@ function App() {
                   fog: scene.fog || null,
                 });
                 accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparent);
-              }
-              if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
-                const beforeShadows = takeRenderStatsSnapshot(renderer);
-                shadowRuntime?.render(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadows);
               }
               if (renderStages.coronas) {
                 const beforeCoronas = takeRenderStatsSnapshot(renderer);
@@ -4727,6 +4727,11 @@ function App() {
                   });
                   accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaqueFallback);
                 }
+                if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
+                  const beforeShadowsFallback = takeRenderStatsSnapshot(renderer);
+                  shadowRuntime?.render(renderer, camera);
+                  accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsFallback);
+                }
                 if (transparentFallbackBuckets.length > 0) {
                   const beforeTransparentFallback = takeRenderStatsSnapshot(renderer);
                   rwRenderQueue?.renderTransparent(renderer, camera, {
@@ -4735,8 +4740,7 @@ function App() {
                   });
                   accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparentFallback);
                 }
-              }
-              if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
+              } else if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
                 const beforeShadowsFallback = takeRenderStatsSnapshot(renderer);
                 shadowRuntime?.render(renderer, camera);
                 accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsFallback);
@@ -4763,6 +4767,11 @@ function App() {
                 });
                 accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaqueNoWater);
               }
+              if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
+                const beforeShadowsNoWater = takeRenderStatsSnapshot(renderer);
+                shadowRuntime?.render(renderer, camera);
+                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsNoWater);
+              }
               if (transparentSceneBuckets.length > 0) {
                 const beforeTransparentNoWater = takeRenderStatsSnapshot(renderer);
                 rwRenderQueue?.renderTransparent(renderer, camera, {
@@ -4771,8 +4780,7 @@ function App() {
                 });
                 accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparentNoWater);
               }
-            }
-            if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
+            } else if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
               const beforeShadowsNoWater = takeRenderStatsSnapshot(renderer);
               shadowRuntime?.render(renderer, camera);
               accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsNoWater);

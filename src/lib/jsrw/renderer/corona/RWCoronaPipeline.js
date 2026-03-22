@@ -28,6 +28,66 @@ function clamp01(value) {
   return THREE.MathUtils.clamp(Number(value) || 0, 0, 1);
 }
 
+function wrapUv(value, mode) {
+  if (mode === THREE.RepeatWrapping) return THREE.MathUtils.euclideanModulo(value, 1);
+  if (mode === THREE.MirroredRepeatWrapping) {
+    const wrapped = THREE.MathUtils.euclideanModulo(value, 2);
+    return wrapped <= 1 ? wrapped : (2 - wrapped);
+  }
+  return THREE.MathUtils.clamp(value, 0, 1);
+}
+
+function sampleTextureAlpha(texture, uv) {
+  if (!texture?.isTexture) return 1;
+  const data = texture.image?.data;
+  const width = Number(texture.image?.width) || 0;
+  const height = Number(texture.image?.height) || 0;
+  if (!data || width <= 0 || height <= 0 || !uv) return 1;
+  const u = wrapUv(Number(uv.x) || 0, texture.wrapS);
+  const v = wrapUv(Number(uv.y) || 0, texture.wrapT);
+  const pixelX = Math.min(width - 1, Math.max(0, Math.round(u * (width - 1))));
+  const pixelY = Math.min(height - 1, Math.max(0, Math.round((1 - v) * (height - 1))));
+  const alphaIndex = ((pixelY * width) + pixelX) * 4 + 3;
+  const alpha = data[alphaIndex];
+  return Number.isFinite(alpha) ? (alpha / 255) : 1;
+}
+
+function resolveHitMaterial(hit) {
+  const material = hit?.object?.material || null;
+  if (!Array.isArray(material)) return material;
+  const materialIndex = hit?.face?.materialIndex;
+  if (Number.isInteger(materialIndex) && material[materialIndex]) return material[materialIndex];
+  return material[0] || null;
+}
+
+function doesHitBlockLos(hit) {
+  const material = resolveHitMaterial(hit);
+  if (!material) return false;
+  const descriptor = getRWMaterialDescriptor(material);
+  const bucket = descriptor?.renderBucket || 'opaque';
+  if (bucket === 'additive' || bucket === 'overlay') return false;
+  if (bucket === 'opaque') return true;
+
+  const baseOpacity = clamp01(material.opacity ?? descriptor?.opacity ?? 1);
+  if (baseOpacity <= 0.01) return false;
+  const uv = hit?.uv || null;
+  const mapAlpha = sampleTextureAlpha(material.map, uv);
+  const alphaMapAlpha = sampleTextureAlpha(material.alphaMap, uv);
+  const effectiveAlpha = baseOpacity * mapAlpha * alphaMapAlpha;
+  const alphaThreshold = Math.max(
+    0.1,
+    Number(material.alphaTest ?? descriptor?.alphaRef)
+      || (bucket === 'cutout' ? 0.5 : 0.5),
+  );
+
+  if (bucket === 'cutout') return effectiveAlpha >= alphaThreshold;
+  if (bucket === 'transparent') {
+    if (!material.map && !material.alphaMap) return baseOpacity >= 0.95;
+    return effectiveAlpha >= alphaThreshold;
+  }
+  return effectiveAlpha >= alphaThreshold;
+}
+
 function toVector3(value, fallback = [0, 0, 0]) {
   if (value?.isVector3) return value.clone();
   if (Array.isArray(value)) {
@@ -249,7 +309,7 @@ export class RWCoronaPipeline {
       let blocksLos = false;
       for (const material of materials) {
         const bucket = getRWMaterialDescriptor(material)?.renderBucket || 'opaque';
-        if (bucket === 'opaque' || bucket === 'cutout') {
+        if (bucket === 'opaque' || bucket === 'cutout' || bucket === 'transparent') {
           blocksLos = true;
           break;
         }
@@ -513,7 +573,7 @@ export class RWCoronaPipeline {
     this.raycaster.far = Math.max(0.01, distance - 0.5);
 
     const hits = this.raycaster.intersectObjects(occluders, false);
-    const blockingHit = hits[0] || null;
+    const blockingHit = hits.find((hit) => doesHitBlockLos(hit)) || null;
 
     entry.losVisible = !blockingHit;
     entry.lastLosCheckMs = timeMs;

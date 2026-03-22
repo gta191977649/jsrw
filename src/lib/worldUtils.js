@@ -38,8 +38,8 @@ export function applyGlobalBackfaceCulling(root, disableBackfaceCulling) {
         };
       }
       const descriptor = getRWMaterialDescriptor(material);
-      if (disableBackfaceCulling) {
-        if (descriptor) descriptor.side = THREE.DoubleSide;
+      const forceDoubleSided = disableBackfaceCulling || descriptor?.rwFlags?.disableBackfaceCulling === true;
+      if (forceDoubleSided) {
         material.side = THREE.DoubleSide;
       } else {
         const descriptorSide = descriptor?.side;

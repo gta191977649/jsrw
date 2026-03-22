@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { calcScreenCoorsLikeRw, prepareRwSpriteTexture } from '../world/sky/RWSpriteUtils.js';
+import { prepareRwSpriteTexture } from '../world/sky/RWSpriteUtils.js';
 import { computeTrafficLightBrightness, resolveTrafficLightPhase } from '../corona/TrafficLights.js';
 import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
 import {
@@ -30,7 +30,6 @@ const DEFAULT_SHADOW_Z_DISTANCE = 15;
 const DEFAULT_SHADOW_DRAW_DISTANCE = 40;
 const DEFAULT_MAX_REBUILDS_PER_FRAME = 6;
 const MAX_ACTIVE_SHADOWS = 48;
-const OFFSCREEN_FADE_MARGIN = 0;
 const RECEIVER_HEIGHT_EPSILON = 0.25;
 
 function overlapRange(minA, maxA, minB, maxB) {
@@ -683,28 +682,6 @@ export class RWShadowPipeline {
         (Number(shadowSettings.drawDistance) || DEFAULT_SHADOW_DRAW_DISTANCE)
           * Math.max(0, Number(shadowDebug.drawDistanceScale) || 1),
       );
-      const needsScreenTest = this.enabled && (
-        visibility.active
-        || entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
-        || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
-      );
-      const screen = needsScreenTest
-        ? calcScreenCoorsLikeRw(
-          camera,
-          toVector3(emitter.position),
-          runtimeContext?.viewportWidth || 1,
-          runtimeContext?.viewportHeight || 1,
-          true,
-        )
-        : null;
-      const screenVisible = Boolean(
-        screen
-        && screen.x >= -OFFSCREEN_FADE_MARGIN
-        && screen.x <= ((runtimeContext?.viewportWidth || 1) + OFFSCREEN_FADE_MARGIN)
-        && screen.y >= -OFFSCREEN_FADE_MARGIN
-        && screen.y <= ((runtimeContext?.viewportHeight || 1) + OFFSCREEN_FADE_MARGIN),
-      );
-      const relaxedScreenVisible = screenVisible || !screen;
       if (!shadowTexture) missingTextureCount += 1;
       if (shadowIntensity <= 0) zeroIntensityCount += 1;
       if (drawDistance > 0 && !RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig)) outOfRangeCount += 1;
@@ -716,7 +693,6 @@ export class RWShadowPipeline {
         && shadowTexture
         && (Number(shadowSettings.size) || 0) > 0
         && RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig)
-        && relaxedScreenVisible
         && trafficLightShadowVisible
       );
 
