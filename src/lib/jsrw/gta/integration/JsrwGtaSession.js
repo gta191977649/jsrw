@@ -1082,8 +1082,11 @@ export class JsrwGtaSession {
           const nearInstanced = lodIndex == null ? await tryBuildInstancedHandles(placement, index, 'near', anchor) : null;
           const nearObj = nearInstanced ? null : await buildPlacementObject(placement, index, 'near', anchor);
           let lodObj = null;
+          let lodDef = null;
           if (Number.isInteger(lodIndex)) {
             const lodPlacement = effectivePlacements[lodIndex];
+            const lodModelName = normalizeModelLookupName(lodPlacement.modelName);
+            lodDef = ideByModel.get(lodModelName) ?? ideById.get(lodPlacement.id);
             lodObj = await buildPlacementObject(lodPlacement, lodIndex, 'lod', placementAnchors[lodIndex]);
           }
           if (nearObj || lodObj || nearInstanced) {
@@ -1095,9 +1098,9 @@ export class JsrwGtaSession {
               nearHandles: nearInstanced?.handles || [],
               lodHandles: [],
               nearDrawDistance: Number.isFinite(nearDef?.drawDistance) ? nearDef.drawDistance : null,
-              lodDrawDistance: null,
+              lodDrawDistance: Number.isFinite(lodDef?.drawDistance) ? lodDef.drawDistance : null,
               nearState: buildRenderSideState(nearObj, nearInstanced?.handles || [], nearDef?.drawDistance, isTobj),
-              lodState: buildRenderSideState(lodObj, [], null, false),
+              lodState: buildRenderSideState(lodObj, [], lodDef?.drawDistance ?? null, false),
               mode: 'hidden',
             });
           }

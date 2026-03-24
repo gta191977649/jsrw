@@ -595,9 +595,9 @@ export class WorldStreamingRuntime {
     chunkProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     chunkFrustum.setFromProjectionMatrix(chunkProjScreenMatrix);
     const dirtyBatches = new Set();
-    const chunkScanDistance = (!showLods || forceLodOnly)
-      ? renderingDistance
-      : Math.min(renderingDistance, drawDistance);
+    // Always scan out to the camera far clip. Pairing only affects near vs LOD *inside* a chunk;
+    // capping scan by the LOD switch distance would skip whole chunks and hide distant LOD meshes.
+    const chunkScanDistance = renderingDistance;
     const candidateChunks = this.collectGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef);
     candidateChunks.sort((a, b) => {
       const da = camera.position.distanceToSquared(a.center);
@@ -661,15 +661,17 @@ export class WorldStreamingRuntime {
       let lodOpacity = 0;
 
       if (pairedItem && showLods && !forceLodOnly) {
-        const nearCoreRange = dist <= drawDistance;
-        const nearFadeRange = RenderEntityController.isWithinDrawDistance(dist, drawDistance, distanceFadeConfig);
+        const nearIdeDistance = resolveRenderableDistance(item.nearState?.drawDistance, renderingDistance);
+        const nearRangeEnd = Math.min(drawDistance, nearIdeDistance, renderingDistance);
+        const nearCoreRange = dist <= nearRangeEnd;
+        const nearFadeRange = RenderEntityController.isWithinDrawDistance(dist, nearRangeEnd, distanceFadeConfig);
         const lodVisibleRange = RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig);
 
         if (hasNear && item.nearState) {
           nearOpacity = RenderEntityController.updateFade(item.nearState, {
             targetVisible: nearFadeRange,
             distance: dist,
-            drawDistance,
+            drawDistance: nearRangeEnd,
             dt,
             config: distanceFadeConfig,
           });

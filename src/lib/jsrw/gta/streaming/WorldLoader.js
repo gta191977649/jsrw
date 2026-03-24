@@ -216,6 +216,16 @@ export class WorldLoader {
       this.onLog?.('info', `IMGLIST loaded: ${listRecord.resolvedPath} (${listEntries.length} archives)`);
     }
 
+    for (const entry of manifest.unknownEntries || []) {
+      const rawPath = entry?.path;
+      if (!rawPath || !/\.img$/i.test(String(rawPath))) continue;
+      registerPath(rawPath);
+      this.onLog?.(
+        'info',
+        `gta.dat: unrecognized keyword "${entry.keyword}" — mounting as IMG: ${rawPath}`,
+      );
+    }
+
     return orderedPaths;
   }
 
