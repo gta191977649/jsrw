@@ -1,55 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { WebGPURenderer } from 'three/webgpu';
-import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import WebGPU from 'three/addons/capabilities/WebGPU.js';
 import { playerController as createExternalPlayerController } from 'three-player-controller';
+import {
+  createAppSessionController,
+  createResourceCacheState,
+  pushLoadedFileEntry,
+} from './app/runtime/AppSessionController.js';
 import { formatConsoleArg } from './lib/console';
-import { buildFileIndex } from './lib/fileIndex';
-import { expandZipArchive } from './lib/mapArchive';
 import {
   DISTANCE_FADE_DEFAULTS,
-  resolveRenderableDistance,
-} from './lib/renderDistanceFade';
-import {
-  addCoronaCandidate,
-  addShadowCandidate,
-  addVisibleChunk,
-  addVisibleItem,
-  addVisibleQueueMesh,
-  createFrameVisibilityResult,
-  resetFrameVisibilityResult,
-} from './lib/frameVisibility';
+} from './lib/jsrw/gta/core/DistanceFade.js';
+import { createFrameVisibilityResult } from './lib/jsrw/gta/core/FrameVisibility.js';
 import {
   createChunkOcclusionState,
-  isChunkOccluded,
-  registerChunkOccluder,
-  resetChunkOcclusionState,
-} from './lib/frameOcclusion';
-import RenderEntityController from './lib/jsrw/renderer/common/RenderEntityController.js';
-import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from './lib/gtaTransforms';
-import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE, normalizePath } from './lib/gta/loaders/SectionLoader';
-import { sampleTimecyc, TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/Timecycle';
-import { buildLodMapping, isLodModel } from './lib/lod';
+} from './lib/jsrw/gta/core/Occlusion.js';
+import { createDefaultTimecycleState } from './lib/jsrw/core/TimecycleState.js';
+import { WORLD_UP } from './lib/jsrw/utils/gtaTransforms.js';
+import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE, normalizePath } from './lib/jsrw/gta/loaders/SectionLoader.js';
+import { TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/jsrw/utils/Timecycle.js';
 import { PlayerControllerAdapter } from './lib/playerControllerAdapter';
 import { APP_MODE_EDITOR, APP_MODE_TEST, PlayerModeManager } from './lib/PlayerModeManager';
 import {
-  applyDisableVertexColor,
-  applyRwIdeFlagsToInstance,
   calcScreenCoorsLikeRw,
-  cloneRWMaterialDescriptor,
   cloneRWPipelineSelections,
-  buildTrafficLightCoronaEmitters,
-  createJsrwRenderer,
-  createRWPipelineMaterialForProfile,
-  createThreeMaterialFromRW,
-  decodeRwIdeFlags,
-  getRWMaterialDescriptor,
+  createJsrwGtaSession,
   getRWPipelineGameOptions,
   getRWPipelinePlatformOptions,
-  prepareTobjInstanceMaterials,
-  resolveRWPipelineSelection,
   RW_MOON_DEBUG_DEFAULTS,
   RW_PIPELINE_CATEGORY,
   RW_PIPELINE_PLATFORM,
@@ -57,26 +35,18 @@ import {
   RW_STARS_DEBUG_DEFAULTS,
   RW_SUN_DEBUG_DEFAULTS,
   SkyRendererBundle,
-  toRWMaterial,
-  tuneTransparentMaterial,
+  ThreeRendererHost,
 } from './lib/jsrw';
 import {
-  applyGlobalBackfaceCulling,
-  applyWireframe,
   disposeWorld,
-  getChunkCenterFromKey,
-  getChunkKeyFromPosition,
-  makeAssetKey,
   WORLD_CHUNK_SIZE,
-} from './lib/worldUtils';
+} from './lib/jsrw/utils/worldUtils.js';
 import { WINDOW_DEFS } from './ui/windows';
 import {
   applyObjectSelectionHighlight,
   clearObjectSelectionHighlight,
   getSelectableRootFromObject,
 } from './lib/selection';
-import { BrowserFileSystem } from './lib/gta/fs/BrowserFileSystem';
-import { WorldLoader } from './lib/gta/world/WorldLoader';
 import saIcon from './assets/sa.png';
 import vcsIcon from './assets/vcs.png';
 import vcsDefaultMapUrl from './assets/maps/vcs.zip?url';
@@ -207,17 +177,7 @@ const INSTANCE_SELECTION_MATERIAL = new THREE.MeshBasicMaterial({
   toneMapped: false,
 });
 
-function createResourceCacheState() {
-  return {
-    rawAssetCache: new Map(),
-    parsedTxdCache: new Map(),
-    modelTemplateCache: new Map(),
-    missingDff: new Set(),
-    missingTxd: new Set(),
-  };
-}
-
-function toPlainVector(vector) {
+function _toPlainVector(vector) {
   return {
     x: Number(vector?.x) || 0,
     y: Number(vector?.y) || 0,
@@ -225,7 +185,7 @@ function toPlainVector(vector) {
   };
 }
 
-function map2dfxVisibilityMode(lightType) {
+function _map2dfxVisibilityMode(lightType) {
   switch (Number(lightType)) {
     case IDE_LIGHT_TYPE.ON_NIGHT: return 'night';
     case IDE_LIGHT_TYPE.FLICKER: return 'flicker';
@@ -242,7 +202,7 @@ function map2dfxVisibilityMode(lightType) {
   }
 }
 
-function mapDffLightKind(lightType) {
+function _mapDffLightKind(lightType) {
   switch (Number(lightType)) {
     case RW_DFF_LIGHT_TYPE.AMBIENT: return 'ambient';
     case RW_DFF_LIGHT_TYPE.DIRECTIONAL: return 'directional';
@@ -255,210 +215,6 @@ function mapDffLightKind(lightType) {
 
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
-}
-
-function collectQueueMeshes(root) {
-  if (!root?.traverse) return [];
-  const meshes = [];
-  root.traverse((node) => {
-    if (!node?.isMesh) return;
-    meshes.push(node);
-  });
-  root.userData = {
-    ...(root.userData || {}),
-    rwQueueMeshes: meshes,
-  };
-  return meshes;
-}
-
-function getCachedQueueMeshes(root) {
-  if (!root?.traverse) return [];
-  if (Array.isArray(root.userData?.rwQueueMeshes)) return root.userData.rwQueueMeshes;
-  return collectQueueMeshes(root);
-}
-
-function getChunkKeyFromCoords(cx, cz) {
-  return `${cx},${cz}`;
-}
-
-function toGroundScanPoint(camera, ndcX, ndcY, distance, fallbackDirection, target = new THREE.Vector2()) {
-  const worldPoint = new THREE.Vector3(ndcX, ndcY, 1).unproject(camera);
-  worldPoint.sub(camera.position);
-  worldPoint.y = 0;
-  if (worldPoint.lengthSq() <= 1e-6) {
-    worldPoint.copy(fallbackDirection);
-  }
-  if (worldPoint.lengthSq() <= 1e-6) {
-    worldPoint.set(0, 0, 1);
-  }
-  worldPoint.normalize().multiplyScalar(distance);
-  target.set(camera.position.x + worldPoint.x, camera.position.z + worldPoint.z);
-  return target;
-}
-
-function signedArea2D(a, b, c) {
-  return ((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x));
-}
-
-function pointInTriangle2D(point, a, b, c) {
-  const ab = signedArea2D(a, b, point);
-  const bc = signedArea2D(b, c, point);
-  const ca = signedArea2D(c, a, point);
-  const hasNegative = ab < 0 || bc < 0 || ca < 0;
-  const hasPositive = ab > 0 || bc > 0 || ca > 0;
-  return !(hasNegative && hasPositive);
-}
-
-function pointInRect2D(point, minX, minY, maxX, maxY) {
-  return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY;
-}
-
-function segmentsIntersect2D(a, b, c, d) {
-  const abC = signedArea2D(a, b, c);
-  const abD = signedArea2D(a, b, d);
-  const cdA = signedArea2D(c, d, a);
-  const cdB = signedArea2D(c, d, b);
-  if (abC === 0 && abD === 0 && cdA === 0 && cdB === 0) {
-    const minAx = Math.min(a.x, b.x);
-    const maxAx = Math.max(a.x, b.x);
-    const minAy = Math.min(a.y, b.y);
-    const maxAy = Math.max(a.y, b.y);
-    const minCx = Math.min(c.x, d.x);
-    const maxCx = Math.max(c.x, d.x);
-    const minCy = Math.min(c.y, d.y);
-    const maxCy = Math.max(c.y, d.y);
-    return !(maxAx < minCx || maxCx < minAx || maxAy < minCy || maxCy < minAy);
-  }
-  return ((abC <= 0 && abD >= 0) || (abC >= 0 && abD <= 0))
-    && ((cdA <= 0 && cdB >= 0) || (cdA >= 0 && cdB <= 0));
-}
-
-function triangleIntersectsChunkXZ(a, b, c, minX, minZ, maxX, maxZ) {
-  if (pointInRect2D(a, minX, minZ, maxX, maxZ)) return true;
-  if (pointInRect2D(b, minX, minZ, maxX, maxZ)) return true;
-  if (pointInRect2D(c, minX, minZ, maxX, maxZ)) return true;
-
-  const rect0 = new THREE.Vector2(minX, minZ);
-  const rect1 = new THREE.Vector2(maxX, minZ);
-  const rect2 = new THREE.Vector2(maxX, maxZ);
-  const rect3 = new THREE.Vector2(minX, maxZ);
-  if (pointInTriangle2D(rect0, a, b, c)) return true;
-  if (pointInTriangle2D(rect1, a, b, c)) return true;
-  if (pointInTriangle2D(rect2, a, b, c)) return true;
-  if (pointInTriangle2D(rect3, a, b, c)) return true;
-
-  const rectEdges = [
-    [rect0, rect1],
-    [rect1, rect2],
-    [rect2, rect3],
-    [rect3, rect0],
-  ];
-  const triEdges = [
-    [a, b],
-    [b, c],
-    [c, a],
-  ];
-  for (const [t0, t1] of triEdges) {
-    for (const [r0, r1] of rectEdges) {
-      if (segmentsIntersect2D(t0, t1, r0, r1)) return true;
-    }
-  }
-  return false;
-}
-
-function takeRenderStatsSnapshot(renderer) {
-  return {
-    calls: renderer?.info?.render?.calls ?? 0,
-    triangles: renderer?.info?.render?.triangles ?? 0,
-  };
-}
-
-function accumulateRenderStatsDelta(renderer, bucket, beforeSnapshot) {
-  const after = takeRenderStatsSnapshot(renderer);
-  bucket.drawCalls += Math.max(0, after.calls - (beforeSnapshot?.calls ?? 0));
-  bucket.triangles += Math.max(0, after.triangles - (beforeSnapshot?.triangles ?? 0));
-  return after;
-}
-
-function hasRenderableObject(object3D, handles) {
-  return Boolean(object3D) || (Array.isArray(handles) && handles.length > 0);
-}
-
-function classifyBigBuildingItem(item) {
-  if (!item) return false;
-  const hasNear = hasRenderableObject(item.nearObj, item.nearHandles);
-  const hasLod = hasRenderableObject(item.lodObj, item.lodHandles);
-  const farDistance = Math.max(
-    Number.isFinite(item.nearDrawDistance) ? item.nearDrawDistance : 0,
-    Number.isFinite(item.lodDrawDistance) ? item.lodDrawDistance : 0,
-  );
-  if (item.isTobj) {
-    return farDistance >= BIG_BUILDING_MIN_LOD_DISTANCE || hasLod;
-  }
-  if (!hasLod) return false;
-  if (!hasNear) return true;
-
-  const min = item.boundsMin || item.anchor || { x: 0, y: 0, z: 0 };
-  const max = item.boundsMax || item.anchor || { x: 0, y: 0, z: 0 };
-  const sizeX = Math.max(0, (max.x ?? 0) - (min.x ?? 0));
-  const sizeY = Math.max(0, (max.y ?? 0) - (min.y ?? 0));
-  const sizeZ = Math.max(0, (max.z ?? 0) - (min.z ?? 0));
-  const horizontalSpan = Math.max(sizeX, sizeZ);
-  const horizontalArea = sizeX * sizeZ;
-  const lodDistance = Number.isFinite(item.lodDrawDistance) ? item.lodDrawDistance : farDistance;
-
-  return (
-    sizeY >= BIG_BUILDING_MIN_HEIGHT
-    || horizontalSpan >= BIG_BUILDING_MIN_SPAN
-    || horizontalArea >= BIG_BUILDING_MIN_AREA
-    || lodDistance >= BIG_BUILDING_MIN_LOD_DISTANCE
-  );
-}
-
-function getTextureSizeFromSource(textureSource) {
-  const image = textureSource?.image ?? textureSource;
-  return {
-    width: Number(image?.videoWidth ?? image?.width ?? 0),
-    height: Number(image?.videoHeight ?? image?.height ?? 0),
-  };
-}
-
-function describeTextureSourceForLog(name, textureSource, entry = null) {
-  if (!textureSource?.isTexture) return `${name}: invalid texture`;
-  const { width, height } = getTextureSizeFromSource(textureSource);
-  const compressionMethod = String(
-    entry?.compressionMethod
-    || textureSource?.userData?.rwCompressionMethod
-    || 'UNKNOWN',
-  );
-  const pixelFormat = String(
-    entry?.pixelFormat
-    || textureSource?.userData?.rwPixelFormat
-    || 'UNKNOWN',
-  );
-  const d3dFormat = Number(entry?.d3dFormat ?? textureSource?.userData?.rwD3dFormat ?? 0);
-  const rasterFormat = Number(entry?.rasterFormat ?? textureSource?.userData?.rwRasterFormat ?? 0);
-  const image = textureSource.image;
-  const data = image?.data;
-  if (!data || !ArrayBuffer.isView(data) || data.length === 0) {
-    return `${name}: ${width}x${height} comp=${compressionMethod} pix=${pixelFormat} d3d=${d3dFormat} raster=${rasterFormat} data=unavailable`;
-  }
-
-  let rgbTotal = 0;
-  let alphaTotal = 0;
-  let nonZeroAlphaCount = 0;
-  const pixelCount = Math.max(1, Math.floor(data.length / 4));
-  for (let i = 0; i < pixelCount; i += 1) {
-    const offset = i * 4;
-    rgbTotal += data[offset + 0] + data[offset + 1] + data[offset + 2];
-    alphaTotal += data[offset + 3];
-    if (data[offset + 3] > 0) nonZeroAlphaCount += 1;
-  }
-  const avgRgb = (rgbTotal / (pixelCount * 3)).toFixed(1);
-  const avgAlpha = (alphaTotal / pixelCount).toFixed(1);
-  const alphaCoverage = ((nonZeroAlphaCount / pixelCount) * 100).toFixed(1);
-  const sample = Array.from(data.slice(0, Math.min(16, data.length))).join(',');
-  return `${name}: ${width}x${height} comp=${compressionMethod} pix=${pixelFormat} d3d=${d3dFormat} raster=${rasterFormat} avgRGB=${avgRgb} avgA=${avgAlpha} alpha>0=${alphaCoverage}% sample=${sample}`;
 }
 
 function runImguiSlider(ImGui, {
@@ -547,125 +303,8 @@ function getTimecyclePostFxControlSignature(values) {
   return JSON.stringify(postFx);
 }
 
-function disposeObjectMaterialsOnly(root) {
-  if (!root?.traverse) return;
-  root.traverse((node) => {
-    if (!node.isMesh) return;
-    const materials = Array.isArray(node.material) ? node.material : [node.material];
-    for (const material of materials) {
-      material?.dispose?.();
-    }
-  });
-}
-
-function createFadeMaterial(material, geometry) {
-  if (!material) return material;
-  const descriptor = getRWMaterialDescriptor(material);
-  if (material.userData?.rwPipelineMaterial && descriptor) {
-    const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);
-    if (fadeDescriptor.rwFlags?.additive) {
-      fadeDescriptor.alphaMode = 'additive';
-      fadeDescriptor.blending = THREE.AdditiveBlending;
-      fadeDescriptor.renderBucket = 'additive';
-    } else {
-      fadeDescriptor.alphaMode = 'blend';
-      fadeDescriptor.blending = THREE.NormalBlending;
-      fadeDescriptor.renderBucket = 'transparent';
-    }
-    fadeDescriptor.transparent = true;
-    fadeDescriptor.depthTest = true;
-    fadeDescriptor.depthWrite = false;
-    fadeDescriptor.alphaRef = 0;
-    fadeDescriptor.opacity = 1;
-    const pipelineMaterial = createRWPipelineMaterialForProfile(
-      material.userData?.rwPipelineProfileId,
-      {
-        descriptor: fadeDescriptor,
-        geometry,
-      },
-    );
-    if (pipelineMaterial) {
-      pipelineMaterial.userData = {
-        ...(pipelineMaterial.userData || {}),
-        ...(material.userData || {}),
-        ...(pipelineMaterial.userData || {}),
-        rwPipelineOwnedMaterial: true,
-      };
-      pipelineMaterial.transparent = true;
-      pipelineMaterial.opacity = 1;
-      pipelineMaterial.depthTest = true;
-      pipelineMaterial.depthWrite = false;
-      pipelineMaterial.alphaTest = 0;
-      pipelineMaterial.blending = fadeDescriptor.blending;
-      pipelineMaterial.fog = Boolean(pipelineMaterial.userData?.rwPipelineUsesThreeFog);
-      pipelineMaterial.needsUpdate = true;
-      return pipelineMaterial;
-    }
-  }
-  if (descriptor) {
-    const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);
-    if (fadeDescriptor.rwFlags?.additive) {
-      fadeDescriptor.alphaMode = 'additive';
-      fadeDescriptor.blending = THREE.AdditiveBlending;
-      fadeDescriptor.renderBucket = 'additive';
-    } else {
-      fadeDescriptor.alphaMode = 'blend';
-      fadeDescriptor.blending = THREE.NormalBlending;
-      fadeDescriptor.renderBucket = 'transparent';
-    }
-    fadeDescriptor.transparent = true;
-    fadeDescriptor.depthTest = true;
-    fadeDescriptor.depthWrite = false;
-    fadeDescriptor.alphaRef = 0;
-    fadeDescriptor.opacity = 1;
-    return createThreeMaterialFromRW(fadeDescriptor, geometry);
-  }
-
-  const cloned = material.clone();
-  cloned.transparent = true;
-  cloned.opacity = 1;
-  cloned.depthTest = true;
-  cloned.depthWrite = false;
-  cloned.alphaTest = 0;
-  if (cloned.blending !== THREE.AdditiveBlending) {
-    cloned.blending = THREE.NormalBlending;
-  }
-  cloned.needsUpdate = true;
-  return cloned;
-}
-
-function setFadeProxyOpacity(proxyRoot, opacity) {
-  const clampedOpacity = clamp01(opacity);
-  const materials = Array.isArray(proxyRoot?.userData?.rwFadeMaterials) ? proxyRoot.userData.rwFadeMaterials : [];
-  for (const material of materials) {
-    if (!material) continue;
-    const descriptor = getRWMaterialDescriptor(material);
-    if (descriptor) descriptor.opacity = clampedOpacity;
-    material.opacity = clampedOpacity;
-    if (material.uniforms?.opacity) {
-      material.uniforms.opacity.value = clampedOpacity;
-    }
-  }
-}
-
-function yieldToBrowser() {
-  return new Promise((resolve) => {
-    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(() => resolve());
-      return;
-    }
-    setTimeout(resolve, 0);
-  });
-}
-
-function yieldToNextTask() {
-  return new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
-}
-
 // #region agent log helpers
-function dbgLog(payload) {
+function _dbgLog(payload) {
   fetch('http://127.0.0.1:7300/ingest/657c7c95-cd7f-40f5-879d-537e6099f3dd', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '6d1737' },
@@ -731,30 +370,6 @@ function computeProjectedHorizonUvY(camera, scratch = {}) {
   horizonPoint.y = 0;
   horizonPoint.project(camera);
   return (horizonPoint.y * 0.5) + 0.5;
-}
-
-function getPipelineSelectionSignature(selectionMap, backend, worldGameVersion) {
-  const selections = cloneRWPipelineSelections(selectionMap);
-  return Object.values(RW_PIPELINE_CATEGORY).map((category) => {
-    const normalized = resolveRWPipelineSelection(selections[category], worldGameVersion);
-    return [
-      category,
-      normalized.enabled ? '1' : '0',
-      normalized.game,
-      normalized.platform,
-      JSON.stringify(normalized.config || {}),
-      String(backend || 'WebGL'),
-      String(worldGameVersion || ''),
-    ].join('|');
-  }).join('::');
-}
-
-function createRwPipelineTarget(gameVersion, isTobj) {
-  return {
-    category: RW_PIPELINE_CATEGORY.BUILDING,
-    game: String(gameVersion || '').toUpperCase(),
-    isTobj: Boolean(isTobj),
-  };
 }
 
 function createLowCloudTexture(seed = 0) {
@@ -854,7 +469,7 @@ function createFluffyHighlightTexture() {
   return texture;
 }
 
-function configureFluffyCloudTexture(texture) {
+function _configureFluffyCloudTexture(texture) {
   if (!texture?.isTexture) return null;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -865,7 +480,7 @@ function configureFluffyCloudTexture(texture) {
   return texture;
 }
 
-function configureFluffyHighlightTexture(texture) {
+function _configureFluffyHighlightTexture(texture) {
   if (!texture?.isTexture) return null;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -915,7 +530,7 @@ function updateFluffyCloudTexture(canvas, topColor, bottomColor) {
   ctx.globalCompositeOperation = 'source-over';
 }
 
-function applyTimecycleOverrides(sampled, overrides) {
+function _applyTimecycleOverrides(sampled, overrides) {
   if (!sampled || !overrides || Object.keys(overrides).length === 0) return sampled;
   const next = {
     ...sampled,
@@ -981,7 +596,9 @@ function App() {
   const hemiLightRef = useRef(null);
   const worldRootRef = useRef(new THREE.Group());
   const rwRenderQueueRef = useRef(null);
-  const jsrwSessionRef = useRef(createJsrwRenderer());
+  const gtaSessionRef = useRef(createJsrwGtaSession());
+  const jsrwSessionRef = useRef(gtaSessionRef.current.getRendererSession());
+  const rendererHostRef = useRef(null);
   const renderItemsRef = useRef([]);
   const bigBuildingItemsRef = useRef([]);
   const renderChunksRef = useRef([]);
@@ -1015,21 +632,7 @@ function App() {
   const selectedObjectRef = useRef(null);
   const selectedTextureDetailRef = useRef(null);
   const timecycleDataRef = useRef(null);
-  const timecycleStateRef = useRef({
-    sourcePath: '',
-    data: null,
-    current: null,
-    weatherNames: [...VCS_WEATHER_NAMES],
-    controls: {
-      hour: 12,
-      minute: 0,
-      weatherA: 0,
-      weatherB: 0,
-      weatherBlend: 0,
-      extraColour: -1,
-      overrides: {},
-    },
-  });
+  const timecycleStateRef = useRef(createDefaultTimecycleState());
   const cloudMotionRef = useRef({
     cloudRotation: 0,
     individualRotation: 0,
@@ -1082,6 +685,11 @@ function App() {
   const buildActiveRef = useRef(false);
   const renderResourcesReadyRef = useRef(false);
   const resourceCacheRef = useRef(createResourceCacheState());
+  const skyParticleTexturesRef = useRef({
+    moonTexture: null,
+    starTexture: null,
+    sunTextures: null,
+  });
   const streamingBuildRef = useRef({
     token: 0,
     running: false,
@@ -1092,6 +700,22 @@ function App() {
     firstChunkReadyAt: 0,
   });
   const lastPipelineSelectionSignatureRef = useRef('');
+
+  const applyResolvedParticleTextures = useCallback((textures) => {
+    const nextTextures = textures && typeof textures === 'object'
+      ? {
+        moonTexture: textures.moonTexture || null,
+        starTexture: textures.starTexture || null,
+        sunTextures: textures.sunTextures || null,
+      }
+      : {
+        moonTexture: null,
+        starTexture: null,
+        sunTextures: null,
+      };
+    skyParticleTexturesRef.current = nextTextures;
+    skyFeatureRef.current?.setParticleTextures(nextTextures);
+  }, []);
 
   const imguiRef = useRef({ ImGui: null, ImGui_Impl: null, ready: false });
   const imguiCaptureRef = useRef({ mouse: false, keyboard: false });
@@ -1261,34 +885,7 @@ function App() {
   }, []);
 
   const pushLoadedFile = useCallback((kind, path, detail = '') => {
-    const normalizedKind = String(kind || '').trim().toUpperCase();
-    const rawPath = String(path || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
-    const normalizedPath = normalizePath(rawPath);
-    const normalizedDetail = String(detail || '').trim();
-    if (!normalizedKind || !normalizedPath) return;
-    setLoadedFiles((prev) => {
-      const index = prev.findIndex((entry) => (
-        entry.kind === normalizedKind
-        && entry.normalizedPath === normalizedPath
-      ));
-      if (index === -1) {
-        return [...prev, {
-          kind: normalizedKind,
-          path: rawPath,
-          normalizedPath,
-          detail: normalizedDetail,
-        }];
-      }
-      if (prev[index].detail === normalizedDetail) return prev;
-      const next = [...prev];
-      next[index] = {
-        ...next[index],
-        path: rawPath || next[index].path,
-        normalizedPath,
-        detail: normalizedDetail,
-      };
-      return next;
-    });
+    setLoadedFiles((prev) => pushLoadedFileEntry(prev, kind, path, detail));
   }, []);
 
   const pushLoadedFileConsoleEvent = useCallback((kind, path, detail = '') => {
@@ -1370,1965 +967,79 @@ function App() {
     imguiTextureListRef.current = [];
   }, []);
 
-  const clearWorld = useCallback(() => {
-    if (selectedInstanceHighlightRef.current?.parent) {
-      selectedInstanceHighlightRef.current.parent.remove(selectedInstanceHighlightRef.current);
-    }
-    selectedInstanceHighlightRef.current = null;
-    if (selectedObjectRootRef.current) {
-      clearObjectSelectionHighlight(selectedObjectRootRef.current);
-      selectedObjectRootRef.current = null;
-    }
-    selectedObjectRef.current = null;
-    setSelectedObject(null);
-    selectedTextureDetailRef.current = null;
-    setSelectedTextureDetail(null);
-    resetImguiTextureCache();
-    const worldRoot = worldRootRef.current;
-    disposeWorld(worldRoot);
-    jsrwSessionRef.current.disposeWaterRuntime();
-    jsrwSessionRef.current.disposeCoronaRuntime();
-    timecycleDataRef.current = null;
-    resourceCacheRef.current = createResourceCacheState();
-    streamingBuildRef.current = {
-      token: buildTokenRef.current,
-      running: false,
-      queue: [],
-      queuedKeys: new Set(),
-      context: null,
-      startedAt: 0,
-      firstChunkReadyAt: 0,
-    };
-    timecycleStateRef.current = {
-      sourcePath: '',
-      data: null,
-      current: null,
-      weatherNames: [...VCS_WEATHER_NAMES],
-      controls: {
-        hour: 12,
-        minute: 0,
-        weatherA: 0,
-        weatherB: 0,
-        weatherBlend: 0,
-        extraColour: -1,
-        overrides: {},
-      },
-    };
-    renderItemsRef.current = [];
-    bigBuildingItemsRef.current = [];
-    renderChunksRef.current = [];
-    renderChunkLookupRef.current = new Map();
-    activeRenderChunksRef.current = new Set();
-    resetFrameVisibilityResult(frameVisibilityRef.current);
-    resetChunkOcclusionState(chunkOcclusionStateRef.current);
-    worldGameVersionRef.current = String(uiStateRef.current.gameVersion || 'VCS').toUpperCase();
-    jsrwSessionRef.current.setBackend(activeBackend || 'WebGL');
-    jsrwSessionRef.current.setRoot(worldRoot);
-    jsrwSessionRef.current.applyToRoot(worldRoot, {
-      activeBackend: activeBackend || 'WebGL',
-      worldGameVersion: worldGameVersionRef.current,
-      fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
-      fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
-    });
-    lastPipelineSelectionSignatureRef.current = '';
-    activeFadeCountRef.current = 0;
-    renderMetricsRef.current = {
-      activeChunks: 0,
-      frustumChunks: 0,
-      activeItems: 0,
-      visibleNear: 0,
-      visibleLod: 0,
-      visibleQueueMeshes: 0,
-      coronaCandidates: 0,
-      shadowCandidates: 0,
-      transparentQueue: 0,
-      additiveQueue: 0,
-      overlayQueue: 0,
-      drawCalls: 0,
-      triangles: 0,
-      worldDrawCalls: 0,
-      worldTriangles: 0,
-      waterDrawCalls: 0,
-      waterTriangles: 0,
-      skyDrawCalls: 0,
-      skyTriangles: 0,
-    };
-    rwRenderQueueRef.current?.markDirty();
-    lodUpdateStateRef.current.needsRefresh = true;
-    lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
-    lodUpdateStateRef.current.lastCameraQuat.set(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
-    lodUpdateStateRef.current.lastCameraAspect = Number.NaN;
-    lodUpdateStateRef.current.lastCameraFov = Number.NaN;
-    lodUpdateStateRef.current.lastCameraNear = Number.NaN;
-    lodUpdateStateRef.current.lastCameraFar = Number.NaN;
-    setShowGameIcon(false);
-    renderResourcesReadyRef.current = false;
-    setBuildProgress({ active: false, current: 0, total: 0 });
-    setStats((prev) => ({
-      ...prev,
-      loaded: 0,
-      failed: 0,
-      unresolved: 0,
-      ideEffects: 0,
-      nearOnly: 0,
-      totalChunks: 0,
-      instancedBatches: 0,
-      instancedItems: 0,
-      lightObjects: 0,
-      lightEmitters: 0,
-      queuedChunks: 0,
-      readyChunks: 0,
-    }));
-    setFailedModels([]);
-    pushConsoleLine('info', 'World cleared');
-  }, [activeBackend, pushConsoleLine, resetImguiTextureCache]);
-
-  const rebuildWorld = useCallback(async () => {
-    const fileIndex = fileIndexRef.current;
-    if (!fileIndex) {
-      setStatus('No files loaded. Choose a folder or zip archive first.');
-      pushConsoleLine('warn', 'Build requested without loaded files');
-      return;
-    }
-
-    const worldRoot = worldRootRef.current;
-    const token = ++buildTokenRef.current;
-    const buildGameVersion = String(uiStateRef.current.gameVersion || 'VCS').toUpperCase();
-    buildActiveRef.current = true;
-    renderResourcesReadyRef.current = false;
-
-    try {
-      // #region agent log
-      dbgLog({ runId: 'safari-build', hypothesisId: 'H0', location: 'App.jsx:rebuildWorld', message: 'Build start', data: { token, buildGameVersion, files: fileIndex?.count ?? null } });
-      // #endregion
-      clearWorld();
-      worldGameVersionRef.current = buildGameVersion;
-      setLoadedFiles([]);
-      setFailedModels([]);
-      setShowGameIcon(false);
-      setStatus('Parsing gta.dat, IDE and IPL...');
-      pushConsoleLine('info', 'Start building world');
-      await yieldToBrowser();
-      const parseStartTime = performance.now();
-
-      let worldLoadResult;
-      try {
-        const worldLoader = new WorldLoader({
-          fileSystem: new BrowserFileSystem(fileIndex),
-          gameVersion: uiStateRef.current.gameVersion,
-          onLog: (level, message) => pushConsoleLine(level, message),
-          onFileEvent: (kind, path, detail) => {
-            pushLoadedFile(kind, path, detail);
-            pushLoadedFileConsoleEvent(kind, path, detail);
-          },
-        });
-        worldLoadResult = await worldLoader.load({
-          extraImgPaths: ['models/gta3.img'],
-        });
-      } catch (error) {
-        setStatus('gta.dat not found in uploaded files.');
-        pushConsoleLine('error', formatConsoleArg(error));
-        return;
-      }
-
-      const worldContext = worldLoadResult.context;
-      const worldBuild = worldLoadResult.build;
-      const worldLoadStats = worldLoadResult.stats;
-      const defaultResources = worldLoadStats.defaultResources || worldContext.defaultResources || null;
-      const ideById = worldContext.ideRegistry?.byId || new Map();
-      const ideByModel = worldContext.ideRegistry?.byModel || new Map();
-      const placements = worldContext.iplRegistry?.getAll?.() || [];
-
-      pushConsoleLine('info', `IDE/IPL parsed in ${(performance.now() - parseStartTime).toFixed(1)} ms`);
-      if (defaultResources) {
-        pushConsoleLine(
-          'info',
-          `Static defaults: IMG ${defaultResources.counts.imgMounted}/${defaultResources.counts.imgRequested}, TXD ${defaultResources.counts.textureFound}/${defaultResources.counts.textureRequested}, COL ${defaultResources.counts.collisionFound}`,
-        );
-      }
-
-      const previousControls = timecycleStateRef.current?.controls || {};
-      const parsedTimecycle = worldBuild.weather?.data || null;
-      const weatherNames = worldBuild.weather?.weatherNames || [...VCS_WEATHER_NAMES];
-      if (parsedTimecycle) {
-        const controls = {
-          hour: Number.isFinite(previousControls.hour) ? previousControls.hour : 12,
-          minute: Number.isFinite(previousControls.minute) ? previousControls.minute : 0,
-          weatherA: Number.isFinite(previousControls.weatherA) ? previousControls.weatherA : 0,
-          weatherB: Number.isFinite(previousControls.weatherB) ? previousControls.weatherB : 0,
-          weatherBlend: Number.isFinite(previousControls.weatherBlend) ? previousControls.weatherBlend : 0,
-          extraColour: Number.isFinite(previousControls.extraColour) ? previousControls.extraColour : -1,
-          overrides: previousControls.overrides && typeof previousControls.overrides === 'object'
-            ? { ...previousControls.overrides }
-            : {},
-        };
-        controls.weatherA = Math.min(Math.max(controls.weatherA, 0), weatherNames.length - 1);
-        controls.weatherB = Math.min(Math.max(controls.weatherB, 0), weatherNames.length - 1);
-        const current = applyTimecycleOverrides(sampleTimecyc(parsedTimecycle, controls), controls.overrides);
-        timecycleDataRef.current = parsedTimecycle;
-        timecycleStateRef.current = {
-          sourcePath: worldBuild.weather?.sourcePath || '',
-          data: parsedTimecycle,
-          current,
-          weatherNames,
-          controls,
-        };
-        pushConsoleLine(
-          'info',
-          `timecyc.dat loaded: ${parsedTimecycle.hours} hours x ${weatherNames.length} weathers (${worldBuild.weather?.sourcePath || 'unknown'})`,
-        );
-      } else {
-        timecycleDataRef.current = null;
-        timecycleStateRef.current = {
-          sourcePath: '',
-          data: null,
-          current: null,
-          weatherNames: [...VCS_WEATHER_NAMES],
-          controls: {
-            hour: 12,
-            minute: 0,
-            weatherA: 0,
-            weatherB: 0,
-            weatherBlend: 0,
-            extraColour: -1,
-            overrides: {},
-          },
-        };
-      }
-
-      totalObjectsRef.current = placements.length;
-
-      setStats({
-        files: fileIndex.count,
-        ideFiles: worldLoadStats.ideFiles,
-        iplFiles: worldLoadStats.iplFiles,
-        ideDefs: ideByModel.size,
-        ideEffects: worldLoadStats.ideEffects || 0,
-        iplInst: placements.length,
-        defaultResources,
-        loaded: 0,
-        failed: 0,
-        unresolved: 0,
-        nearOnly: 0,
-        totalChunks: 0,
-        instancedBatches: 0,
-        instancedItems: 0,
-        lightObjects: 0,
-        lightEmitters: 0,
-      });
-
-      const modelCache = new Map();
-      const textureLogCache = new Set();
-      let pendingWaterPipeline = null;
-      let particleTextureDictionary = null;
-      const pushRuntimeMapLog = (label, texture, matches) => {
-        const runtimePath = `${label}: ${texture?.name || 'unnamed'}`;
-        const detail = `match=${matches ? 'yes' : 'no'}`;
-        pushConsoleLine('info', `${runtimePath} / ${detail}`, 'runtime');
-        pushConsoleLine('info', `[RUNTIME_MAP] ${runtimePath} / ${detail}`, 'console');
-        console.log(`[RUNTIME_MAP] ${runtimePath} / ${detail}`);
-        pushLoadedFile('RUNTIME_MAP', runtimePath, detail);
-      };
-
-      const getTextureDict = async (txdName) => {
-        if (!txdName) return null;
-
-        try {
-          const txd = await worldContext.textureResolver.resolveTextureDictionary(txdName);
-          const txdSource = worldContext.textureResolver.getSource(txdName);
-          if (txd && txdSource && !textureLogCache.has(txdName)) {
-            textureLogCache.add(txdName);
-            pushConsoleLine('info', `TXD loaded: ${txdName}.txd (${txdSource})`);
-          }
-          return txd;
-        } catch {
-          pushConsoleLine('error', `TXD parse failed: ${txdName}.txd`);
-          return null;
-        }
-      };
-
-      const log2dfxDebug = (level, message) => {
-        pushConsoleLine(level, message, 'runtime');
-        if (level === 'warn') console.warn(message);
-        else if (level === 'error') console.error(message);
-        else console.log(message);
-      };
-
-      const buildCoronaTextureDictionary = async (emitters = []) => {
-        const mergedDictionary = new Map(particleTextureDictionary ? Array.from(particleTextureDictionary.entries()) : []);
-        const textureKeys = Array.from(new Set(
-          (emitters || [])
-            .flatMap((emitter) => [
-              String(emitter?.textureKey || '').trim().toLowerCase(),
-              String(emitter?.shadow?.textureKey || (Number(emitter?.shadow?.size) > 0 ? 'shad_exp' : '')).trim().toLowerCase(),
-            ])
-            .filter(Boolean),
-        ));
-
-        log2dfxDebug('info', `[2DFX] emitter texture keys: ${textureKeys.length > 0 ? textureKeys.join(', ') : '(none)'}`);
-
-        for (const textureKey of textureKeys) {
-          if (mergedDictionary.has(textureKey)) {
-            const existingEntry = mergedDictionary.get(textureKey);
-            log2dfxDebug('info', `[2DFX] texture found: ${textureKey} <- particle.txd (${existingEntry?.texture?.name || existingEntry?.name || textureKey})`);
-            continue;
-          }
-          const resolvedEntry = await worldContext.textureResolver.resolveTextureEntry(textureKey, {
-            preferredDictionaries: ['particle'],
-          });
-          if (!resolvedEntry) {
-            log2dfxDebug('warn', `[2DFX] texture missing: ${textureKey}`);
-            continue;
-          }
-          mergedDictionary.set(textureKey, resolvedEntry);
-          log2dfxDebug('info', `[2DFX] texture found: ${textureKey} <- ${resolvedEntry.txdName || 'unknown.txd'} (${resolvedEntry.sourcePath || 'unknown source'})`);
-        }
-
-        return mergedDictionary;
-      };
-
-      const applyParticleTextures = async () => {
-        pushConsoleLine('info', '[RUNTIME_MAP] applyParticleTextures invoked', 'runtime');
-        console.log('[RUNTIME_MAP] applyParticleTextures invoked');
-        await yieldToNextTask();
-        dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:particle-textures', message: 'Particle textures: start getTextureDict(particle)', data: { token } });
-        setStatus('Loading particle.txd...');
-        const particleTxd = await getTextureDict('particle');
-        particleTextureDictionary = particleTxd || null;
-        const particleSource = worldContext.textureResolver.getSource('particle');
-        dbgLog({ runId: 'safari-build', hypothesisId: 'H4', location: 'App.jsx:particle-textures', message: 'Particle textures: got particle txd', data: { token, ok: Boolean(particleTxd), source: particleSource || '' } });
-        if (buildTokenRef.current !== token) return;
-
-        const waterTextureName = String(worldBuild.water?.config?.textureName || 'waterclear256').toLowerCase();
-        const waterTextureEntry = particleTxd?.get?.(waterTextureName) || null;
-        const waterTexture = waterTextureEntry?.texture || waterTextureEntry || null;
-        const lowCloudTextures = ['cloud1', 'cloud2', 'cloud3']
-          .map((name) => particleTxd?.get?.(name)?.texture || particleTxd?.get?.(name) || null)
-          .filter(Boolean);
-        const fluffyCloudTexture = particleTxd?.get?.('cloudmasked')?.texture || particleTxd?.get?.('cloudmasked') || null;
-        const fluffyHighlightTexture = particleTxd?.get?.('cloudhilit')?.texture || particleTxd?.get?.('cloudhilit') || null;
-
-        if (particleTxd?.size || particleSource) {
-          const particleKeys = particleTxd ? Array.from(particleTxd.keys()) : [];
-          const requiredParticleKeys = [
-            waterTextureName,
-            'cloud1',
-            'cloud2',
-            'cloud3',
-            'cloudmasked',
-            'cloudhilit',
-            'coronamoon',
-            'coronastar',
-            'coronahex',
-            'coronacircle',
-            'coronaringa',
-          ];
-          const availability = requiredParticleKeys
-            .map((name) => `${name}:${particleTxd?.has?.(name) ? 'ok' : 'missing'}`)
-            .join(', ');
-          pushConsoleLine('info', `particle.txd source: ${particleSource || 'unknown'} | entries=${particleKeys.length}`, 'files');
-          pushConsoleLine('info', `particle.txd check: ${availability}`, 'files');
-          if (particleKeys.length > 0) {
-            pushConsoleLine('info', `particle.txd sample: ${particleKeys.slice(0, 24).join(', ')}`, 'files');
-          }
-        }
-
-        if (!pendingWaterPipeline) {
-          pushConsoleLine('warn', 'Water runtime unavailable when applying particle textures.', 'runtime');
-        } else if (!waterTexture) {
-          pushConsoleLine('warn', `Water texture missing: particle/${waterTextureName}. Using flat color water.`);
-        } else {
-          pendingWaterPipeline.setTexture(waterTexture);
-          pushConsoleLine('info', `Water texture applied: particle/${waterTextureName}`);
-          const appliedWaterMap = pendingWaterPipeline?.raw?.farMaterial?.map;
-          pushRuntimeMapLog('Water runtime map', appliedWaterMap, appliedWaterMap === waterTexture);
-        }
-
-        if (lowCloudTextures.length > 0) {
-          for (let index = 0; index < lowCloudSpritesRef.current.length; index += 1) {
-            const sprite = lowCloudSpritesRef.current[index];
-            if (!sprite?.material) continue;
-            const texture = lowCloudTextures[index % lowCloudTextures.length];
-            if (!texture) continue;
-            texture.wrapS = THREE.ClampToEdgeWrapping;
-            texture.wrapT = THREE.ClampToEdgeWrapping;
-            texture.magFilter = THREE.LinearFilter;
-            texture.minFilter = THREE.LinearMipmapLinearFilter;
-            texture.needsUpdate = true;
-            sprite.material.map = texture;
-            sprite.material.needsUpdate = true;
-          }
-          pushConsoleLine('info', `Cloud textures applied: particle/${lowCloudTextures.length >= 3 ? 'cloud1-3' : 'cloud*'}`);
-          const lowCloudMap = lowCloudSpritesRef.current[0]?.material?.map || null;
-          pushRuntimeMapLog('Low cloud runtime map', lowCloudMap, lowCloudTextures.includes(lowCloudMap));
-        } else {
-          pushConsoleLine('warn', 'Low cloud textures missing: particle/cloud1-3. Using fallback sprites.');
-        }
-
-        if (fluffyCloudTexture) {
-          configureFluffyCloudTexture(fluffyCloudTexture);
-          fluffyCloudTextureRef.current = fluffyCloudTexture;
-          for (const sprite of fluffyCloudSpritesRef.current) {
-            if (!sprite?.material) continue;
-            sprite.material.map = fluffyCloudTexture;
-            sprite.material.premultipliedAlpha = true;
-            sprite.material.needsUpdate = true;
-          }
-          pushConsoleLine('info', 'Cloud texture applied: particle/cloudmasked');
-          const fluffyMap = fluffyCloudSpritesRef.current[0]?.material?.map || null;
-          pushRuntimeMapLog('Fluffy cloud runtime map', fluffyMap, fluffyMap === fluffyCloudTexture);
-        } else {
-          pushConsoleLine('warn', 'Fluffy cloud texture missing: particle/cloudmasked. Using fallback sprite.');
-        }
-
-        if (fluffyHighlightTexture) {
-          configureFluffyHighlightTexture(fluffyHighlightTexture);
-          fluffyHighlightTextureRef.current = fluffyHighlightTexture;
-          for (const sprite of fluffyHighlightSpritesRef.current) {
-            if (!sprite?.material) continue;
-            sprite.material.map = fluffyHighlightTexture;
-            sprite.material.premultipliedAlpha = true;
-            sprite.material.needsUpdate = true;
-          }
-          pushConsoleLine('info', 'Cloud highlight texture applied: particle/cloudhilit');
-          const fluffyHighlightMap = fluffyHighlightSpritesRef.current[0]?.material?.map || null;
-          pushRuntimeMapLog('Fluffy highlight runtime map', fluffyHighlightMap, fluffyHighlightMap === fluffyHighlightTexture);
-        } else {
-          pushConsoleLine('warn', 'Cloud highlight texture missing: particle/cloudhilit. Using fallback sprite.');
-        }
-
-        const sunTextures = {
-          star: particleTxd?.get?.('coronastar')?.texture || particleTxd?.get?.('coronastar') || null,
-          hex: particleTxd?.get?.('coronahex')?.texture || particleTxd?.get?.('coronahex') || null,
-          circle: particleTxd?.get?.('coronacircle')?.texture || particleTxd?.get?.('coronacircle') || null,
-          ring: particleTxd?.get?.('coronaringa')?.texture || particleTxd?.get?.('coronaringa') || null,
-        };
-        const starTexture = sunTextures.star;
-        const moonTexture = particleTxd?.get?.('coronamoon')?.texture || particleTxd?.get?.('coronamoon') || null;
-        skyFeatureRef.current?.setParticleTextures({
-          moonTexture,
-          starTexture,
-          sunTextures,
-        });
-        if (moonTexture) {
-          pushConsoleLine('info', 'Moon texture applied: particle/coronamoon');
-        } else {
-          pushConsoleLine('warn', 'Moon texture missing: particle/coronamoon. Using fallback sprite.');
-        }
-        if (starTexture) {
-          pushConsoleLine('info', 'Stars texture applied: particle/coronastar');
-        } else {
-          pushConsoleLine('warn', 'Stars texture missing: particle/coronastar. Using fallback sprite.');
-        }
-        if (sunTextures.star && sunTextures.hex && sunTextures.circle && sunTextures.ring) {
-          pushConsoleLine('info', 'Sun textures applied: particle/coronastar, coronahex, coronacircle, coronaringa');
-        } else {
-          pushConsoleLine('warn', 'Some sun textures are missing in particle.txd. Fallback procedural sprites remain in use for missing entries.');
-        }
-        const moonRuntimeMap = skyFeatureRef.current?.moon?.sprite?.material?.map || null;
-        const starsRuntimeMap = skyFeatureRef.current?.stars?.logoSprites?.[0]?.material?.map || null;
-        const sunCoreRuntimeMap = skyFeatureRef.current?.sun?.coreSprite?.material?.map || null;
-        pushRuntimeMapLog('Moon runtime map', moonRuntimeMap, moonRuntimeMap === moonTexture);
-        pushRuntimeMapLog('Stars runtime map', starsRuntimeMap, starsRuntimeMap === starTexture);
-        pushRuntimeMapLog('Sun runtime map', sunCoreRuntimeMap, sunCoreRuntimeMap === sunTextures.star);
-      };
-
-      const tryBuildWater = async () => {
-      const waterConfig = worldBuild.water?.config || null;
-      if (!waterConfig) {
-        pushConsoleLine('warn', 'waterpro.dat not found. Water rendering disabled.');
-        return;
-      }
-      if (waterConfig.source !== 'waterpro') {
-        pushConsoleLine(
-          'warn',
-          `${waterConfig.gameVersion} uses water.dat in librw/euryopa. waterpro.dat loading is skipped, so water rendering is disabled.`,
-        );
-        return;
-      }
-
-      const waterSourcePath = worldBuild.water?.sourcePath || '';
-      const parsed = worldBuild.water?.data || null;
-      if (!waterConfig || !parsed) {
-        pushConsoleLine('warn', 'waterpro.dat not found. Water rendering disabled.');
-        return;
-      }
-
-      try {
-        setStatus('Building water... (stage 1/6: start)');
-        // #region agent log
-        dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: start', data: { token, waterPath: waterSourcePath || null } });
-        // #endregion
-        await yieldToBrowser();
-        const waterStartTime = performance.now();
-        // #region agent log
-        dbgLog({ runId: 'safari-build', hypothesisId: 'H1', location: 'App.jsx:tryBuildWater', message: 'Building water: before arrayBuffer', data: { token } });
-        // #endregion
-        setStatus('Building water... (stage 2/6: reading waterpro.dat)');
-        // #region agent log
-        dbgLog({ runId: 'safari-build', hypothesisId: 'H2', location: 'App.jsx:tryBuildWater', message: 'Building water: parsed waterpro.dat', data: { token, levelCount: parsed?.levelCount ?? null, fineBlocks: parsed?.fineBlockList?.length ?? null } });
-        // #endregion
-        const waterTextureName = String(waterConfig.textureName || '').toLowerCase();
-
-        // #region agent log
-        dbgLog({ runId: 'safari-build', hypothesisId: 'H3', location: 'App.jsx:tryBuildWater', message: 'Building water: before RWWaterPipeline', data: { token, renderWater: uiStateRef.current.renderWater } });
-        // #endregion
-        setStatus('Building water... (stage 3/6: constructing water pipeline)');
-        jsrwSessionRef.current.setBackend(activeBackend);
-        const pipeline = jsrwSessionRef.current.createWaterRuntime({
-          parsed,
-          waterConfig,
-          texture: null,
-          toThreePosition: (x, y, z) => gtaPositionToThree(x, y, z),
-          writeThreePosition: (target, offset, x, y, z) => {
-            target[offset + 0] = -x;
-            target[offset + 1] = z;
-            target[offset + 2] = y;
-          },
-          toGamePosition: (position) => ({
-            x: -position.x,
-            y: position.z,
-            z: position.y,
-          }),
-          wireframe: uiStateRef.current.wireframe,
-          enabled: uiStateRef.current.renderWater,
-          settings: {
-            uvSpeed: uiStateRef.current.waterUvSpeed,
-            waveHeight: uiStateRef.current.waterWaveHeight,
-            farAlpha: uiStateRef.current.waterAlpha,
-          },
-        });
-        // #region agent log
-        dbgLog({ runId: 'safari-build', hypothesisId: 'H3', location: 'App.jsx:tryBuildWater', message: 'Building water: after RWWaterPipeline', data: { token, ms: Number((performance.now() - waterStartTime).toFixed(1)) } });
-        // #endregion
-        setStatus('Building water... (stage 4/6: pipeline ready)');
-        pendingWaterPipeline?.dispose();
-        pendingWaterPipeline = pipeline;
-        pipeline.setTimecycleProvider(() => {
-          const current = timecycleStateRef.current?.current;
-          if (!current) return null;
-          const fogNear = Math.max(
-            cameraRef.current?.near ?? 0.1,
-            Math.min(current.values.fogStart, current.values.farClip - 1),
-          );
-          const fogFar = Math.max(fogNear + 1, current.values.farClip);
-          const waterAlpha = THREE.MathUtils.clamp(
-            (Number(current.values?.water?.a) || 0) / 255,
-            0,
-            1,
-          );
-          return {
-            color: current.three?.waterColor || null,
-            farAlpha: waterAlpha,
-            fogColor: current.three?.fogColor || null,
-            fogNear,
-            fogFar,
-          };
-        });
-        const waterCells = pipeline.getWaterCellCount();
-        pipeline.nearMesh.userData.water = {
-          kind: 'waterpro',
-          levelCount: parsed.levelCount,
-          cells: waterCells,
-        };
-        pushConsoleLine(
-          'info',
-          `waterpro.dat loaded: ${parsed.levelCount} levels, ${waterCells} cells`,
-        );
-        pushConsoleLine('info', `Water pipeline built in ${(performance.now() - waterStartTime).toFixed(1)} ms`);
-      } catch (error) {
-        pushConsoleLine('error', `waterpro.dat parse failed: ${formatConsoleArg(error)}`);
-      }
-      };
-
-      await tryBuildWater();
-      await applyParticleTextures();
-
-      const getModelTemplate = async (modelName, txdName) => {
-      const key = makeAssetKey(modelName, txdName);
-      if (modelCache.has(key)) return modelCache.get(key);
-
-      const pending = (async () => {
-        const resolvedModel = await worldContext.modelResolver.resolve(modelName, txdName);
-        if (!resolvedModel?.template) {
-          pushConsoleLine('error', `DFF missing: ${modelName}.dff (file + IMG)`);
-          throw new Error(`Missing DFF: ${modelName}.dff`);
-        }
-
-        const txd = resolvedModel.textureDictionary || null;
-        const dffSource = resolvedModel.dffSource || '';
-        const template = resolvedModel.template;
-        const usedTextureEntries = new Map();
-        const registerTexture = (textureName, texture) => {
-          const name = String(textureName || '').trim().toLowerCase();
-          if (!name) return;
-          const existing = usedTextureEntries.get(name);
-          if (!existing) {
-            usedTextureEntries.set(name, { name, texture: texture || null });
-          } else if (!existing.texture && texture) {
-            existing.texture = texture;
-          }
-        };
-        const collectMaterialTextureNames = (material) => {
-          if (!material) return;
-          registerTexture(material.map?.name, material.map);
-          registerTexture(material.alphaMap?.name, material.alphaMap);
-          registerTexture(material.userData?.textureName, material.map);
-        };
-        template.traverse((node) => {
-          if (!node.isMesh) return;
-          const sourceMats = Array.isArray(node.material) ? node.material : [node.material];
-          for (const mat of sourceMats) collectMaterialTextureNames(mat);
-          const rwMats = sourceMats.map((mat) => {
-            tuneTransparentMaterial(mat);
-            return toRWMaterial(mat, node.geometry);
-          });
-          node.material = Array.isArray(node.material) ? rwMats : rwMats[0];
-        });
-        template.updateMatrixWorld(true);
-        const meshNodes = [];
-        template.traverse((node) => {
-          if (!node.isMesh) return;
-          meshNodes.push(node);
-        });
-        const instancable = meshNodes.length > 0 && meshNodes.every((node) => !node.isSkinnedMesh);
-        const meshDescriptors = instancable
-          ? meshNodes.map((node) => ({
-            geometry: node.geometry,
-            material: node.material,
-            localMatrix: node.matrixWorld.clone(),
-          }))
-          : [];
-        const dffLights = Array.isArray(template.userData?.rwDffLights) ? template.userData.rwDffLights : [];
-        pushConsoleLine('info', `DFF loaded: ${modelName}.dff (${dffSource})${dffLights.length > 0 ? ` | dffLights=${dffLights.length}` : ''}`);
-        const txdTextures = txd && typeof txd.keys === 'function' ? txd : null;
-        if (txdTextures) {
-          for (const entry of usedTextureEntries.values()) {
-            if (entry.texture) continue;
-            const txdTexture = txdTextures.get(entry.name);
-            if (txdTexture) {
-              entry.texture = txdTexture.texture || txdTexture;
-              entry.compressionMethod = txdTexture.compressionMethod || txdTexture.texture?.userData?.rwCompressionMethod || 'UNKNOWN';
-              entry.pixelFormat = txdTexture.pixelFormat || txdTexture.texture?.userData?.rwPixelFormat || 'UNKNOWN';
-            }
-          }
-        }
-        return {
-          key,
-          modelName,
-          txdName,
-          template,
-          usedTextureEntries: Array.from(usedTextureEntries.values()).sort((a, b) => a.name.localeCompare(b.name)),
-          dffLights,
-          instancable,
-          meshDescriptors,
-        };
-      })();
-
-      modelCache.set(key, pending);
-      return pending;
-      };
-
-      let loaded = 0;
-      let failed = 0;
-      let unresolved = 0;
-      let tobjBuilt = 0;
-      const effectivePlacements = placements;
-
-      setStatus(`Loading ${effectivePlacements.length} placements...`);
-      await yieldToNextTask();
-      await yieldToBrowser();
-      const placementStartTime = performance.now();
-
-      const { mapping: lodMapping, usedLodIndices } = buildLodMapping(effectivePlacements, uiStateRef.current.gameVersion);
-    const nonLodIndices = [];
-    for (let index = 0; index < effectivePlacements.length; index += 1) {
-      if (!isLodModel(effectivePlacements[index].modelName)) nonLodIndices.push(index);
-    }
-    const standaloneLodIndices = [];
-    for (let index = 0; index < effectivePlacements.length; index += 1) {
-      if (!isLodModel(effectivePlacements[index].modelName)) continue;
-      if (usedLodIndices.has(index)) continue;
-      standaloneLodIndices.push(index);
-    }
-    const camera = cameraRef.current;
-    if (camera) {
-      nonLodIndices.sort((a, b) => {
-        const pa = effectivePlacements[a].position;
-        const pb = effectivePlacements[b].position;
-        const da = camera.position.distanceTo(gtaPositionToThree(pa.x, pa.y, pa.z));
-        const db = camera.position.distanceTo(gtaPositionToThree(pb.x, pb.y, pb.z));
-        return da - db;
-      });
-    }
-    const nonLodWithLodIndices = nonLodIndices.filter((index) => Number.isInteger(lodMapping.get(index)));
-    const nonLodWithoutLodIndices = nonLodIndices.filter((index) => !Number.isInteger(lodMapping.get(index)));
-    const missingLodModels = new Set();
-    for (const index of nonLodIndices) {
-      if (Number.isInteger(lodMapping.get(index))) continue;
-      const modelName = String(effectivePlacements[index]?.modelName || '').trim().toLowerCase();
-      if (modelName) missingLodModels.add(modelName);
-    }
-    if (missingLodModels.size > 0) {
-      pushConsoleLine(
-        'error',
-        `Missing LOD mapping for ${missingLodModels.size} models (render as near-only using IDE draw distance).`,
-        'lod',
-      );
-      for (const modelName of Array.from(missingLodModels).sort()) {
-        pushConsoleLine('error', `No LOD match: ${modelName}`, 'lod');
-      }
-    }
-    const standaloneLodModels = new Set(
-      standaloneLodIndices.map((index) => String(effectivePlacements[index]?.modelName || '').trim().toLowerCase()).filter(Boolean),
-    );
-    if (standaloneLodModels.size > 0) {
-      pushConsoleLine(
-        'error',
-        `Standalone LOD models found: ${standaloneLodModels.size} (no near model). They will render as LOD-only.`,
-        'lod',
-      );
-      for (const modelName of Array.from(standaloneLodModels).sort()) {
-        pushConsoleLine('error', `Standalone LOD: ${modelName}`, 'lod');
-      }
-    }
-    const buildTotal = nonLodWithLodIndices.length + nonLodWithoutLodIndices.length + standaloneLodIndices.length;
-    setBuildProgress({ active: true, current: 0, total: buildTotal });
-
-    const getPlacementDef = (placement) => ideByModel.get(placement.modelName) ?? ideById.get(placement.id);
-    const tobjPlacementCount = effectivePlacements.reduce((count, placement) => {
-      const def = getPlacementDef(placement);
-      return count + (def?.section === 'tobjs' ? 1 : 0);
-    }, 0);
-    pushConsoleLine('info', `TOBJ detected in IPL placements: ${tobjPlacementCount}`);
-    const placementAnchors = effectivePlacements.map((placement) => gtaPositionToThree(
-      placement.position.x,
-      placement.position.y,
-      placement.position.z,
-    ));
-    const renderItems = [];
-    const bigBuildingItems = [];
-    const renderChunkMap = new Map();
-    const instancedBatchMap = new Map();
-    const coronaEmitters = [];
-    const registeredCoronaPlacements = new Set();
-    const placementsWithLights = new Set();
-    let instancedItems = 0;
-
-    const getRenderChunk = (anchor) => {
-      const chunkKey = getChunkKeyFromPosition(anchor);
-      if (renderChunkMap.has(chunkKey)) return renderChunkMap.get(chunkKey);
-      const chunk = {
-        key: chunkKey,
-        cx: Math.floor(anchor.x / WORLD_CHUNK_SIZE),
-        cz: Math.floor(anchor.z / WORLD_CHUNK_SIZE),
-        center: getChunkCenterFromKey(chunkKey),
-        items: [],
-        coronaEmitters: [],
-        shadowEmitters: [],
-        active: false,
-        boundsMin: new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY),
-        boundsMax: new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY),
-        occlusionBox: new THREE.Box3(),
-        occlusionSphere: new THREE.Sphere(),
-        boundingBox: new THREE.Box3(),
-        boundingSphere: new THREE.Sphere(),
-      };
-      renderChunkMap.set(chunkKey, chunk);
-      return chunk;
-    };
-
-    const registerRenderItem = (item) => {
-      item.boundsMin = new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
-      item.boundsMax = new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
-      item.boundingBox = new THREE.Box3();
-      item.boundingSphere = new THREE.Sphere(item.anchor.clone(), WORLD_CHUNK_SIZE * 0.5);
-      const expandItemBoundsWithObject = (object3D) => {
-        if (!object3D?.traverse) return;
-        object3D.updateMatrixWorld(true);
-        object3D.traverse((node) => {
-          if (!node?.isMesh || !node.geometry) return;
-          if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
-          if (!node.geometry.boundingBox) return;
-          const worldBox = node.geometry.boundingBox.clone().applyMatrix4(node.matrixWorld);
-          item.boundsMin.min(worldBox.min);
-          item.boundsMax.max(worldBox.max);
-        });
-      };
-      const expandItemBoundsWithHandles = (handles) => {
-        if (!Array.isArray(handles)) return;
-        for (const handle of handles) {
-          const geometry = handle?.batch?.mesh?.geometry;
-          if (!geometry) continue;
-          if (!geometry.boundingSphere) geometry.computeBoundingSphere();
-          if (!geometry.boundingSphere) continue;
-          const worldSphere = geometry.boundingSphere.clone().applyMatrix4(handle.matrix);
-          item.boundsMin.min(worldSphere.center.clone().addScalar(-worldSphere.radius));
-          item.boundsMax.max(worldSphere.center.clone().addScalar(worldSphere.radius));
-        }
-      };
-      expandItemBoundsWithObject(item.nearObj);
-      expandItemBoundsWithObject(item.lodObj);
-      expandItemBoundsWithHandles(item.nearHandles);
-      expandItemBoundsWithHandles(item.lodHandles);
-      if (
-        Number.isFinite(item.boundsMin.x)
-        && Number.isFinite(item.boundsMax.x)
-        && item.boundsMin.x <= item.boundsMax.x
-      ) {
-        item.boundingBox.min.copy(item.boundsMin);
-        item.boundingBox.max.copy(item.boundsMax);
-        item.boundingBox.getBoundingSphere(item.boundingSphere);
-      }
-      renderItems.push(item);
-      const chunk = getRenderChunk(item.anchor);
-      chunk.items.push(item);
-      chunk.boundsMin.min(item.anchor);
-      chunk.boundsMax.max(item.anchor);
-      const expandBoundsWithObject = (object3D) => {
-        if (!object3D?.traverse) return;
-        object3D.updateMatrixWorld(true);
-        object3D.traverse((node) => {
-          if (!node?.isMesh || !node.geometry) return;
-          if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
-          if (!node.geometry.boundingBox) return;
-          const worldBox = node.geometry.boundingBox.clone().applyMatrix4(node.matrixWorld);
-          chunk.boundsMin.min(worldBox.min);
-          chunk.boundsMax.max(worldBox.max);
-        });
-      };
-      expandBoundsWithObject(item.nearObj);
-      expandBoundsWithObject(item.lodObj);
-      if (item.boundingBox?.isBox3) {
-        chunk.boundsMin.min(item.boundingBox.min);
-        chunk.boundsMax.max(item.boundingBox.max);
-      }
-      item.chunkKey = chunk.key;
-      item.isBigBuilding = classifyBigBuildingItem(item);
-      if (item.isBigBuilding) {
-        bigBuildingItems.push(item);
-      }
-      return item;
-    };
-
-    const registerChunkEmitter = (emitter) => {
-      if (!emitter?.position) return;
-      const chunk = getRenderChunk(emitter.position);
-      emitter.chunkKey = chunk.key;
-      chunk.coronaEmitters.push(emitter);
-      if (Number(emitter.shadow?.size) > 0) {
-        chunk.shadowEmitters.push(emitter);
-      }
-    };
-
-    const buildRenderSideState = (obj, handles, drawDistanceValue, defaultIsTobj) => {
-      const firstHandle = Array.isArray(handles) && handles.length > 0 ? handles[0] : null;
-      const placementMatrix = obj?.userData?.placementMatrix || firstHandle?.placementMatrix || null;
-      return {
-        streamAlpha: (obj || firstHandle) ? 0 : 1,
-        fadeAlpha: (obj || firstHandle) ? 0 : 1,
-        currentOpacity: 0,
-        renderObject: obj || null,
-        fadeBindings: null,
-        proxyRoot: null,
-        template: obj?.userData?.fadeTemplate || firstHandle?.selectionTemplate || null,
-        placementMatrix: placementMatrix?.clone?.() || null,
-        ideFlags: obj?.userData?.rwIdeFlags ?? firstHandle?.ideFlags ?? 0,
-        isTobj: Boolean(obj?.userData?.isTobj ?? firstHandle?.isTobj ?? defaultIsTobj),
-        objectDetail: obj?.userData?.objectDetail || firstHandle?.objectDetail || null,
-        drawDistance: Number.isFinite(drawDistanceValue) ? drawDistanceValue : null,
-      };
-    };
-
-    const buildPlacementWorldMatrix = (placement, anchor) => {
-      const placementQuaternion = gtaPlacementQuaternionToThree(
-        placement.rotation.x,
-        placement.rotation.y,
-        placement.rotation.z,
-        placement.rotation.w,
-        uiStateRef.current.quaternionOrder,
-      );
-      return new THREE.Matrix4().compose(
-        anchor,
-        placementQuaternion,
-        new THREE.Vector3(1, 1, 1),
-      );
-    };
-
-    const buildCoronaEmittersForPlacement = (placement, placementIndex, worldMatrix, ide, model) => {
-      const emitters = [];
-      const directionMatrix = new THREE.Matrix3().setFromMatrix4(worldMatrix);
-      const baseId = `${placement.sourcePath || 'ipl'}:${placementIndex}:${placement.modelName}`;
-      const effectLights = Array.isArray(ide?.effects)
-        ? ide.effects.filter((e) => e.kind === 'light')
-        : [];
-      const trafficLightEmitters = buildTrafficLightCoronaEmitters({
-        effectLights,
-        placement,
-        placementIndex,
-        worldMatrix,
-        baseId,
-        toWorldPosition: (position, matrix) => {
-          const localPosition = gtaPositionToThree(
-            Number(position?.x) || 0,
-            Number(position?.y) || 0,
-            Number(position?.z) || 0,
-          );
-          return toPlainVector(localPosition.applyMatrix4(matrix));
-        },
-        toWorldDirection: (direction, matrix) => {
-          const localDirection = gtaPositionToThree(
-            Number(direction?.x) || 0,
-            Number(direction?.y) || 0,
-            Number(direction?.z) || 0,
-          ).normalize();
-          return toPlainVector(localDirection.applyMatrix3(new THREE.Matrix3().setFromMatrix4(matrix)).normalize());
-        },
-      });
-      if (trafficLightEmitters.length > 0) {
-        emitters.push(...trafficLightEmitters);
-      } else {
-        effectLights.forEach((effect) => {
-          const effectColor = effect.color || { r: 255, g: 255, b: 255, a: 255 };
-          const localPosition = gtaPositionToThree(
-            Number(effect.position?.x) || 0,
-            Number(effect.position?.y) || 0,
-            Number(effect.position?.z) || 0,
-          );
-          const worldPosition = localPosition.applyMatrix4(worldMatrix);
-          emitters.push({
-            id: `2dfx:${baseId}:${effect.effectIndex ?? 0}`,
-            sourceType: '2dfx',
-            modelName: placement.modelName,
-            placementIndex,
-            position: toPlainVector(worldPosition),
-            color: { ...effectColor, a: 255 },
-            alpha: 255,
-            size: Number(effect.size) || 1,
-            drawDistance: Number(effect.distance) || 0,
-            textureKey: effect.coronaTextureName || 'corona',
-            flareType: Number(effect.flare) || 0,
-            reflection: Number(effect.roadReflection ?? effect.wet) || 0,
-            losCheck: Boolean((effect.flags | 0) & IDE_LIGHT_FLAG.LOS_CHECK),
-            longDistance: Boolean((effect.flags | 0) & IDE_LIGHT_FLAG.LONG_DISTANCE),
-            visibilityMode: map2dfxVisibilityMode(effect.flash),
-            fogType: (effect.flags | 0) & IDE_LIGHT_FLAG.FOG_TYPE_MASK,
-            hideObject: Boolean((effect.flags | 0) & IDE_LIGHT_FLAG.HIDE_OBJECT),
-            shadow: {
-              textureKey: effect.shadowTextureName || '',
-              alpha: 128,
-              size: Number(effect.shadowSize ?? effect.innerRange) || 0,
-              intensity: Number(effect.shadowIntensity) || 0,
-              front: toPlainVector(gtaPositionToThree(Number(effect.shadowSize ?? effect.innerRange) || 0, 0, 0)),
-              side: toPlainVector(gtaPositionToThree(0, -(Number(effect.shadowSize ?? effect.innerRange) || 0), 0)),
-              zDistance: 15,
-              drawDistance: 40,
-            },
-            light: Number(effect.outerRange) > 0 ? {
-              kind: 'point',
-              range: Number(effect.outerRange) || 0,
-              intensity: 1.5,
-              colorScale: 'spriteBrightness',
-            } : null,
-          });
-        });
-      }
-
-      const dffLights = Array.isArray(model?.dffLights) ? model.dffLights : [];
-      dffLights.forEach((light) => {
-        const lightKind = mapDffLightKind(light.lightType);
-        if (!lightKind) return;
-        const worldPosition = new THREE.Vector3(
-          ...(Array.isArray(light.localPosition) ? light.localPosition : [0, 0, 0]),
-        ).applyMatrix4(worldMatrix);
-        const worldDirection = new THREE.Vector3(
-          ...(Array.isArray(light.localDirection) ? light.localDirection : [0, 0, -1]),
-        ).applyMatrix3(directionMatrix)
-          .normalize();
-        const normalizedColor = {
-          r: Math.round(Math.max(0, Math.min(1, Number(light.color?.r) || 0)) * 255),
-          g: Math.round(Math.max(0, Math.min(1, Number(light.color?.g) || 0)) * 255),
-          b: Math.round(Math.max(0, Math.min(1, Number(light.color?.b) || 0)) * 255),
-          a: 255,
-        };
-        emitters.push({
-          id: `dfflight:${baseId}:${light.lightIndex ?? 0}`,
-          sourceType: 'dffLight',
-          modelName: placement.modelName,
-          placementIndex,
-          position: toPlainVector(worldPosition),
-          direction: toPlainVector(worldDirection),
-          color: normalizedColor,
-          drawDistance: Math.max(120, (Number(light.radius) || 0) * 12),
-          frameIndex: Number(light.frameIndex) || 0,
-          lightType: Number(light.lightType) || 0,
-          lightFlags: Number(light.flags) || 0,
-          radius: Number(light.radius) || 0,
-          directionAngle: Number(light.directionAngle) || 0,
-          light: {
-            kind: lightKind,
-            range: Number(light.radius) || 0,
-            intensity: 1.25,
-            directionAngle: Number(light.directionAngle) || 0,
-            penumbra: lightKind === 'spotsoft' ? 0.5 : 0,
-          },
-        });
-      });
-
-      return emitters;
-    };
-
-    const maybeRegisterPlacementEmitters = (placement, placementIndex, worldMatrix, ide, model, lodKind) => {
-      if (lodKind === 'lod') return;
-      if (registeredCoronaPlacements.has(placementIndex)) return;
-      registeredCoronaPlacements.add(placementIndex);
-      const emitters = buildCoronaEmittersForPlacement(placement, placementIndex, worldMatrix, ide, model);
-      if (emitters.length > 0) {
-        placementsWithLights.add(placementIndex);
-        emitters.forEach((emitter) => registerChunkEmitter(emitter));
-        coronaEmitters.push(...emitters);
-      }
-    };
-
-    const buildObjectDetail = (ide, placement, lodKind, model) => {
-      const ideEffects = Array.isArray(ide.effects) ? ide.effects : [];
-      const dffLights = Array.isArray(model.dffLights) ? model.dffLights : [];
-      return {
-        id: ide.id,
-        placementId: placement.id,
-        modelName: ide.modelName,
-        txdName: ide.txdName,
-        flags: ide.flags | 0,
-        activeFlagNames: decodeRwIdeFlags(ide.flags).activeFlags,
-        section: ide.section,
-        drawDistance: ide.drawDistance,
-        lodKind,
-        position: {
-          x: placement.position.x,
-          y: placement.position.y,
-          z: placement.position.z,
-        },
-        rotation: {
-          x: placement.rotation.x,
-          y: placement.rotation.y,
-          z: placement.rotation.z,
-          w: placement.rotation.w,
-        },
-        usedTextureEntries: model.usedTextureEntries || [],
-        ideEffects,
-        dffLights,
-        hasLighting:
-          ideEffects.some((e) => e.kind === 'light') || (dffLights?.length ?? 0) > 0,
-      };
-    };
-
-    const canUseInstancing = (model, ide) => {
-      if (!ENABLE_WORLD_INSTANCING) return false;
-      if (!model?.instancable || !Array.isArray(model.meshDescriptors) || model.meshDescriptors.length === 0) {
-        return false;
-      }
-      if (ide?.section === 'tobjs') return false;
-      const decoded = decodeRwIdeFlags(ide?.flags);
-      if (decoded.drawLast || decoded.additive || decoded.noZWrite) return false;
-      return model.meshDescriptors.every((descriptor) => {
-        if (!descriptor?.geometry || !descriptor?.material || Array.isArray(descriptor.material)) return false;
-        const rwMaterial = getRWMaterialDescriptor(descriptor.material);
-        if (!rwMaterial) return false;
-        return rwMaterial.renderBucket === 'opaque' || rwMaterial.renderBucket === 'cutout';
-      });
-    };
-
-    const ensureInstancedBatch = (model, lodKind, ide, descriptorIndex, descriptor) => {
-      const batchKey = `${model.key}|${lodKind}|${descriptorIndex}|${ide.flags | 0}`;
-      if (instancedBatchMap.has(batchKey)) return instancedBatchMap.get(batchKey);
-      const rwMaterial = getRWMaterialDescriptor(descriptor.material);
-      const material = createThreeMaterialFromRW(cloneRWMaterialDescriptor(rwMaterial), descriptor.geometry);
-      const mesh = new THREE.InstancedMesh(descriptor.geometry, material, 1);
-      mesh.count = 0;
-      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      mesh.frustumCulled = false;
-      mesh.matrixAutoUpdate = false;
-      mesh.matrixWorldAutoUpdate = false;
-      mesh.visible = true;
-      mesh.userData = {
-        ...(mesh.userData || {}),
-        rwPipelineTarget: createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs'),
-        isTobj: ide.section === 'tobjs',
-        rwQueueRenderClass: 'building',
-      };
-      applyRwIdeFlagsToInstance(mesh, ide.flags);
-      worldRoot.add(mesh);
-      const batch = {
-        key: batchKey,
-        mesh,
-        entries: [],
-        visibleCount: 0,
-        activeEntries: [],
-      };
-      instancedBatchMap.set(batchKey, batch);
-      return batch;
-    };
-
-    const tryBuildInstancedHandles = async (placement, placementIndex, lodKind, anchor) => {
-      const ide = ideByModel.get(placement.modelName) ?? ideById.get(placement.id);
-      if (!ide) {
-        unresolved += 1;
-        pushConsoleLine('error', `Missing IDE def for placement: model=${placement.modelName} id=${placement.id}`, 'build');
-        return null;
-      }
-
-      try {
-        const model = await getModelTemplate(ide.modelName, ide.txdName);
-        if (!canUseInstancing(model, ide)) return null;
-        const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
-        maybeRegisterPlacementEmitters(placement, placementIndex, worldMatrix, ide, model, lodKind);
-        const handles = [];
-        const objectDetail = buildObjectDetail(ide, placement, lodKind, model);
-        model.meshDescriptors.forEach((descriptor, descriptorIndex) => {
-          const batch = ensureInstancedBatch(model, lodKind, ide, descriptorIndex, descriptor);
-          const matrix = worldMatrix.clone().multiply(descriptor.localMatrix);
-          const handle = {
-            batch,
-            index: -1,
-            activeIndex: -1,
-            matrix,
-            placementMatrix: worldMatrix.clone(),
-            visible: false,
-            objectDetail,
-            selectionTemplate: model.template,
-            ideFlags: ide.flags | 0,
-            isTobj: ide.section === 'tobjs',
-          };
-          batch.entries.push(handle);
-          handles.push(handle);
-        });
-        loaded += 1;
-        instancedItems += 1;
-        return {
-          handles,
-          ide,
-          model,
-        };
-      } catch (error) {
-        failed += 1;
-        pushConsoleLine(
-          'error',
-          `Build failed: model=${ide.modelName} txd=${ide.txdName} lod=${lodKind} (${formatConsoleArg(error)})`,
-          'build',
-        );
-        pushFailedModel(`model=${ide.modelName} txd=${ide.txdName} lod=${lodKind} error=${formatConsoleArg(error)}`);
-        return null;
-      }
-    };
-
-    const buildPlacementObject = async (placement, placementIndex, lodKind, anchor) => {
-      const ide = ideByModel.get(placement.modelName) ?? ideById.get(placement.id);
-      if (!ide) {
-        unresolved += 1;
-        pushConsoleLine('error', `Missing IDE def for placement: model=${placement.modelName} id=${placement.id}`, 'build');
-        return null;
-      }
-
-      try {
-        const model = await getModelTemplate(ide.modelName, ide.txdName);
-        const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
-        maybeRegisterPlacementEmitters(placement, placementIndex, worldMatrix, ide, model, lodKind);
-
-        const instance = SkeletonUtils.clone(model.template);
-        instance.applyMatrix4(worldMatrix);
-        applyWireframe(instance, uiStateRef.current.wireframe);
-        if (ide.section === 'tobjs') {
-          prepareTobjInstanceMaterials(instance, uiStateRef.current.disableVertexColor);
-          tobjBuilt += 1;
-        }
-        applyRwIdeFlagsToInstance(instance, ide.flags);
-        applyDisableVertexColor(instance, uiStateRef.current.disableVertexColor);
-        applyGlobalBackfaceCulling(instance, uiStateRef.current.disableBackfaceCulling);
-        instance.updateMatrixWorld(true);
-        instance.traverse((node) => {
-          if (!node.isObject3D) return;
-          node.matrixAutoUpdate = false;
-          node.matrixWorldAutoUpdate = false;
-        });
-        instance.visible = false;
-        instance.userData.lodKind = lodKind;
-        instance.userData.selectableRoot = true;
-        instance.userData.objectDetail = buildObjectDetail(ide, placement, lodKind, model);
-        instance.userData.fadeTemplate = model.template;
-        instance.userData.placementMatrix = worldMatrix.clone();
-        instance.userData.rwIdeFlags = ide.flags | 0;
-        instance.userData.isTobj = ide.section === 'tobjs';
-        instance.userData.rwPipelineTarget = createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs');
-        instance.userData.rwQueueRenderClass = 'building';
-        collectQueueMeshes(instance);
-        worldRoot.add(instance);
-        loaded += 1;
-        return instance;
-      } catch (error) {
-        failed += 1;
-        pushConsoleLine(
-          'error',
-          `Build failed: model=${ide.modelName} txd=${ide.txdName} lod=${lodKind} (${formatConsoleArg(error)})`,
-          'build',
-        );
-        pushFailedModel(`model=${ide.modelName} txd=${ide.txdName} lod=${lodKind} error=${formatConsoleArg(error)}`);
-        return null;
-      }
-    };
-
-    const batchSize = 32;
-    let completed = 0;
-      for (let batchStart = 0; batchStart < nonLodWithLodIndices.length; batchStart += batchSize) {
-        if (buildTokenRef.current !== token) {
-          pendingWaterPipeline?.dispose();
-          return;
-        }
-      const batch = nonLodWithLodIndices.slice(batchStart, batchStart + batchSize);
-
-      await Promise.all(batch.map(async (index) => {
-        const placement = effectivePlacements[index];
-        const anchor = placementAnchors[index];
-        const lodIndex = lodMapping.get(index);
-        const lodPlacement = effectivePlacements[lodIndex];
-        const lodAnchor = placementAnchors[lodIndex];
-        const nearDef = getPlacementDef(placement);
-        const lodDef = getPlacementDef(lodPlacement);
-        const isTobj = nearDef?.section === 'tobjs';
-        const nearObj = await buildPlacementObject(placement, index, 'near', anchor);
-        const lodObj = await buildPlacementObject(lodPlacement, lodIndex, 'lod', lodAnchor);
-        if (nearObj || lodObj) {
-          registerRenderItem({
-            isTobj,
-            anchor: anchor.clone(),
-            nearObj,
-            lodObj,
-            nearHandles: [],
-            lodHandles: [],
-            nearDrawDistance: Number.isFinite(nearDef?.drawDistance) ? nearDef.drawDistance : null,
-            lodDrawDistance: Number.isFinite(lodDef?.drawDistance) ? lodDef.drawDistance : null,
-            nearState: buildRenderSideState(nearObj, [], nearDef?.drawDistance, isTobj),
-            lodState: buildRenderSideState(lodObj, [], lodDef?.drawDistance, lodDef?.section === 'tobjs'),
-            mode: 'hidden',
-          });
-        }
-      }));
-      completed += batch.length;
-
-      setStats((prev) => ({ ...prev, loaded, failed, unresolved }));
-      setBuildProgress({ active: true, current: completed, total: buildTotal });
-      pushConsoleLine('info', `Build progress: ${completed}/${buildTotal}`);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-      for (let batchStart = 0; batchStart < nonLodWithoutLodIndices.length; batchStart += batchSize) {
-        if (buildTokenRef.current !== token) {
-          pendingWaterPipeline?.dispose();
-          return;
-        }
-      const batch = nonLodWithoutLodIndices.slice(batchStart, batchStart + batchSize);
-
-      await Promise.all(batch.map(async (index) => {
-        const placement = effectivePlacements[index];
-        const anchor = placementAnchors[index];
-        const nearDef = getPlacementDef(placement);
-        const isTobj = nearDef?.section === 'tobjs';
-        const nearInstanced = await tryBuildInstancedHandles(placement, index, 'near', anchor);
-        const nearObj = nearInstanced ? null : await buildPlacementObject(placement, index, 'near', anchor);
-        if (nearObj || nearInstanced) {
-          registerRenderItem({
-            isTobj,
-            anchor: anchor.clone(),
-            nearObj,
-            lodObj: null,
-            nearHandles: nearInstanced?.handles || [],
-            lodHandles: [],
-            nearDrawDistance: Number.isFinite(nearDef?.drawDistance) ? nearDef.drawDistance : null,
-            lodDrawDistance: null,
-            nearState: buildRenderSideState(nearObj, nearInstanced?.handles || [], nearDef?.drawDistance, isTobj),
-            lodState: buildRenderSideState(null, [], null, false),
-            mode: 'hidden',
-          });
-        }
-      }));
-      completed += batch.length;
-
-      setStats((prev) => ({ ...prev, loaded, failed, unresolved }));
-      setBuildProgress({ active: true, current: completed, total: buildTotal });
-      pushConsoleLine('info', `Build progress: ${completed}/${buildTotal}`);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-      for (let batchStart = 0; batchStart < standaloneLodIndices.length; batchStart += batchSize) {
-        if (buildTokenRef.current !== token) {
-          pendingWaterPipeline?.dispose();
-          return;
-        }
-      const batch = standaloneLodIndices.slice(batchStart, batchStart + batchSize);
-
-      await Promise.all(batch.map(async (index) => {
-        const placement = effectivePlacements[index];
-        const anchor = placementAnchors[index];
-        const lodDef = getPlacementDef(placement);
-        const isTobj = lodDef?.section === 'tobjs';
-        const lodInstanced = await tryBuildInstancedHandles(placement, index, 'lod', anchor);
-        const lodObj = lodInstanced ? null : await buildPlacementObject(placement, index, 'lod', anchor);
-        if (lodObj || lodInstanced) {
-          registerRenderItem({
-            isTobj,
-            anchor: anchor.clone(),
-            nearObj: null,
-            lodObj,
-            nearHandles: [],
-            lodHandles: lodInstanced?.handles || [],
-            nearDrawDistance: null,
-            lodDrawDistance: Number.isFinite(lodDef?.drawDistance) ? lodDef.drawDistance : null,
-            nearState: buildRenderSideState(null, [], null, isTobj),
-            lodState: buildRenderSideState(lodObj, lodInstanced?.handles || [], lodDef?.drawDistance, isTobj),
-            mode: 'hidden',
-          });
-        }
-      }));
-      completed += batch.length;
-
-      setStats((prev) => ({ ...prev, loaded, failed, unresolved }));
-      setBuildProgress({ active: true, current: completed, total: buildTotal });
-      pushConsoleLine('info', `Build progress: ${completed}/${buildTotal}`);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-      for (const chunk of renderChunkMap.values()) {
-        if (chunk.items.length === 0) {
-          chunk.occlusionBox.setFromCenterAndSize(
-            chunk.center.clone(),
-            new THREE.Vector3(WORLD_CHUNK_SIZE, WORLD_CHUNK_SIZE, WORLD_CHUNK_SIZE),
-          );
-          chunk.occlusionSphere.center.copy(chunk.center);
-          chunk.occlusionSphere.radius = CHUNK_SPHERE_PADDING;
-          chunk.boundingBox.setFromCenterAndSize(
-            chunk.center.clone(),
-            new THREE.Vector3(
-              WORLD_CHUNK_SIZE + (CHUNK_CULL_MARGIN_XZ * 2),
-              WORLD_CHUNK_SIZE + (CHUNK_CULL_MARGIN_Y * 2),
-              WORLD_CHUNK_SIZE + (CHUNK_CULL_MARGIN_XZ * 2),
-            ),
-          );
-          chunk.boundingSphere.center.copy(chunk.center);
-          chunk.boundingSphere.radius = CHUNK_SPHERE_PADDING + Math.max(CHUNK_CULL_MARGIN_XZ, CHUNK_CULL_MARGIN_Y);
-          continue;
-        }
-        chunk.occlusionBox.min.copy(chunk.boundsMin);
-        chunk.occlusionBox.max.copy(chunk.boundsMax);
-        chunk.occlusionBox.getBoundingSphere(chunk.occlusionSphere);
-        chunk.boundingBox.min.copy(chunk.boundsMin);
-        chunk.boundingBox.max.copy(chunk.boundsMax);
-        chunk.boundingBox.min.x -= CHUNK_CULL_MARGIN_XZ;
-        chunk.boundingBox.min.y -= CHUNK_CULL_MARGIN_Y;
-        chunk.boundingBox.min.z -= CHUNK_CULL_MARGIN_XZ;
-        chunk.boundingBox.max.x += CHUNK_CULL_MARGIN_XZ;
-        chunk.boundingBox.max.y += CHUNK_CULL_MARGIN_Y;
-        chunk.boundingBox.max.z += CHUNK_CULL_MARGIN_XZ;
-        const sphereCenter = chunk.boundsMin.clone().add(chunk.boundsMax).multiplyScalar(0.5);
-        let radiusSq = 0;
-        for (const item of chunk.items) {
-          radiusSq = Math.max(radiusSq, sphereCenter.distanceToSquared(item.anchor));
-        }
-        chunk.boundingSphere.center.copy(sphereCenter);
-        chunk.boundingSphere.radius = Math.sqrt(radiusSq) + CHUNK_SPHERE_PADDING + Math.max(CHUNK_CULL_MARGIN_XZ, CHUNK_CULL_MARGIN_Y);
-      }
-
-      for (const batch of instancedBatchMap.values()) {
-        const entryCount = batch.entries.length;
-        const sourceGeometry = batch.mesh.geometry;
-        const sourceMaterial = batch.mesh.material;
-        const instancedMesh = new THREE.InstancedMesh(sourceGeometry, sourceMaterial, Math.max(1, entryCount));
-        instancedMesh.count = 0;
-        instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        instancedMesh.frustumCulled = false;
-        instancedMesh.matrixAutoUpdate = false;
-        instancedMesh.matrixWorldAutoUpdate = false;
-        instancedMesh.visible = false;
-        instancedMesh.material = sourceMaterial;
-        instancedMesh.userData = {
-          ...(batch.mesh.userData || {}),
-          rwInstanceEntries: [],
-        };
-        worldRoot.remove(batch.mesh);
-        batch.mesh = instancedMesh;
-        worldRoot.add(instancedMesh);
-        for (let index = 0; index < batch.entries.length; index += 1) {
-          const entry = batch.entries[index];
-          entry.index = index;
-          entry.activeIndex = -1;
-        }
-      }
-
-      jsrwSessionRef.current.setWaterRuntime(pendingWaterPipeline);
-      log2dfxDebug('info', `[2DFX] corona emitters discovered: ${coronaEmitters.length}`);
-      if (coronaEmitters.length > 0) {
-        const coronaTextureDictionary = await buildCoronaTextureDictionary(coronaEmitters);
-        const coronaRuntime = jsrwSessionRef.current.createCoronaRuntime({
-          root: worldRoot,
-          emitters: coronaEmitters,
-          textureDictionary: coronaTextureDictionary,
-          enableDebugHelpers: true,
-        });
-        coronaRuntime.setEnabled(uiStateRef.current.render2dfx);
-        coronaRuntime.setDebugShowAll(uiStateRef.current.debug2dfx);
-        const coronaBindings = Array.isArray(coronaRuntime?.raw?.entries)
-          ? coronaRuntime.raw.entries
-            .filter((entry) => entry?.emitter?.sourceType === '2dfx')
-            .map((entry) => ({
-              textureKey: String(entry?.emitter?.textureKey || ''),
-              hasTexture: Boolean(entry?.sprite?.material?.map),
-              appliedName: entry?.sprite?.material?.map?.name || '',
-            }))
-          : [];
-        if (coronaBindings.length > 0) {
-          const groupedBindings = Array.from(new Map(
-            coronaBindings.map((binding) => [binding.textureKey, binding]),
-          ).values());
-          groupedBindings.forEach((binding) => {
-            log2dfxDebug(
-              binding.hasTexture ? 'info' : 'warn',
-              `[2DFX] apply ${binding.textureKey}: ${binding.hasTexture ? `ok (${binding.appliedName || 'unnamed'})` : 'failed (material.map missing)'}`,
-            );
-          });
-        }
-        const shadowRuntime = jsrwSessionRef.current.createShadowRuntime({
-          root: worldRoot,
-          emitters: coronaEmitters,
-          textureDictionary: coronaTextureDictionary,
-        });
-        shadowRuntime.setEnabled(uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled);
-        log2dfxDebug('info', `[2DFX] corona emitters ready: ${coronaEmitters.length}`);
-      } else {
-        log2dfxDebug('warn', '[2DFX] no corona emitters were created');
-        jsrwSessionRef.current.disposeCoronaRuntime();
-        jsrwSessionRef.current.disposeShadowRuntime();
-      }
-      renderItemsRef.current = renderItems;
-      bigBuildingItemsRef.current = bigBuildingItems;
-      renderChunksRef.current = Array.from(renderChunkMap.values());
-      renderChunkLookupRef.current = renderChunkMap;
-      activeRenderChunksRef.current = new Set();
-      jsrwSessionRef.current.setBackend(activeBackend);
-      jsrwSessionRef.current.setRoot(worldRoot);
-      jsrwSessionRef.current.applyToRoot(worldRoot, {
-        activeBackend,
-        worldGameVersion: buildGameVersion,
-        timecycleCurrent: timecycleStateRef.current?.current,
-        ambientColor: timecycleStateRef.current?.current?.values?.ambient
-          ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
-          : RW_PIPELINE_FALLBACK_AMBIENT,
-        emissiveColor: timecycleStateRef.current?.current?.values?.ambientBl
-          ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambientBl)
-          : RW_PIPELINE_FALLBACK_EMISSIVE,
-        fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
-        fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
-      });
-      applyWireframe(worldRoot, uiStateRef.current.wireframe);
-      applyDisableVertexColor(worldRoot, uiStateRef.current.disableVertexColor);
-      applyGlobalBackfaceCulling(worldRoot, uiStateRef.current.disableBackfaceCulling);
-      lastPipelineSelectionSignatureRef.current = getPipelineSelectionSignature(
-        uiStateRef.current.pipelineDebug,
-        activeBackend,
-        buildGameVersion,
-      );
-      rwRenderQueueRef.current?.markDirty();
-      lodUpdateStateRef.current.needsRefresh = true;
-      lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
-      lodUpdateStateRef.current.lastCameraQuat.set(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
-      lodUpdateStateRef.current.lastCameraAspect = Number.NaN;
-      lodUpdateStateRef.current.lastCameraFov = Number.NaN;
-      lodUpdateStateRef.current.lastCameraNear = Number.NaN;
-      lodUpdateStateRef.current.lastCameraFar = Number.NaN;
-      setBuildProgress({ active: false, current: buildTotal, total: buildTotal });
-      setStatus(`Done. Loaded ${loaded} placements.`);
-      setShowGameIcon(true);
-      renderResourcesReadyRef.current = true;
-      setStats((prev) => ({
-        ...prev,
-        loaded,
-        failed,
-        unresolved,
-        totalChunks: renderChunkMap.size,
-        instancedBatches: instancedBatchMap.size,
-        instancedItems,
-        lightObjects: placementsWithLights.size,
-        lightEmitters: coronaEmitters.length,
-      }));
-      pushConsoleLine('info', `Chunk visible set: ${renderChunkMap.size} chunks`);
-      pushConsoleLine('info', `Instanced batches: ${instancedBatchMap.size}, instanced placements: ${instancedItems}`);
-      pushConsoleLine('info', `Build done. loaded=${loaded} failed=${failed} unresolved=${unresolved} tobjBuilt=${tobjBuilt}`);
-      pushConsoleLine('info', `Placement build finished in ${(performance.now() - placementStartTime).toFixed(1)} ms`);
-    } finally {
-      buildActiveRef.current = false;
-    }
-  }, [activeBackend, clearWorld, pushConsoleLine, pushFailedModel, pushLoadedFile]);
-
-  const applyImportedEntries = useCallback((entries, options = {}) => {
-    const index = buildFileIndex(entries);
-    fileIndexRef.current = index;
-    pushConsoleLine('info', options.consoleMessage || `Map indexed: ${index.count} files`);
-    setStats((prev) => ({ ...prev, files: index.count }));
-    setShowMapPickerFallback(false);
-    setStatus(options.statusMessage || `Indexed ${index.count} files. Click Build World.`);
-    return index;
-  }, [pushConsoleLine]);
-
-  const importZipMap = useCallback(async (archiveFile, options = {}) => {
-    const sourceLabel = options.sourceLabel || archiveFile?.name || 'archive.zip';
-    setStatus(`Loading ${sourceLabel}...`);
-    pushConsoleLine('info', `Reading zip archive: ${sourceLabel}`);
-    try {
-      const entries = await expandZipArchive(archiveFile);
-      return applyImportedEntries(entries, {
-        consoleMessage: `Zip indexed: ${sourceLabel} (${entries.length} files)`,
-        statusMessage: `Indexed ${entries.length} files from ${sourceLabel}. Click Build World.`,
-      });
-    } catch (error) {
-      setStatus(`Failed to load ${sourceLabel}.`);
-      pushConsoleLine('error', `Zip import failed: ${sourceLabel} | ${formatConsoleArg(error)}`);
-      return null;
-    }
-  }, [applyImportedEntries, pushConsoleLine]);
-
-  const onPickFolder = useCallback((event) => {
-    const input = event.target;
-    const files = Array.from(input.files || []);
-    input.value = '';
-    if (files.length === 0) return;
-    applyImportedEntries(files, {
-      consoleMessage: `Folder indexed: ${files.length} files`,
-      statusMessage: `Indexed ${files.length} files. Click Build World.`,
-    });
-  }, [applyImportedEntries]);
-
-  const onPickZip = useCallback(async (event) => {
-    const input = event.target;
-    const archiveFile = input.files?.[0] || null;
-    input.value = '';
-    if (!archiveFile) return;
-    await importZipMap(archiveFile);
-  }, [importZipMap]);
-
-  const loadDefaultMap = useCallback(async (sourceUrl, sourceLabel) => {
-    setStatus(`Loading ${sourceLabel}...`);
-    pushConsoleLine('info', `Fetching default map: ${sourceLabel}`);
-    try {
-      const response = await fetch(sourceUrl);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
-      }
-      const archiveBuffer = await response.arrayBuffer();
-      const archiveFile = new File([archiveBuffer], sourceLabel, {
-        lastModified: Date.now(),
-        type: 'application/zip',
-      });
-      await importZipMap(archiveFile, { sourceLabel });
-    } catch (error) {
-      setStatus(`Failed to load ${sourceLabel}.`);
-      pushConsoleLine('error', `Default map load failed: ${sourceLabel} | ${formatConsoleArg(error)}`);
-    }
-  }, [importZipMap, pushConsoleLine]);
-
-  const openMapPicker = useCallback((source = 'dom') => {
-    const input = fileInputRef.current;
-    if (!input) return false;
-
-    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
-    const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|FxiOS/i.test(ua);
-
-    input.value = '';
-
-    try {
-      if (typeof input.showPicker === 'function') {
-        input.showPicker();
-        setShowMapPickerFallback(false);
-        return true;
-      }
-    } catch {
-      // Safari may reject showPicker/click outside a trusted DOM gesture.
-    }
-
-    try {
-      input.click();
-      if (source !== 'imgui' || !isSafari) {
-        setShowMapPickerFallback(false);
-      } else {
-        setShowMapPickerFallback(true);
-        setStatus('Safari may block file dialogs from the ImGui menu. Click the HUD folder picker below.');
-      }
-      return true;
-    } catch {
-      if (isSafari) {
-        setShowMapPickerFallback(true);
-        setStatus('Safari blocked the ImGui file dialog. Click the HUD folder picker below.');
-      }
-      return false;
-    }
-  }, []);
-
-  const openZipPicker = useCallback(() => {
-    const input = zipInputRef.current;
-    if (!input) return false;
-
-    input.value = '';
-
-    try {
-      if (typeof input.showPicker === 'function') {
-        input.showPicker();
-        return true;
-      }
-    } catch {
-      // Some browsers only allow file pickers from trusted DOM gestures.
-    }
-
-    try {
-      input.click();
-      return true;
-    } catch {
-      setStatus('Browser blocked the zip file dialog. Use the HUD zip picker below.');
-      return false;
-    }
-  }, []);
-
-  const flushDirtyInstancedBatch = useCallback((batch) => {
-    if (!batch?.mesh || !Array.isArray(batch.entries)) return;
-    let activeIndex = 0;
-    batch.activeEntries.length = 0;
-    for (const handle of batch.entries) {
-      if (!handle?.visible) {
-        if (handle) handle.activeIndex = -1;
-        continue;
-      }
-      batch.mesh.setMatrixAt(activeIndex, handle.matrix);
-      handle.activeIndex = activeIndex;
-      batch.activeEntries.push(handle);
-      activeIndex += 1;
-    }
-    batch.visibleCount = activeIndex;
-    batch.mesh.count = activeIndex;
-    batch.mesh.visible = activeIndex > 0;
-    batch.mesh.userData.rwInstanceEntries = batch.activeEntries;
-    batch.mesh.instanceMatrix.needsUpdate = true;
-    batch.mesh.boundingBox = null;
-    batch.mesh.boundingSphere = null;
-  }, []);
-
-  const setInstanceHandlesVisible = useCallback((handles, visible, dirtyBatches) => {
-    if (!Array.isArray(handles) || handles.length === 0) return;
-    for (const handle of handles) {
-      if (!handle?.batch?.mesh || handle.index < 0 || handle.visible === visible) continue;
-      handle.visible = visible;
-      handle.batch.visibleCount += visible ? 1 : -1;
-      dirtyBatches?.add(handle.batch);
-    }
-  }, []);
-
-  const setRenderSideOriginalVisible = useCallback((item, side, visible, dirtyBatches) => {
-    if (side === 'near') {
-      if (item.nearObj) item.nearObj.visible = visible;
-      setInstanceHandlesVisible(item.nearHandles, visible, dirtyBatches);
-      return;
-    }
-    if (item.lodObj) item.lodObj.visible = visible;
-    setInstanceHandlesVisible(item.lodHandles, visible, dirtyBatches);
-  }, [setInstanceHandlesVisible]);
-
-  const ensureRenderSideObjectFade = useCallback((sideState) => {
-    const root = sideState?.renderObject;
-    if (!root?.traverse) return false;
-    if (Array.isArray(sideState.fadeBindings)) return true;
-
-    const bindings = [];
-    root.traverse((node) => {
-      if (!node.isMesh) return;
-      const sourceMaterials = Array.isArray(node.material) ? node.material : [node.material];
-      const fadeMaterials = sourceMaterials.map((material) => createFadeMaterial(material, node.geometry));
-      bindings.push({
-        node,
-        originalMaterial: node.material,
-        fadeMaterials,
-        isArray: Array.isArray(node.material),
-      });
-      node.material = Array.isArray(node.material) ? fadeMaterials : fadeMaterials[0];
-    });
-    sideState.fadeBindings = bindings;
-    return true;
-  }, []);
-
-  const setRenderSideObjectFadeOpacity = useCallback((sideState, opacity) => {
-    const bindings = Array.isArray(sideState?.fadeBindings) ? sideState.fadeBindings : [];
-    const clampedOpacity = clamp01(opacity);
-    for (const binding of bindings) {
-      for (const material of binding.fadeMaterials) {
-        const descriptor = getRWMaterialDescriptor(material);
-        if (descriptor) descriptor.opacity = clampedOpacity;
-        material.opacity = clampedOpacity;
-        if (material.uniforms?.opacity) {
-          material.uniforms.opacity.value = clampedOpacity;
-        }
-      }
-    }
-  }, []);
-
-  const disposeRenderSideObjectFade = useCallback((sideState) => {
-    const bindings = Array.isArray(sideState?.fadeBindings) ? sideState.fadeBindings : null;
-    if (!bindings) return false;
-    for (const binding of bindings) {
-      binding.node.material = binding.originalMaterial;
-      for (const material of binding.fadeMaterials) {
-        material?.dispose?.();
-      }
-    }
-    sideState.fadeBindings = null;
-    return true;
-  }, []);
-
-  const buildRenderSideFadeProxy = useCallback((item, side) => {
-    const sideState = side === 'near' ? item?.nearState : item?.lodState;
-    if (!sideState?.template?.traverse || !sideState?.placementMatrix) return null;
-
-    const proxy = SkeletonUtils.clone(sideState.template);
-    proxy.name = `${side}_fade_proxy`;
-    proxy.applyMatrix4(sideState.placementMatrix);
-    applyWireframe(proxy, uiStateRef.current.wireframe);
-    if (sideState.isTobj) {
-      prepareTobjInstanceMaterials(proxy, uiStateRef.current.disableVertexColor);
-    }
-    applyRwIdeFlagsToInstance(proxy, sideState.ideFlags || 0);
-    applyDisableVertexColor(proxy, uiStateRef.current.disableVertexColor);
-    applyGlobalBackfaceCulling(proxy, uiStateRef.current.disableBackfaceCulling);
-    proxy.visible = false;
-    proxy.userData = {
-      ...(proxy.userData || {}),
-      rwFadeProxy: true,
-      selectableRoot: false,
-      objectDetail: sideState.objectDetail || null,
-      isTobj: Boolean(sideState.isTobj),
-      rwPipelineTarget: createRwPipelineTarget(worldGameVersionRef.current, sideState.isTobj),
-      rwQueueRenderClass: 'building',
-    };
-
-    const fadeMaterials = [];
-    proxy.traverse((node) => {
-      if (!node.isObject3D) return;
-      node.matrixAutoUpdate = false;
-      node.matrixWorldAutoUpdate = false;
-      if (!node.isMesh) return;
-      node.frustumCulled = false;
-      node.raycast = () => {};
-      const sourceMaterials = Array.isArray(node.material) ? node.material : [node.material];
-      const nextMaterials = sourceMaterials.map((material) => {
-        const fadeMaterial = createFadeMaterial(material, node.geometry);
-        if (fadeMaterial) fadeMaterials.push(fadeMaterial);
-        return fadeMaterial;
-      });
-      node.material = Array.isArray(node.material) ? nextMaterials : nextMaterials[0];
-    });
-    proxy.userData.rwFadeMaterials = fadeMaterials;
-    collectQueueMeshes(proxy);
-    proxy.updateMatrixWorld(true);
-    return proxy;
-  }, []);
-
-  const disposeRenderSideFadeProxy = useCallback((sideState) => {
-    const proxyRoot = sideState?.proxyRoot;
-    if (!proxyRoot) return false;
-    if (proxyRoot.parent) proxyRoot.parent.remove(proxyRoot);
-    disposeObjectMaterialsOnly(proxyRoot);
-    sideState.proxyRoot = null;
-    sideState.currentOpacity = 0;
-    return true;
-  }, []);
-
-  const ensureRenderSideFadeProxy = useCallback((item, side) => {
-    const sideState = side === 'near' ? item?.nearState : item?.lodState;
-    if (!sideState) return null;
-    if (sideState.proxyRoot) return sideState.proxyRoot;
-    const proxy = buildRenderSideFadeProxy(item, side);
-    if (!proxy) return null;
-    worldRootRef.current.add(proxy);
-    sideState.proxyRoot = proxy;
-    jsrwSessionRef.current.setBackend(activeBackend);
-    jsrwSessionRef.current.applyToObject(proxy, {
-      activeBackend,
-      worldGameVersion: worldGameVersionRef.current,
-      timecycleCurrent: timecycleStateRef.current?.current,
-      ambientColor: timecycleStateRef.current?.current?.values?.ambient
-        ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
-        : RW_PIPELINE_FALLBACK_AMBIENT,
-      emissiveColor: timecycleStateRef.current?.current?.values?.ambientBl
-        ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambientBl)
-        : RW_PIPELINE_FALLBACK_EMISSIVE,
-      fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
-      fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
-    });
-    applyWireframe(proxy, uiStateRef.current.wireframe);
-    applyDisableVertexColor(proxy, uiStateRef.current.disableVertexColor);
-    applyGlobalBackfaceCulling(proxy, uiStateRef.current.disableBackfaceCulling);
-    rwRenderQueueRef.current?.markDirty();
-    return proxy;
-  }, [activeBackend, buildRenderSideFadeProxy]);
-
-  const applyRenderSideOpacity = useCallback((item, side, opacity, dirtyBatches) => {
-    const sideState = side === 'near' ? item?.nearState : item?.lodState;
-    if (!sideState) return false;
-    const clampedOpacity = clamp01(opacity);
-
-    if (clampedOpacity <= RW_FADE_EPSILON) {
-      if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty();
-      setRenderSideOriginalVisible(item, side, false, dirtyBatches);
-      if (disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty();
-      sideState.currentOpacity = 0;
-      return false;
-    }
-
-    if (clampedOpacity >= (1 - RW_FADE_EPSILON)) {
-      if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty();
-      if (disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty();
-      setRenderSideOriginalVisible(item, side, true, dirtyBatches);
-      sideState.currentOpacity = 1;
-      return false;
-    }
-
-    if (ensureRenderSideObjectFade(sideState)) {
-      if (disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty();
-      sideState.renderObject.visible = true;
-      setRenderSideObjectFadeOpacity(sideState, clampedOpacity);
-      sideState.currentOpacity = clampedOpacity;
-      return false;
-    }
-
-    setRenderSideOriginalVisible(item, side, false, dirtyBatches);
-    const proxy = ensureRenderSideFadeProxy(item, side);
-    if (!proxy) {
-      setRenderSideOriginalVisible(item, side, true, dirtyBatches);
-      sideState.currentOpacity = 1;
-      return false;
-    }
-    setFadeProxyOpacity(proxy, clampedOpacity);
-    proxy.visible = true;
-    sideState.currentOpacity = clampedOpacity;
-    return true;
-  }, [
-    disposeRenderSideFadeProxy,
-    disposeRenderSideObjectFade,
-    ensureRenderSideFadeProxy,
-    ensureRenderSideObjectFade,
-    setRenderSideObjectFadeOpacity,
-    setRenderSideOriginalVisible,
+  const {
+    clearWorld,
+    loadDefaultMap,
+    onPickFolder,
+    onPickZip,
+    openMapPicker,
+    openZipPicker,
+    rebuildWorld,
+  } = useMemo(() => createAppSessionController({
+    activeBackend,
+    clearObjectSelectionHighlight,
+    fileInputRef,
+    zipInputRef,
+    gtaSessionRef,
+    refs: {
+      activeFadeCountRef,
+      activeRenderChunksRef,
+      bigBuildingItemsRef,
+      buildActiveRef,
+      buildTokenRef,
+      cameraRef,
+      chunkOcclusionStateRef,
+      fileIndexRef,
+      frameVisibilityRef,
+      lastPipelineSelectionSignatureRef,
+      lodUpdateStateRef,
+      renderChunkLookupRef,
+      renderChunksRef,
+      renderItemsRef,
+      renderMetricsRef,
+      renderResourcesReadyRef,
+      resourceCacheRef,
+      rwRenderQueueRef,
+      selectedInstanceHighlightRef,
+      selectedObjectRef,
+      selectedObjectRootRef,
+      selectedTextureDetailRef,
+      streamingBuildRef,
+      timecycleDataRef,
+      timecycleStateRef,
+      totalObjectsRef,
+      uiStateRef,
+      worldGameVersionRef,
+      worldRootRef,
+    },
+    setters: {
+      setBuildProgress,
+      setFailedModels,
+      setLoadedFiles,
+      setSelectedObject,
+      setSelectedTextureDetail,
+      setShowGameIcon,
+      setShowMapPickerFallback,
+      setStats,
+      setStatus,
+    },
+    callbacks: {
+      pushConsoleLine,
+      pushFailedModel,
+      pushLoadedFile,
+      pushLoadedFileConsoleEvent,
+      resetImguiTextureCache,
+      setResolvedParticleTextures: applyResolvedParticleTextures,
+    },
+  }), [
+    activeBackend,
+    applyResolvedParticleTextures,
+    pushConsoleLine,
+    pushFailedModel,
+    pushLoadedFile,
+    pushLoadedFileConsoleEvent,
+    resetImguiTextureCache,
   ]);
-
-  const hideRenderItemCompletely = useCallback((item, dirtyBatches) => {
-    item.mode = 'hidden';
-    if (item?.nearState) item.nearState.currentOpacity = 0;
-    if (item?.lodState) item.lodState.currentOpacity = 0;
-    setRenderSideOriginalVisible(item, 'near', false, dirtyBatches);
-    setRenderSideOriginalVisible(item, 'lod', false, dirtyBatches);
-    let queueDirty = false;
-    if (disposeRenderSideObjectFade(item?.nearState)) queueDirty = true;
-    if (disposeRenderSideObjectFade(item?.lodState)) queueDirty = true;
-    if (disposeRenderSideFadeProxy(item?.nearState)) queueDirty = true;
-    if (disposeRenderSideFadeProxy(item?.lodState)) queueDirty = true;
-    if (queueDirty) rwRenderQueueRef.current?.markDirty();
-  }, [disposeRenderSideFadeProxy, disposeRenderSideObjectFade, setRenderSideOriginalVisible]);
-
-  const hasNearRenderable = useCallback((item) => (
-    Boolean(item?.nearObj) || (Array.isArray(item?.nearHandles) && item.nearHandles.length > 0)
-  ), []);
-
-  const hasLodRenderable = useCallback((item) => (
-    Boolean(item?.lodObj) || (Array.isArray(item?.lodHandles) && item.lodHandles.length > 0)
-  ), []);
-
-  const collectGroundScanChunks = useCallback((camera, renderDistance, priorityDistance) => {
-    const chunkLookup = renderChunkLookupRef.current;
-    if (!(chunkLookup instanceof Map) || chunkLookup.size === 0 || !camera) return [];
-
-    const cameraForward = new THREE.Vector3();
-    camera.getWorldDirection(cameraForward);
-    const scanNdcY = cameraForward.y > 0 ? -1 : 1;
-    const fallbackDirection = cameraForward.clone();
-    fallbackDirection.y = 0;
-    if (fallbackDirection.lengthSq() <= 1e-6) fallbackDirection.set(0, 0, 1);
-    fallbackDirection.normalize();
-
-    const cameraPoint = new THREE.Vector2(camera.position.x, camera.position.z);
-    const chunks = [];
-    const seen = new Set();
-
-    const collectTriangleChunks = (distance) => {
-      const scanDistance = Math.max(WORLD_CHUNK_SIZE, distance + CHUNK_ACTIVE_MARGIN);
-      const leftPoint = toGroundScanPoint(camera, -1, scanNdcY, scanDistance, fallbackDirection);
-      const rightPoint = toGroundScanPoint(camera, 1, scanNdcY, scanDistance, fallbackDirection);
-      const minX = Math.min(cameraPoint.x, leftPoint.x, rightPoint.x) - (WORLD_CHUNK_SIZE * 2);
-      const maxX = Math.max(cameraPoint.x, leftPoint.x, rightPoint.x) + (WORLD_CHUNK_SIZE * 2);
-      const minZ = Math.min(cameraPoint.y, leftPoint.y, rightPoint.y) - (WORLD_CHUNK_SIZE * 2);
-      const maxZ = Math.max(cameraPoint.y, leftPoint.y, rightPoint.y) + (WORLD_CHUNK_SIZE * 2);
-      const startCx = Math.floor(minX / WORLD_CHUNK_SIZE) - 1;
-      const endCx = Math.floor(maxX / WORLD_CHUNK_SIZE) + 1;
-      const startCz = Math.floor(minZ / WORLD_CHUNK_SIZE) - 1;
-      const endCz = Math.floor(maxZ / WORLD_CHUNK_SIZE) + 1;
-
-      for (let cx = startCx; cx <= endCx; cx += 1) {
-        for (let cz = startCz; cz <= endCz; cz += 1) {
-          const chunk = chunkLookup.get(getChunkKeyFromCoords(cx, cz));
-          if (!chunk || seen.has(chunk)) continue;
-          const chunkMinX = (chunk.boundingBox?.min?.x ?? ((cx * WORLD_CHUNK_SIZE) - CHUNK_CULL_MARGIN_XZ));
-          const chunkMaxX = (chunk.boundingBox?.max?.x ?? (((cx + 1) * WORLD_CHUNK_SIZE) + CHUNK_CULL_MARGIN_XZ));
-          const chunkMinZ = (chunk.boundingBox?.min?.z ?? ((cz * WORLD_CHUNK_SIZE) - CHUNK_CULL_MARGIN_XZ));
-          const chunkMaxZ = (chunk.boundingBox?.max?.z ?? (((cz + 1) * WORLD_CHUNK_SIZE) + CHUNK_CULL_MARGIN_XZ));
-          if (!triangleIntersectsChunkXZ(cameraPoint, leftPoint, rightPoint, chunkMinX, chunkMinZ, chunkMaxX, chunkMaxZ)) {
-            continue;
-          }
-          seen.add(chunk);
-          chunks.push(chunk);
-        }
-      }
-    };
-
-    const resolvedRenderDistance = Math.max(WORLD_CHUNK_SIZE, renderDistance || WORLD_CHUNK_SIZE);
-    const resolvedPriorityDistance = Math.max(
-      WORLD_CHUNK_SIZE,
-      Math.min(resolvedRenderDistance, priorityDistance || Math.min(resolvedRenderDistance, resolvedRenderDistance * 0.2)),
-    );
-    collectTriangleChunks(resolvedPriorityDistance);
-    if (resolvedRenderDistance > resolvedPriorityDistance + 1) {
-      collectTriangleChunks(resolvedRenderDistance);
-    }
-
-    return chunks;
-  }, []);
-
-  const collectRenderSideFrameVisibility = useCallback((frameVisibility, item, side) => {
-    const sideState = side === 'near' ? item?.nearState : item?.lodState;
-    if (!frameVisibility || !sideState) return;
-    if ((sideState.currentOpacity ?? 0) <= RW_FADE_EPSILON) return;
-
-    addVisibleItem(frameVisibility, item);
-
-    if (sideState.proxyRoot?.visible) {
-      for (const mesh of getCachedQueueMeshes(sideState.proxyRoot)) {
-        addVisibleQueueMesh(frameVisibility, mesh);
-      }
-      return;
-    }
-
-    if (sideState.renderObject?.visible) {
-      for (const mesh of getCachedQueueMeshes(sideState.renderObject)) {
-        addVisibleQueueMesh(frameVisibility, mesh);
-      }
-    }
-
-    const handles = side === 'near' ? item?.nearHandles : item?.lodHandles;
-    if (!Array.isArray(handles) || handles.length === 0) return;
-    for (const handle of handles) {
-      if (!handle?.visible || !handle?.batch?.mesh) continue;
-      addVisibleQueueMesh(frameVisibility, handle.batch.mesh);
-    }
-  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -3339,53 +1050,38 @@ function App() {
     let renderer = null;
     let cancelled = false;
     let rendererReady = false;
-
-    if (activeBackend === 'WebGPU') {
-      if (!WebGPU.isAvailable()) {
-        pushConsoleLine('warn', 'WebGPU is not supported in this browser. Fallback to WebGL.');
-        setStatus('WebGPU not supported. Switched to WebGL.');
-        uiStateRef.current.backendSelection = 'WebGL';
-        backendSwitchingRef.current = true;
-        setActiveBackend('WebGL');
-        return undefined;
+    const rendererHost = new ThreeRendererHost({
+      backend: activeBackend,
+      canvas,
+      onLog: (level, message) => pushConsoleLine(level, message),
+      onBackendFallback: (nextBackend) => {
+        uiStateRef.current.backendSelection = nextBackend;
+        if (nextBackend !== activeBackend) {
+          setStatus(`${activeBackend} not available. Switched to ${nextBackend}.`);
+          backendSwitchingRef.current = true;
+          setActiveBackend(nextBackend);
+        }
+      },
+    });
+    rendererHostRef.current = rendererHost;
+    rendererHost.initialize(activeBackend).then((nextRenderer) => {
+      if (cancelled) {
+        rendererHost.dispose();
+        return;
       }
-      renderer = new WebGPURenderer({ canvas, antialias: true, alpha: false });
-      renderer.init().then(() => {
-        if (cancelled) {
-          renderer.dispose();
-          return;
-        }
+      renderer = nextRenderer;
+      rendererRef.current = nextRenderer;
+      if (activeBackend === 'WebGPU' && rendererHost.backend === 'WebGPU') {
         pushConsoleLine('info', 'WebGPU backend initialized');
-        resize();
-        rendererReady = true;
-        backendSwitchingRef.current = false;
-      }).catch((error) => {
-        if (cancelled) return;
-        pushConsoleLine('error', `WebGPU init failed: ${formatConsoleArg(error)}. Fallback to WebGL.`);
-        setStatus('WebGPU init failed. Switched to WebGL.');
-        uiStateRef.current.backendSelection = 'WebGL';
-        setActiveBackend('WebGL');
-        try {
-          renderer.dispose();
-        } catch {
-          // ignore disposal errors in fallback path
-        }
-        renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-        rendererRef.current = renderer;
-        resize();
-        rendererReady = true;
-        backendSwitchingRef.current = false;
-      });
-    } else {
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      }
+      resize();
       rendererReady = true;
       backendSwitchingRef.current = false;
-    }
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.NoToneMapping;
-    if (renderer.info) {
-      renderer.info.autoReset = false;
-    }
+    }).catch((error) => {
+      if (cancelled) return;
+      pushConsoleLine('error', `Renderer init failed: ${formatConsoleArg(error)}`);
+      setStatus(`Renderer init failed: ${formatConsoleArg(error)}`);
+    });
 
     canvas.tabIndex = 1;
 
@@ -3479,6 +1175,7 @@ function App() {
     const hudCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
     hudCamera.position.set(0, 0, 1);
     const skyFeature = new SkyRendererBundle();
+    skyFeature.setParticleTextures(skyParticleTexturesRef.current);
 
     const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 60000);
     camera.up.copy(WORLD_UP);
@@ -3600,8 +1297,9 @@ function App() {
     fluffyHighlightSpritesRef.current = fluffyHighlightSprites;
     fluffyHighlightTextureRef.current = fluffyHighlightTexture;
     skyFeatureRef.current = skyFeature;
-    jsrwSessionRef.current.setRoot(worldRootRef.current);
-    rwRenderQueueRef.current = jsrwSessionRef.current.getRenderQueue() || jsrwSessionRef.current.createRenderQueue(worldRootRef.current);
+    const jsrwSession = jsrwSessionRef.current;
+    jsrwSession.setRoot(worldRootRef.current);
+    rwRenderQueueRef.current = jsrwSession.getRenderQueue() || jsrwSession.createRenderQueue(worldRootRef.current);
     gridRef.current = grid;
     axesRef.current = axes;
     sunLightRef.current = sun;
@@ -3618,8 +1316,7 @@ function App() {
       hudCamera.updateProjectionMatrix();
       lodUpdateStateRef.current.needsRefresh = true;
       if (!rendererReady) return;
-      renderer.setPixelRatio(dpr);
-      renderer.setSize(width, height, false);
+      rendererHost.resize({ width, height, dpr });
       skyFeature.setViewport(width * dpr, height * dpr);
     };
 
@@ -3999,18 +1696,10 @@ function App() {
         }
       }
 
-      const timecycleInfo = timecycleStateRef.current;
-      const parsedTimecycle = timecycleDataRef.current;
-      if (parsedTimecycle) {
-        const sampled = applyTimecycleOverrides(
-          sampleTimecyc(parsedTimecycle, timecycleInfo.controls),
-          timecycleInfo.controls?.overrides,
-        );
-        timecycleInfo.current = sampled;
-      } else {
-        timecycleInfo.current = null;
-      }
-      const timecycleCurrent = timecycleInfo.current;
+      const timecycleCurrent = gtaSessionRef.current.sampleTimecycle({
+        timecycleDataRef,
+        timecycleStateRef,
+      });
       const livePostFxControlValues = getTimecyclePostFxControlValues(timecycleCurrent?.values);
       const livePostFxControlSignature = getTimecyclePostFxControlSignature(timecycleCurrent?.values);
       const postFxDebugSelection = uiStateRef.current.pipelineDebug?.[RW_PIPELINE_CATEGORY.POSTFX];
@@ -4067,7 +1756,7 @@ function App() {
       const lowCloudAlpha = 1;
       const fluffyCloudAlpha = THREE.MathUtils.clamp(1 - Math.max(foggyness, extraSunnyness), 0, 1) * (160 / 255);
       const skyFeature = skyFeatureRef.current;
-      const sunPipeline = skyFeature?.sun || null;
+      const _sunPipeline = skyFeature?.sun || null;
       const cloudMotion = cloudMotionRef.current;
       if (skyMaterial?.uniforms) {
         const cameraForward = new THREE.Vector3();
@@ -4282,696 +1971,87 @@ function App() {
       }
       scene.background = null;
 
-      lodUpdateAccumulatorRef.current += dt;
-      const lodState = lodUpdateStateRef.current;
-      const drawDistance = uiStateRef.current.drawDistance;
-      const renderingDistance = effectiveFarClip;
-      const showLods = uiStateRef.current.showLods;
-      const forceLodOnly = uiStateRef.current.forceLodOnly;
-      const showTobjs = uiStateRef.current.showTobjs;
-
-      const configChanged = (
-        lodState.lastDrawDistance !== drawDistance
-        || lodState.lastRenderingDistance !== renderingDistance
-        || lodState.lastShowLods !== showLods
-        || lodState.lastForceLodOnly !== forceLodOnly
-        || lodState.lastShowTobjs !== showTobjs
-      );
-      if (configChanged) {
-        lodState.lastDrawDistance = drawDistance;
-        lodState.lastRenderingDistance = renderingDistance;
-        lodState.lastShowLods = showLods;
-        lodState.lastForceLodOnly = forceLodOnly;
-        lodState.lastShowTobjs = showTobjs;
-        lodState.needsRefresh = true;
-      }
-
-      const knownCameraPos = Number.isFinite(lodState.lastCameraPos.x)
-        && Number.isFinite(lodState.lastCameraPos.y)
-        && Number.isFinite(lodState.lastCameraPos.z);
-      if (!knownCameraPos || camera.position.distanceToSquared(lodState.lastCameraPos) > 9) {
-        lodState.lastCameraPos.copy(camera.position);
-        lodState.needsRefresh = true;
-      }
-
-      const knownCameraQuat = Number.isFinite(lodState.lastCameraQuat.x)
-        && Number.isFinite(lodState.lastCameraQuat.y)
-        && Number.isFinite(lodState.lastCameraQuat.z)
-        && Number.isFinite(lodState.lastCameraQuat.w);
-      const cameraQuatDot = knownCameraQuat ? Math.abs(camera.quaternion.dot(lodState.lastCameraQuat)) : 0;
-      if (!knownCameraQuat || cameraQuatDot < 0.99995) {
-        lodState.lastCameraQuat.copy(camera.quaternion);
-        lodState.needsRefresh = true;
-      }
-
-      const projectionChanged = (
-        Math.abs((lodState.lastCameraAspect ?? 0) - camera.aspect) > 1e-6
-        || Math.abs((lodState.lastCameraFov ?? 0) - camera.fov) > 1e-6
-        || Math.abs((lodState.lastCameraNear ?? 0) - camera.near) > 1e-6
-        || Math.abs((lodState.lastCameraFar ?? 0) - camera.far) > 1e-6
-      );
-      if (projectionChanged) {
-        lodState.lastCameraAspect = camera.aspect;
-        lodState.lastCameraFov = camera.fov;
-        lodState.lastCameraNear = camera.near;
-        lodState.lastCameraFar = camera.far;
-        lodState.needsRefresh = true;
-      }
-
-      const needsFadeTick = activeFadeCountRef.current > 0;
-      if ((lodState.needsRefresh || needsFadeTick) && lodUpdateAccumulatorRef.current >= 0.02) {
-        lodUpdateAccumulatorRef.current = 0;
-        const distanceFadeConfig = DISTANCE_FADE_DEFAULTS;
-        const fadeEpsilon = RenderEntityController.getEpsilon(distanceFadeConfig);
-        const frameVisibility = resetFrameVisibilityResult(frameVisibilityRef.current);
-        const chunkActiveDist = renderingDistance + CHUNK_ACTIVE_MARGIN;
-        const chunkActiveDistSq = chunkActiveDist * chunkActiveDist;
-        const chunkFrustum = chunkFrustumRef.current;
-        const chunkProjScreenMatrix = chunkProjScreenMatrixRef.current;
-        chunkProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-        chunkFrustum.setFromProjectionMatrix(chunkProjScreenMatrix);
-        const dirtyBatches = new Set();
-        const chunkScanDistance = (!showLods || forceLodOnly)
-          ? renderingDistance
-          : Math.min(renderingDistance, drawDistance);
-        const candidateChunks = collectGroundScanChunks(camera, chunkScanDistance, drawDistance);
-        candidateChunks.sort((a, b) => {
-          const da = camera.position.distanceToSquared(a.center);
-          const db = camera.position.distanceToSquared(b.center);
-          return da - db;
-        });
-        const occlusionState = resetChunkOcclusionState(chunkOcclusionStateRef.current);
-        const bigBuildingItems = bigBuildingItemsRef.current;
-        const previousActiveChunks = activeRenderChunksRef.current;
-        const nextActiveChunks = new Set();
-        const protectedItems = new Set();
-        const processedItems = new Set();
-        let activeChunks = 0;
-        let frustumChunks = 0;
-        let activeItems = 0;
-        let visibleNear = 0;
-        let visibleLod = 0;
-        let activeFades = 0;
-        const processRenderItem = (item, { checkOcclusion = false } = {}) => {
-          if (!item || processedItems.has(item)) return;
-          processedItems.add(item);
-
-          const itemInFrustum = item.boundingBox?.isBox3
-            ? chunkFrustum.intersectsBox(item.boundingBox)
-            : chunkFrustum.intersectsSphere(item.boundingSphere);
-          if (!itemInFrustum) {
-            hideRenderItemCompletely(item, dirtyBatches);
-            return;
-          }
-          if (checkOcclusion && isChunkOccluded(occlusionState, camera, item)) {
-            hideRenderItemCompletely(item, dirtyBatches);
-            return;
-          }
-
-          activeItems += 1;
-          const distSq = camera.position.distanceToSquared(item.anchor);
-          const hasNear = hasNearRenderable(item);
-          const hasLod = hasLodRenderable(item);
-          const tobjAllowed = !item.isTobj || showTobjs;
-          const dist = Math.sqrt(distSq);
-          if (!tobjAllowed || !RenderEntityController.isWithinDrawDistance(dist, renderingDistance, distanceFadeConfig)) {
-            hideRenderItemCompletely(item, dirtyBatches);
-            return;
-          }
-
-          const pairedItem = hasNear && hasLod;
-          const nearConfiguredDistance = resolveRenderableDistance(
-            item.nearState?.drawDistance,
-            showLods ? drawDistance : renderingDistance,
-          );
-          const nearEndDistance = Math.min(nearConfiguredDistance, renderingDistance);
-          const lodEndDistance = Math.min(
-            resolveRenderableDistance(item.lodState?.drawDistance, renderingDistance),
-            renderingDistance,
-          );
-
-          let nearShouldShow = false;
-          let lodShouldShow = false;
-          let nearOpacity = 0;
-          let lodOpacity = 0;
-
-          if (pairedItem && showLods && !forceLodOnly) {
-            const nearCoreRange = dist <= drawDistance;
-            const nearFadeRange = RenderEntityController.isWithinDrawDistance(dist, drawDistance, distanceFadeConfig);
-            const lodVisibleRange = RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig);
-
-            if (item.nearState) {
-              nearOpacity = RenderEntityController.updateFade(item.nearState, {
-                targetVisible: nearFadeRange,
-                distance: dist,
-                drawDistance,
-                dt,
-                config: distanceFadeConfig,
-              });
-            }
-            if (item.lodState) {
-              lodOpacity = RenderEntityController.updateFade(item.lodState, {
-                targetVisible: lodVisibleRange,
-                distance: dist,
-                drawDistance: lodEndDistance,
-                dt,
-                config: distanceFadeConfig,
-              });
-            }
-
-            const nearStreamAlpha = item.nearState?.streamAlpha ?? 1;
-            if (nearCoreRange) {
-              lodOpacity = lodVisibleRange
-                ? clamp01((nearStreamAlpha < (1 - fadeEpsilon) ? 1 : 0) * lodOpacity)
-                : 0;
-            }
-            nearShouldShow = nearOpacity > fadeEpsilon;
-            lodShouldShow = lodOpacity > fadeEpsilon;
-          } else {
-            nearShouldShow = hasNear
-              && !forceLodOnly
-              && RenderEntityController.isWithinDrawDistance(dist, nearEndDistance, distanceFadeConfig);
-            const lodShouldShowBase = hasLod
-              && (
-                forceLodOnly
-                || (!showLods && !hasNear)
-                || (showLods && (!hasNear || dist > drawDistance))
-              );
-
-            if (item.nearState) {
-              nearOpacity = RenderEntityController.updateFade(item.nearState, {
-                targetVisible: nearShouldShow,
-                distance: dist,
-                drawDistance: nearEndDistance,
-                dt,
-                config: distanceFadeConfig,
-              });
-            }
-
-            lodShouldShow = hasLod
-              && RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig)
-              && lodShouldShowBase;
-            if (item.lodState) {
-              lodOpacity = RenderEntityController.updateFade(item.lodState, {
-                targetVisible: lodShouldShow,
-                distance: dist,
-                drawDistance: lodEndDistance,
-                dt,
-                config: distanceFadeConfig,
-              });
-            }
-          }
-
-          item.mode = nearOpacity > fadeEpsilon
-            ? (lodOpacity > fadeEpsilon ? 'near+lod' : 'near')
-            : (lodOpacity > fadeEpsilon ? 'lod' : 'hidden');
-
-          if (nearOpacity > fadeEpsilon) visibleNear += 1;
-          if (lodOpacity > fadeEpsilon) visibleLod += 1;
-
-          applyRenderSideOpacity(item, 'near', nearOpacity, dirtyBatches);
-          applyRenderSideOpacity(item, 'lod', lodOpacity, dirtyBatches);
-          collectRenderSideFrameVisibility(frameVisibility, item, 'near');
-          collectRenderSideFrameVisibility(frameVisibility, item, 'lod');
-
-          const itemHasActiveFade = (
-            (nearOpacity > fadeEpsilon && nearOpacity < (1 - fadeEpsilon))
-            || (lodOpacity > fadeEpsilon && lodOpacity < (1 - fadeEpsilon))
-            || (nearShouldShow && (item.nearState?.streamAlpha ?? 1) < (1 - fadeEpsilon))
-            || (lodShouldShow && (item.lodState?.streamAlpha ?? 1) < (1 - fadeEpsilon))
-            || (!nearShouldShow && (item.nearState?.streamAlpha ?? 0) > fadeEpsilon)
-            || (!lodShouldShow && (item.lodState?.streamAlpha ?? 0) > fadeEpsilon)
-          );
-          if (itemHasActiveFade) {
-            activeFades += 1;
-          }
-          if (
-            nearOpacity > fadeEpsilon
-            || lodOpacity > fadeEpsilon
-            || (item.nearState?.streamAlpha ?? 0) > fadeEpsilon
-            || (item.lodState?.streamAlpha ?? 0) > fadeEpsilon
-          ) {
-            protectedItems.add(item);
-          }
-        };
-        for (const chunk of candidateChunks) {
-          const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
-          const chunkInFrustum = chunkInRange && (
-            chunk.boundingBox?.isBox3
-              ? chunkFrustum.intersectsBox(chunk.boundingBox)
-              : chunkFrustum.intersectsSphere(chunk.boundingSphere)
-          );
-          if (chunkInRange) frustumChunks += chunkInFrustum ? 1 : 0;
-          if (!chunkInFrustum) {
-            if (chunk.active) {
-              chunk.active = false;
-              for (const item of chunk.items) {
-                hideRenderItemCompletely(item, dirtyBatches);
-              }
-            }
-            continue;
-          }
-          if (isChunkOccluded(occlusionState, camera, chunk)) {
-            if (chunk.active) {
-              chunk.active = false;
-              for (const item of chunk.items) {
-                hideRenderItemCompletely(item, dirtyBatches);
-              }
-            }
-            continue;
-          }
-
-          chunk.active = true;
-          nextActiveChunks.add(chunk);
-          activeChunks += 1;
-          addVisibleChunk(frameVisibility, chunk);
-          for (const emitter of chunk.coronaEmitters) addCoronaCandidate(frameVisibility, emitter);
-          for (const emitter of chunk.shadowEmitters) addShadowCandidate(frameVisibility, emitter);
-          for (const item of chunk.items) {
-            processRenderItem(item);
-          }
-          registerChunkOccluder(occlusionState, camera, chunk);
-        }
-        for (const item of bigBuildingItems) {
-          processRenderItem(item, { checkOcclusion: true });
-        }
-        for (const chunk of previousActiveChunks) {
-          if (nextActiveChunks.has(chunk)) continue;
-          if (!chunk?.active) continue;
-          chunk.active = false;
-          for (const item of chunk.items) {
-            if (protectedItems.has(item)) continue;
-            hideRenderItemCompletely(item, dirtyBatches);
-          }
-        }
-        activeRenderChunksRef.current = nextActiveChunks;
-        for (const batch of dirtyBatches) {
-          flushDirtyInstancedBatch(batch);
-        }
-        renderMetricsRef.current = {
-          ...renderMetricsRef.current,
-          activeChunks,
-          frustumChunks,
-          activeItems,
-          visibleNear,
-          visibleLod,
-          visibleQueueMeshes: frameVisibility.visibleQueueMeshes.length,
-          coronaCandidates: frameVisibility.coronaCandidates.length,
-          shadowCandidates: frameVisibility.shadowCandidates.length,
-        };
-        frameVisibility.computed = true;
-        activeFadeCountRef.current = activeFades;
-        lodState.needsRefresh = activeFades > 0;
-      }
-
-      grid.visible = uiStateRef.current.showGrid;
-      axes.visible = uiStateRef.current.showAxes;
-      if (lastWireframeRef.current !== uiStateRef.current.wireframe) {
-        applyWireframe(worldRootRef.current, uiStateRef.current.wireframe);
-        jsrwSessionRef.current.getWaterRuntime()?.setWireframe(uiStateRef.current.wireframe);
-        lastWireframeRef.current = uiStateRef.current.wireframe;
-      }
-      if (lastDisableVertexColorRef.current !== uiStateRef.current.disableVertexColor) {
-        applyDisableVertexColor(worldRootRef.current, uiStateRef.current.disableVertexColor);
-        lastDisableVertexColorRef.current = uiStateRef.current.disableVertexColor;
-      }
-      if (lastDisableBackfaceCullingRef.current !== uiStateRef.current.disableBackfaceCulling) {
-        applyGlobalBackfaceCulling(worldRootRef.current, uiStateRef.current.disableBackfaceCulling);
-        lastDisableBackfaceCullingRef.current = uiStateRef.current.disableBackfaceCulling;
-      }
-      if (lastRenderWaterRef.current !== uiStateRef.current.renderWater) {
-        jsrwSessionRef.current.getWaterRuntime()?.setEnabled(uiStateRef.current.renderWater);
-        lastRenderWaterRef.current = uiStateRef.current.renderWater;
-      }
-
-      const pipelineRuntimeContext = {
+      gtaSessionRef.current.updateStreaming({
         activeBackend,
-        worldGameVersion: worldGameVersionRef.current,
-        distanceFade: DISTANCE_FADE_DEFAULTS,
-        postFxDebugCapture: isWindowOpen('rendering'),
-        timecycleCurrent,
-        ambientColor: timecycleCurrent?.values?.ambient
-          ? toThreeColorFromTimecycleValue(timecycleCurrent.values.ambient)
-          : RW_PIPELINE_FALLBACK_AMBIENT,
-        emissiveColor: timecycleCurrent?.values?.ambientBl
-          ? toThreeColorFromTimecycleValue(timecycleCurrent.values.ambientBl)
-          : RW_PIPELINE_FALLBACK_EMISSIVE,
-        fallbackAmbient: RW_PIPELINE_FALLBACK_AMBIENT,
-        fallbackEmissive: RW_PIPELINE_FALLBACK_EMISSIVE,
-        fogColor: timecycleCurrent?.three?.fogColor?.isColor ? timecycleCurrent.three.fogColor : null,
-        fogStart: Number.isFinite(timecycleCurrent?.values?.fogStart) ? timecycleCurrent.values.fogStart : null,
-        fogEnd: Number.isFinite(timecycleCurrent?.values?.farClip) ? timecycleCurrent.values.farClip : null,
-      };
-      jsrwSessionRef.current.setBackend(activeBackend);
-      jsrwSessionRef.current.setSelection(uiStateRef.current.pipelineDebug);
-      const pipelineSelectionSignature = getPipelineSelectionSignature(
-        uiStateRef.current.pipelineDebug,
-        activeBackend,
-        worldGameVersionRef.current,
-      );
-      if (pipelineSelectionSignature !== lastPipelineSelectionSignatureRef.current) {
-        jsrwSessionRef.current.applyToRoot(worldRootRef.current, pipelineRuntimeContext);
-        applyWireframe(worldRootRef.current, uiStateRef.current.wireframe);
-        applyDisableVertexColor(worldRootRef.current, uiStateRef.current.disableVertexColor);
-        applyGlobalBackfaceCulling(worldRootRef.current, uiStateRef.current.disableBackfaceCulling);
-        lastPipelineSelectionSignatureRef.current = pipelineSelectionSignature;
-        rwRenderQueueRef.current?.markDirty();
-        jsrwSessionRef.current.getCoronaRuntime()?.markOccludersDirty?.();
-        jsrwSessionRef.current.getShadowRuntime()?.markSceneMeshesDirty?.();
-      } else {
-        jsrwSessionRef.current.updateRuntime(pipelineRuntimeContext);
-      }
+        activeFadeCountRef,
+        activeRenderChunksRef,
+        bigBuildingItemsRef,
+        camera,
+        chunkFrustumRef,
+        chunkOcclusionStateRef,
+        chunkProjScreenMatrixRef,
+        dt,
+        effectiveFarClip,
+        frameVisibilityRef,
+        lodUpdateAccumulatorRef,
+        lodUpdateStateRef,
+        renderChunkLookupRef,
+        renderMetricsRef,
+        rwRenderQueueRef,
+        timecycleStateRef,
+        uiStateRef,
+        worldGameVersionRef,
+        worldRootRef,
+      });
 
-      if (!renderResourcesReadyRef.current) {
-        renderer.setRenderTarget(null);
-        renderer.autoClear = true;
-        renderer.setClearColor(DEFAULT_SCENE_BACKGROUND, 1);
-        renderer.clear(true, true, true);
-        renderer.autoClear = true;
-      } else {
-
-        const waterPipeline = jsrwSessionRef.current.getWaterRuntime();
-        const coronaRuntime = jsrwSessionRef.current.getCoronaRuntime();
-        const shadowRuntime = jsrwSessionRef.current.getShadowRuntime();
-        const stageWorldStats = { drawCalls: 0, triangles: 0 };
-        const stageWaterStats = { drawCalls: 0, triangles: 0 };
-        const stageSkyStats = { drawCalls: 0, triangles: 0 };
-        const frameVisibility = frameVisibilityRef.current;
-        const renderStages = uiStateRef.current.renderStages || FRAME_STAGE_DEBUG_DEFAULTS;
-        coronaRuntime?.setEnabled(uiStateRef.current.render2dfx);
-        shadowRuntime?.setEnabled(uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled);
-        coronaRuntime?.setDebugShowAll(uiStateRef.current.debug2dfx);
-        waterPipeline?.applySettings({
-          uvSpeed: uiStateRef.current.waterUvSpeed,
-          waveHeight: uiStateRef.current.waterWaveHeight,
-          farAlpha: uiStateRef.current.waterAlpha,
-        });
-        coronaRuntime?.setViewport(viewportWidth, viewportHeight);
-        coronaRuntime?.update(camera, {
-          ...pipelineRuntimeContext,
-          frameVisibility,
-          timeMs: time,
+      try {
+        gtaSessionRef.current.renderFrame({
+          activeBackend,
+          camera,
           dt,
-          viewportWidth,
-          viewportHeight,
-          forceRender2dfx: uiStateRef.current.forceRender2dfx,
-          twoDfx: uiStateRef.current.twoDfx,
-          trafficLights: uiStateRef.current.trafficLights,
-        });
-        shadowRuntime?.update(camera, {
-          ...pipelineRuntimeContext,
-          frameVisibility,
+          frameVisibilityRef,
+          gameIconSprite,
+          grid,
+          axes,
+          hudCamera,
+          hudScene,
+          iconTextures,
+          lastDisableBackfaceCullingRef,
+          lastDisableVertexColorRef,
+          lastPipelineSelectionSignatureRef,
+          lastRenderWaterRef,
+          lastWireframeRef,
+          postFxDebugCapture: isWindowOpen('rendering'),
+          postFxSunCoronaEnabled,
+          pushConsoleLine,
+          render2dfxEnabled: uiStateRef.current.render2dfx,
+          renderMetricsRef,
+          renderResourcesReadyRef,
+          renderer,
+          rwRenderQueueRef,
+          scene,
+          setStatus,
+          showGameIcon: showGameIconRef.current,
+          skyBottomColor,
+          skyCamera: skyCameraRef.current,
+          skyCloudScene: skyCloudSceneRef.current,
+          skyFeature,
+          skyScene: skySceneRef.current,
+          timecycleCurrent,
           timeMs: time,
-          dt,
-          viewportWidth,
+          uiStateRef,
           viewportHeight,
-          forceRender2dfx: uiStateRef.current.forceRender2dfx,
-          trafficLights: uiStateRef.current.trafficLights,
-          shadows: uiStateRef.current.shadows,
+          viewportWidth,
+          worldGameVersionRef,
+          worldRootRef,
         });
-        const skyScene = skySceneRef.current;
-        const skyCamera = skyCameraRef.current;
-        const skyCloudScene = skyCloudSceneRef.current;
-        const farBackgroundColor = skyBottomColor;
-        try {
-          const rwRenderQueue = rwRenderQueueRef.current;
-          const postFxSceneTarget = renderStages.postFx
-            ? jsrwSessionRef.current.beginPostFxSceneCapture({
-              ...pipelineRuntimeContext,
-              viewportWidth,
-              viewportHeight,
-            })
-            : null;
-          rwRenderQueue?.prepareFrame(camera, frameVisibility);
-          const queueStats = rwRenderQueue?.debugStats || {};
-          const hasBlendQueue = (queueStats.transparentCount || 0) > 0;
-          const hasAdditiveQueue = (queueStats.additiveCount || 0) > 0;
-          const hasOverlayQueue = (queueStats.overlayCount || 0) > 0;
-          const transparentBuckets = [];
-          if (renderStages.sceneTransparent && renderStages.sceneBlend && hasBlendQueue) transparentBuckets.push('transparent');
-          if (renderStages.sceneTransparent && renderStages.sceneAdditive && hasAdditiveQueue) transparentBuckets.push('additive');
-          if (renderStages.sceneTransparent && renderStages.sceneOverlay && hasOverlayQueue) transparentBuckets.push('overlay');
-          renderer.setRenderTarget(postFxSceneTarget);
-          renderer.autoClear = true;
-          if (renderStages.skyDome && skyScene && skyCamera) {
-            const beforeSkyDome = takeRenderStatsSnapshot(renderer);
-            renderer.render(skyScene, skyCamera);
-            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSkyDome);
+      } catch (error) {
+        console.error('Renderer runtime error:', error);
+        if (!backendRuntimeFailed) {
+          backendRuntimeFailed = true;
+          pushConsoleLine('error', `Renderer runtime error: ${formatConsoleArg(error)}`);
+          if (activeBackend !== 'WebGL') {
+            setStatus('Renderer backend failed at runtime. Switched to WebGL.');
+            uiStateRef.current.backendSelection = 'WebGL';
+            backendSwitchingRef.current = true;
+            setActiveBackend('WebGL');
           } else {
-            renderer.setClearColor(farBackgroundColor, 1);
-            renderer.clear(true, true, true);
+            setStatus(`Renderer runtime error: ${formatConsoleArg(error)}`);
+            backendSwitchingRef.current = false;
           }
-          renderer.autoClear = false;
-          renderer.clearDepth();
-          if (renderStages.skyBackdrop) {
-            const beforeBackdrop = takeRenderStatsSnapshot(renderer);
-            skyFeature?.renderBackground(renderer);
-            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeBackdrop);
-          }
-          if (renderStages.skyClouds && skyCloudScene) {
-            const beforeClouds = takeRenderStatsSnapshot(renderer);
-            renderer.render(skyCloudScene, camera);
-            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeClouds);
-            renderer.clearDepth();
-          }
-          if (waterPipeline?.hasRenderableWater() && uiStateRef.current.renderWater) {
-            let waterStage = 'update';
-            try {
-              waterPipeline.update(camera, time, dt);
-
-              if (renderStages.sceneOpaque) {
-                waterStage = 'renderSceneOpaque';
-                const beforeOpaque = takeRenderStatsSnapshot(renderer);
-                rwRenderQueue?.renderOpaque(renderer, camera, {
-                  allowedBuckets: ['opaque', 'cutout'],
-                  fog: scene.fog || null,
-                });
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaque);
-              }
-
-              if (renderStages.waterFar) {
-                waterStage = 'renderFar';
-                const beforeWaterFar = takeRenderStatsSnapshot(renderer);
-                waterPipeline.renderFar(renderer, camera, null);
-                accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterFar);
-              }
-
-              if (renderStages.waterNear) {
-                waterStage = 'renderNear';
-                const beforeWaterNear = takeRenderStatsSnapshot(renderer);
-                waterPipeline.renderNear(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterNear);
-              }
-
-              if (renderStages.waterWavy) {
-                waterStage = 'renderWavy';
-                const beforeWaterWavy = takeRenderStatsSnapshot(renderer);
-                waterPipeline.renderWavy(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterWavy);
-              }
-
-              if (renderStages.waterWake) {
-                waterStage = 'renderWake';
-                const beforeWaterWake = takeRenderStatsSnapshot(renderer);
-                waterPipeline.renderWake(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterWake);
-              }
-
-              if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
-                const beforeShadows = takeRenderStatsSnapshot(renderer);
-                shadowRuntime?.render(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadows);
-              }
-              if (transparentBuckets.length > 0) {
-                waterStage = 'renderSceneTransparent';
-                const beforeTransparent = takeRenderStatsSnapshot(renderer);
-                rwRenderQueue?.renderTransparent(renderer, camera, {
-                  allowedBuckets: transparentBuckets,
-                  fog: scene.fog || null,
-                });
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparent);
-              }
-              if (renderStages.coronas) {
-                const beforeCoronas = takeRenderStatsSnapshot(renderer);
-                coronaRuntime?.render(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCoronas);
-              }
-              renderer.autoClear = true;
-            } catch (waterError) {
-              rwRenderQueue?.popCameraBucketMask(camera);
-              rwRenderQueue?.popCameraBucketMask(camera);
-              console.error('Water pipeline runtime error:', waterError);
-              const farPos = waterPipeline?.farMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
-              const farUv = waterPipeline?.farMesh?.geometry?.getAttribute?.('uv')?.array?.byteLength ?? 'missing';
-              const farIndex = waterPipeline?.farMesh?.geometry?.index?.array?.byteLength ?? 'missing';
-              const nearPos = waterPipeline?.nearMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
-              const nearUv = waterPipeline?.nearMesh?.geometry?.getAttribute?.('uv')?.array?.byteLength ?? 'missing';
-              const nearIndex = waterPipeline?.nearMesh?.geometry?.index?.array?.byteLength ?? 'missing';
-              const nearNormal = waterPipeline?.nearMesh?.geometry?.getAttribute?.('normal')?.array?.byteLength ?? 'missing';
-              const wakePos = waterPipeline?.wakeMesh?.geometry?.getAttribute?.('position')?.array?.byteLength ?? 'missing';
-              pushConsoleLine('error', `Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}`);
-              pushConsoleLine(
-                'error',
-                `Water buffers: far.pos=${farPos} far.uv=${farUv} far.idx=${farIndex} near.pos=${nearPos} near.uv=${nearUv} near.idx=${nearIndex} near.normal=${nearNormal} wake.pos=${wakePos}`,
-              );
-              setStatus(`Water runtime error @ ${waterStage}: ${formatConsoleArg(waterError)}. Water disabled.`);
-              jsrwSessionRef.current.disposeWaterRuntime();
-              renderer.autoClear = false;
-              const fallbackBuckets = [];
-              if (renderStages.sceneOpaque) fallbackBuckets.push('opaque', 'cutout');
-              fallbackBuckets.push(...transparentBuckets);
-              if (fallbackBuckets.length > 0) {
-                const opaqueBuckets = fallbackBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
-                const transparentFallbackBuckets = fallbackBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
-                if (opaqueBuckets.length > 0) {
-                  const beforeOpaqueFallback = takeRenderStatsSnapshot(renderer);
-                  rwRenderQueue?.renderOpaque(renderer, camera, {
-                    allowedBuckets: opaqueBuckets,
-                    fog: scene.fog || null,
-                  });
-                  accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaqueFallback);
-                }
-                if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
-                  const beforeShadowsFallback = takeRenderStatsSnapshot(renderer);
-                  shadowRuntime?.render(renderer, camera);
-                  accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsFallback);
-                }
-                if (transparentFallbackBuckets.length > 0) {
-                  const beforeTransparentFallback = takeRenderStatsSnapshot(renderer);
-                  rwRenderQueue?.renderTransparent(renderer, camera, {
-                    allowedBuckets: transparentFallbackBuckets,
-                    fog: scene.fog || null,
-                  });
-                  accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparentFallback);
-                }
-              } else if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
-                const beforeShadowsFallback = takeRenderStatsSnapshot(renderer);
-                shadowRuntime?.render(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsFallback);
-              }
-              if (renderStages.coronas) {
-                const beforeCoronasFallback = takeRenderStatsSnapshot(renderer);
-                coronaRuntime?.render(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCoronasFallback);
-              }
-            }
-          } else {
-            renderer.autoClear = false;
-            const sceneBuckets = [];
-            if (renderStages.sceneOpaque) sceneBuckets.push('opaque', 'cutout');
-            sceneBuckets.push(...transparentBuckets);
-            if (sceneBuckets.length > 0) {
-              const opaqueBuckets = sceneBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
-              const transparentSceneBuckets = sceneBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
-              if (opaqueBuckets.length > 0) {
-                const beforeOpaqueNoWater = takeRenderStatsSnapshot(renderer);
-                rwRenderQueue?.renderOpaque(renderer, camera, {
-                  allowedBuckets: opaqueBuckets,
-                  fog: scene.fog || null,
-                });
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaqueNoWater);
-              }
-              if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
-                const beforeShadowsNoWater = takeRenderStatsSnapshot(renderer);
-                shadowRuntime?.render(renderer, camera);
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsNoWater);
-              }
-              if (transparentSceneBuckets.length > 0) {
-                const beforeTransparentNoWater = takeRenderStatsSnapshot(renderer);
-                rwRenderQueue?.renderTransparent(renderer, camera, {
-                  allowedBuckets: transparentSceneBuckets,
-                  fog: scene.fog || null,
-                });
-                accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparentNoWater);
-              }
-            } else if (uiStateRef.current.render2dfx && uiStateRef.current.shadows.enabled) {
-              const beforeShadowsNoWater = takeRenderStatsSnapshot(renderer);
-              shadowRuntime?.render(renderer, camera);
-              accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadowsNoWater);
-            }
-            if (renderStages.coronas) {
-              const beforeCoronasNoWater = takeRenderStatsSnapshot(renderer);
-              coronaRuntime?.render(renderer, camera);
-              accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCoronasNoWater);
-            }
-          }
-          if (postFxSceneTarget && postFxSunCoronaEnabled && renderStages.sunBloom) {
-            renderer.clearDepth();
-            const beforeSunBloom = takeRenderStatsSnapshot(renderer);
-            skyFeature?.renderSun(renderer, { mode: 'bloom' });
-            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSunBloom);
-          }
-          renderer.setRenderTarget(null);
-          if (postFxSceneTarget) {
-            jsrwSessionRef.current.renderPostFx(renderer, {
-              ...pipelineRuntimeContext,
-              viewportWidth,
-              viewportHeight,
-            });
-          }
-          if (renderStages.sunFinal) {
-            renderer.clearDepth();
-            const beforeSunFinal = takeRenderStatsSnapshot(renderer);
-            skyFeature?.renderSun(renderer, { mode: 'full' });
-            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSunFinal);
-          }
-
-          const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
-          gameIconSprite.material.map = iconTextures[activeIcon];
-          gameIconSprite.visible = showGameIconRef.current;
-          const iconPx = 80;
-          const padXPx = 20;
-          const padYPx = 56;
-          gameIconSprite.position.set(
-            1 - ((2 * padXPx) / viewportWidth),
-            1 - ((2 * padYPx) / viewportHeight),
-            0,
-          );
-          gameIconSprite.scale.set(
-            (2 * iconPx) / viewportWidth,
-            (2 * iconPx) / viewportHeight,
-            1,
-          );
-          if (renderStages.hud) {
-            renderer.autoClear = false;
-            renderer.clearDepth();
-            const beforeHud = takeRenderStatsSnapshot(renderer);
-            renderer.render(hudScene, hudCamera);
-            accumulateRenderStatsDelta(renderer, stageSkyStats, beforeHud);
-            renderer.autoClear = true;
-          }
-        } catch (error) {
-          console.error('Renderer runtime error:', error);
-          if (!backendRuntimeFailed) {
-            backendRuntimeFailed = true;
-            pushConsoleLine('error', `Renderer runtime error: ${formatConsoleArg(error)}`);
-            if (activeBackend !== 'WebGL') {
-              setStatus('Renderer backend failed at runtime. Switched to WebGL.');
-              uiStateRef.current.backendSelection = 'WebGL';
-              backendSwitchingRef.current = true;
-              setActiveBackend('WebGL');
-            } else {
-              setStatus(`Renderer runtime error: ${formatConsoleArg(error)}`);
-              backendSwitchingRef.current = false;
-            }
-          }
-          rafId = window.requestAnimationFrame(animate);
-          return;
         }
-        renderMetricsRef.current = {
-          ...renderMetricsRef.current,
-          transparentQueue: rwRenderQueueRef.current?.debugStats?.transparentCount ?? 0,
-          additiveQueue: rwRenderQueueRef.current?.debugStats?.additiveCount ?? 0,
-          overlayQueue: rwRenderQueueRef.current?.debugStats?.overlayCount ?? 0,
-          drawCalls: renderer.info?.render?.calls ?? 0,
-          triangles: renderer.info?.render?.triangles ?? 0,
-          worldDrawCalls: stageWorldStats.drawCalls,
-          worldTriangles: stageWorldStats.triangles,
-          waterDrawCalls: stageWaterStats.drawCalls,
-          waterTriangles: stageWaterStats.triangles,
-          skyDrawCalls: stageSkyStats.drawCalls,
-          skyTriangles: stageSkyStats.triangles,
-        };
+        rafId = window.requestAnimationFrame(animate);
+        return;
       }
 
       const { ImGui, ImGui_Impl, ready } = imguiRef.current;
@@ -6665,7 +3745,8 @@ function App() {
       playerModeManager.destroy();
       orbitControls.dispose();
 
-      if (renderer && typeof renderer.dispose === 'function') renderer.dispose();
+      rendererHost.dispose();
+      rendererHostRef.current = null;
       Object.values(iconTextures).forEach((texture) => texture.dispose());
       iconMaterial.dispose();
       for (const sprite of lowCloudSpritesRef.current) {
@@ -6685,17 +3766,12 @@ function App() {
       skyQuad.geometry.dispose();
       skyMaterial.dispose();
       imguiGlRef.current = null;
-      jsrwSessionRef.current.dispose();
+      jsrwSession.dispose();
       disposeWorld(worldRoot);
     };
   }, [
     activeBackend,
-    applyRenderSideOpacity,
     clearWorld,
-    flushDirtyInstancedBatch,
-    hasLodRenderable,
-    hasNearRenderable,
-    hideRenderItemCompletely,
     isWindowOpen,
     loadDefaultMap,
     openMapPicker,

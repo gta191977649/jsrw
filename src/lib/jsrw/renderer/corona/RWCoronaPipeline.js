@@ -8,7 +8,7 @@ import { resolveTrafficLightPhase } from './TrafficLights.js';
 import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapter.js';
 import {
   DISTANCE_FADE_DEFAULTS,
-} from '../../../renderDistanceFade.js';
+} from '../../gta/core/DistanceFade.js';
 import RenderEntityController from '../common/RenderEntityController.js';
 
 const TMP_POSITION = new THREE.Vector3();

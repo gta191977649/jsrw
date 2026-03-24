@@ -4,7 +4,7 @@ import {
   approachValue,
   computeDistanceFadeAlpha,
   isDistanceWithinFadeWindow,
-} from '../../../renderDistanceFade.js';
+} from '../../gta/core/DistanceFade.js';
 
 function getEntryVisibilityAlpha(entry) {
   return Math.max(Number(entry?.fadeAlpha) || 0, Number(entry?.streamAlpha) || 0);

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getWaterLevelIndex } from '../../../waterpro.js';
+import { getWaterLevelIndex } from '../../utils/waterpro.js';
 
 const DEFAULT_WATER_COLOR = new THREE.Color(0xffffff);
 const RW_DEFAULT_WAVE_HEIGHT = 35.0;

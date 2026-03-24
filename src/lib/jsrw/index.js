@@ -1,8 +1,12 @@
 export { DFFLoader } from './DFFLoader.js';
 export { TXDLoader } from './TXDLoader.js';
+export { DffLoader } from './rw/DffLoader.js';
+export { TxdLoader } from './rw/TxdLoader.js';
 
 export { DffParser } from './formats/dff/DffParser.js';
 export { TxdParser } from './formats/txd/TxdParser.js';
+export { default as ChunkType } from './rw/ChunkType.js';
+export { default as Reader } from './rw/Reader.js';
 
 export {
   RW_ALPHA_REF_DEFAULT,
@@ -16,7 +20,7 @@ export {
   RW_PIPELINE_PLATFORM,
   RW_PIPELINE_SELECTION_DEFAULT,
   RW_PIPELINE_SELECTION_DEFAULTS,
-} from './core/pipeline/constants.js';
+} from './core/pipeline/Constants/index.js';
 
 export {
   cloneRWPipelineSelection,
@@ -26,10 +30,10 @@ export {
   getRWPipelinePlatformOptions,
   resolveRWPipelineSelection,
   resolveRWPipelineSelections,
-} from './core/pipeline/selection.js';
+} from './core/pipeline/Selection/index.js';
 
-export { RWPipelineRegistry } from './core/pipeline/registry.js';
-export { RWPipelineController } from './core/pipeline/controller.js';
+export { RWPipelineRegistry } from './core/pipeline/Registry/index.js';
+export { RWPipelineController } from './core/pipeline/Controller/index.js';
 
 export {
   applyDisableVertexColor,
@@ -68,18 +72,28 @@ export {
 export * from './renderer/world/sky/index.js';
 export { PostFxRuntime } from './renderer/postfx/PostFxRuntime.js';
 export { RWPostFxPipeline } from './renderer/postfx/RWPostFxPipeline.js';
-export { CoronaRuntime } from './renderer/corona/CoronaRuntime.js';
 export { RWCoronaPipeline } from './renderer/corona/RWCoronaPipeline.js';
-export { ShadowRuntime } from './renderer/shadows/ShadowRuntime.js';
 export { RWShadowPipeline } from './renderer/shadows/RWShadowPipeline.js';
 export {
   buildTrafficLightCoronaEmitters,
   isTrafficLightModelName,
   resolveTrafficLightPhase,
 } from './renderer/corona/TrafficLights.js';
-export { WaterRuntime } from './renderer/water/WaterRuntime.js';
 export { RWWaterPipeline } from './renderer/water/RWWaterPipeline.js';
 
 export { JsrwRendererSession } from './integration/JsrwRendererSession.js';
 export { createJsrwRenderer } from './integration/createJsrwRenderer.js';
-export { RWRenderQueue } from './integration/three/RWRenderQueue.js';
+export { Renderer, createRenderer } from './render/Renderer.js';
+export { RWRenderQueue } from './render/RWRenderQueue.js';
+export { RenderQueue } from './render/RenderQueue.js';
+export { CoronaRuntime } from './render/CoronaRuntime.js';
+export { Coronas } from './render/Coronas.js';
+export { ShadowRuntime } from './render/ShadowRuntime.js';
+export { Shadows } from './render/Shadows.js';
+export { WaterRuntime } from './render/WaterRuntime.js';
+export { WaterLevel } from './render/WaterLevel.js';
+export { Streaming } from './core/Streaming.js';
+export { World } from './core/World.js';
+export { RendererHost } from './gta/integration/RendererHost.js';
+export { JsrwGtaSession, createJsrwGtaSession } from './gta/integration/JsrwGtaSession.js';
+export { ThreeRendererHost } from './adapters/three/ThreeRendererHost.js';

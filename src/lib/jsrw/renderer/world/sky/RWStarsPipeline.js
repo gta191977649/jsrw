@@ -11,7 +11,7 @@ import {
   prepareRwSpriteTexture,
   setRwSpriteScreenPosition,
 } from './RWSpriteUtils.js';
-import { gtaPositionToThree } from '../../../../gtaTransforms.js';
+import { gtaPositionToThree } from '../../../utils/gtaTransforms.js';
 
 function createFallbackStarTexture() {
   const canvas = document.createElement('canvas');

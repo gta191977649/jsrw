@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { gtaPositionToThree } from '../../../../gtaTransforms.js';
+import { gtaPositionToThree } from '../../../utils/gtaTransforms.js';
 import { RW_SUN_DEBUG_DEFAULTS, RW_SUN_FLARE_DEFS } from './constants/RWSunConstants.js';
 import { getRWMaterialDescriptor } from '../../../adapters/three/ThreeMaterialAdapter.js';
 import {
