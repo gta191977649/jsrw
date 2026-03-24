@@ -118,6 +118,8 @@ export class FrameComposer {
     const stageWorldStats = { drawCalls: 0, triangles: 0 };
     const stageWaterStats = { drawCalls: 0, triangles: 0 };
     const stageSkyStats = { drawCalls: 0, triangles: 0 };
+    const skyCloudPassStats = { drawCalls: 0, triangles: 0 };
+    let skyCloudsPassInvoked = false;
     const renderStages = uiStateRef.current.renderStages || {};
 
     if (grid) grid.visible = uiStateRef.current.showGrid;
@@ -251,8 +253,25 @@ export class FrameComposer {
     }
     if (renderStages.skyClouds && skyCloudScene) {
       const beforeClouds = takeRenderStatsSnapshot(renderer);
-      renderer.render(skyCloudScene, camera);
+      const originalFar = camera.far;
+      const cloudFar = Math.max(originalFar, 5000);
+      let projectionPatched = false;
+      if (Math.abs(cloudFar - originalFar) > 1e-6) {
+        camera.far = cloudFar;
+        camera.updateProjectionMatrix();
+        projectionPatched = true;
+      }
+      try {
+        renderer.render(skyCloudScene, camera);
+        skyCloudsPassInvoked = true;
+      } finally {
+        if (projectionPatched) {
+          camera.far = originalFar;
+          camera.updateProjectionMatrix();
+        }
+      }
       accumulateRenderStatsDelta(renderer, stageSkyStats, beforeClouds);
+      accumulateRenderStatsDelta(renderer, skyCloudPassStats, beforeClouds);
       renderer.clearDepth();
     }
 
@@ -443,6 +462,9 @@ export class FrameComposer {
       waterTriangles: stageWaterStats.triangles,
       skyDrawCalls: stageSkyStats.drawCalls,
       skyTriangles: stageSkyStats.triangles,
+      skyCloudsPassInvoked,
+      skyCloudsPassDrawCalls: skyCloudPassStats.drawCalls,
+      skyCloudsPassTriangles: skyCloudPassStats.triangles,
     };
   }
 }

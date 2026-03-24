@@ -37,6 +37,7 @@ import {
   SkyRendererBundle,
   ThreeRendererHost,
 } from './lib/jsrw';
+import { prepareRwSpriteTexture } from './lib/jsrw/renderer/world/sky/RWSpriteUtils.js';
 import {
   disposeWorld,
   WORLD_CHUNK_SIZE,
@@ -626,6 +627,9 @@ function App() {
     waterTriangles: 0,
     skyDrawCalls: 0,
     skyTriangles: 0,
+    skyCloudsPassInvoked: false,
+    skyCloudsPassDrawCalls: 0,
+    skyCloudsPassTriangles: 0,
   });
   const selectedObjectRootRef = useRef(null);
   const selectedInstanceHighlightRef = useRef(null);
@@ -689,6 +693,9 @@ function App() {
     moonTexture: null,
     starTexture: null,
     sunTextures: null,
+    lowCloudTextures: null,
+    cloudMaskedTexture: null,
+    cloudHilitTexture: null,
   });
   const streamingBuildRef = useRef({
     token: 0,
@@ -707,14 +714,72 @@ function App() {
         moonTexture: textures.moonTexture || null,
         starTexture: textures.starTexture || null,
         sunTextures: textures.sunTextures || null,
+        lowCloudTextures: Array.isArray(textures.lowCloudTextures) ? textures.lowCloudTextures : null,
+        cloudMaskedTexture: textures.cloudMaskedTexture || null,
+        cloudHilitTexture: textures.cloudHilitTexture || null,
       }
       : {
         moonTexture: null,
         starTexture: null,
         sunTextures: null,
+        lowCloudTextures: null,
+        cloudMaskedTexture: null,
+        cloudHilitTexture: null,
       };
     skyParticleTexturesRef.current = nextTextures;
     skyFeatureRef.current?.setParticleTextures(nextTextures);
+
+    const lowArr = nextTextures.lowCloudTextures;
+    const lowSprites = lowCloudSpritesRef.current;
+    if (Array.isArray(lowSprites) && lowSprites.length > 0 && Array.isArray(lowArr)) {
+      const fallback = prepareRwSpriteTexture(lowArr[0] || lowArr[1] || lowArr[2]);
+      for (let i = 0; i < lowSprites.length; i += 1) {
+        const raw = lowArr[i % 3] || lowArr[0];
+        const tex = prepareRwSpriteTexture(raw) || fallback;
+        if (tex && lowSprites[i]?.material) {
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+          lowSprites[i].material.map = tex;
+          lowSprites[i].material.needsUpdate = true;
+        }
+      }
+    }
+
+    const masked = nextTextures.cloudMaskedTexture;
+    if (masked) {
+      const tex = prepareRwSpriteTexture(masked);
+      if (tex) {
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        // TXD textures are straight-alpha (see normalizeTextureDictionary / premultiplyAlpha: false).
+        // Procedural canvas used premultipliedAlpha + premultiplied canvas; mismatch → white fringes.
+        tex.premultiplyAlpha = false;
+        for (const sprite of fluffyCloudSpritesRef.current) {
+          if (sprite?.material) {
+            sprite.material.map = tex;
+            sprite.material.premultipliedAlpha = false;
+            sprite.material.needsUpdate = true;
+          }
+        }
+      }
+    }
+
+    const hilit = nextTextures.cloudHilitTexture;
+    if (hilit) {
+      const tex = prepareRwSpriteTexture(hilit);
+      if (tex) {
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.premultiplyAlpha = false;
+        for (const sprite of fluffyHighlightSpritesRef.current) {
+          if (sprite?.material) {
+            sprite.material.map = tex;
+            sprite.material.premultipliedAlpha = false;
+            sprite.material.needsUpdate = true;
+          }
+        }
+      }
+    }
   }, []);
 
   const imguiRef = useRef({ ImGui: null, ImGui_Impl: null, ready: false });
@@ -1130,6 +1195,9 @@ function App() {
         toneMapped: false,
       });
       const sprite = new THREE.Sprite(material);
+      // RW draws these as screen-space billboards; world-space centers sit far off-axis and
+      // would be frustum-culled even when the quad should cover the sky.
+      sprite.frustumCulled = false;
       sprite.scale.set(900, 120, 1);
       sprite.renderOrder = -900;
       skyCloudScene.add(sprite);
@@ -1149,6 +1217,7 @@ function App() {
         toneMapped: false,
       });
       const sprite = new THREE.Sprite(material);
+      sprite.frustumCulled = false;
       sprite.scale.set(110, 110, 1);
       sprite.renderOrder = -850;
       skyCloudScene.add(sprite);
@@ -1166,6 +1235,7 @@ function App() {
         toneMapped: false,
       });
       const sprite = new THREE.Sprite(material);
+      sprite.frustumCulled = false;
       sprite.scale.set(60, 60, 1);
       sprite.renderOrder = -840;
       skyCloudScene.add(sprite);
@@ -2781,6 +2851,9 @@ function App() {
               ImGui.Text(`World: calls ${renderMetrics.worldDrawCalls} | tris ${renderMetrics.worldTriangles}`);
               ImGui.Text(`Water: calls ${renderMetrics.waterDrawCalls} | tris ${renderMetrics.waterTriangles}`);
               ImGui.Text(`Sky/HUD: calls ${renderMetrics.skyDrawCalls} | tris ${renderMetrics.skyTriangles}`);
+              ImGui.Text(
+                `Sky clouds pass: ${renderMetrics.skyCloudsPassInvoked ? 'yes' : 'no'} | calls ${renderMetrics.skyCloudsPassDrawCalls ?? 0} | tris ${renderMetrics.skyCloudsPassTriangles ?? 0}`,
+              );
               ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
               ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
               ImGui.Text(`Transparent Queue: blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);

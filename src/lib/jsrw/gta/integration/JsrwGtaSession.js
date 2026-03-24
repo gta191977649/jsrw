@@ -126,6 +126,9 @@ function createRenderMetrics() {
     waterTriangles: 0,
     skyDrawCalls: 0,
     skyTriangles: 0,
+    skyCloudsPassInvoked: false,
+    skyCloudsPassDrawCalls: 0,
+    skyCloudsPassTriangles: 0,
   };
 }
 
@@ -1185,8 +1188,31 @@ export class JsrwGtaSession {
             circle: resolveParticleTexture(particleTextureDictionary, ['coronacircle', 'corona']),
             ring: resolveParticleTexture(particleTextureDictionary, ['coronaringa', 'corona']),
           },
+          // CClouds::Init — revc/src/renderer/Clouds.cpp
+          lowCloudTextures: [
+            resolveParticleTexture(particleTextureDictionary, ['cloud1']),
+            resolveParticleTexture(particleTextureDictionary, ['cloud2']),
+            resolveParticleTexture(particleTextureDictionary, ['cloud3']),
+          ],
+          cloudMaskedTexture: resolveParticleTexture(particleTextureDictionary, ['cloudmasked']),
+          cloudHilitTexture: resolveParticleTexture(particleTextureDictionary, ['cloudhilit', 'cloudhilight']),
         }
         : null;
+      if (particleTextureDictionary) {
+        const hasLow = resolvedParticleTextures?.lowCloudTextures?.some(Boolean);
+        const hasMasked = Boolean(resolvedParticleTextures?.cloudMaskedTexture);
+        if (!hasLow && !hasMasked) {
+          pushConsoleLine?.(
+            'warn',
+            'particle.txd: no cloud1/cloud2/cloud3 or cloudmasked entries found (clouds will use procedural fallback)',
+          );
+        } else {
+          pushConsoleLine?.(
+            'info',
+            `particle.txd clouds: low=${hasLow ? 'cloud1–3' : 'missing'} masked=${hasMasked ? 'yes' : 'no'} hilit=${resolvedParticleTextures?.cloudHilitTexture ? 'yes' : 'no'}`,
+          );
+        }
+      }
       pendingWaterPipeline?.setTexture?.(resolvedParticleTextures?.waterTexture || null);
       onParticleTexturesResolved?.(resolvedParticleTextures);
       if (coronaEmitters.length > 0 && particleTextureDictionary) {
