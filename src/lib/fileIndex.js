@@ -10,8 +10,10 @@ export function buildFileIndex(fileList) {
   const byBasename = new Map();
   const entries = [];
 
-  for (const file of fileList) {
-    const rawPath = String(file.webkitRelativePath || file.name || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
+  for (const inputEntry of fileList) {
+    const file = inputEntry?.file || inputEntry;
+    if (!file) continue;
+    const rawPath = String(inputEntry?.path || file.webkitRelativePath || file.name || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
     const rel = normalizePath(rawPath);
     const entry = {
       file,

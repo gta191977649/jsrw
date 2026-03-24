@@ -7,6 +7,7 @@ import WebGPU from 'three/addons/capabilities/WebGPU.js';
 import { playerController as createExternalPlayerController } from 'three-player-controller';
 import { formatConsoleArg } from './lib/console';
 import { buildFileIndex } from './lib/fileIndex';
+import { expandZipArchive } from './lib/mapArchive';
 import {
   DISTANCE_FADE_DEFAULTS,
   resolveRenderableDistance,
@@ -78,6 +79,7 @@ import { BrowserFileSystem } from './lib/gta/fs/BrowserFileSystem';
 import { WorldLoader } from './lib/gta/world/WorldLoader';
 import saIcon from './assets/sa.png';
 import vcsIcon from './assets/vcs.png';
+import vcsDefaultMapUrl from './assets/maps/vcs.zip?url';
 import skyVertexShader from './shaders/sky.vertex.glsl.js';
 import skyFragmentShader from './shaders/sky.fragment.glsl.js';
 import './App.css';
@@ -940,6 +942,7 @@ function App() {
   const canvasRef = useRef(null);
   const imguiCanvasRef = useRef(null);
   const fileInputRef = useRef(null);
+  const zipInputRef = useRef(null);
 
   const rendererRef = useRef(null);
   const sceneRef = useRef(null);
@@ -1028,8 +1031,9 @@ function App() {
   const axesRef = useRef(null);
   const totalObjectsRef = useRef(0);
   const frameTimeRef = useRef(0);
-  const fpsHistoryRef = useRef(new Float32Array(180));
+  const fpsHistoryRef = useRef(Array.from({ length: 180 }, () => 0));
   const fpsHistoryIndexRef = useRef(0);
+  const fpsSampleCountRef = useRef(0);
   const lodUpdateAccumulatorRef = useRef(0);
   const activeFadeCountRef = useRef(0);
   const lookStateRef = useRef({
@@ -1142,7 +1146,7 @@ function App() {
   });
   const postFxTimecycleSyncSignatureRef = useRef('');
 
-  const [status, setStatus] = useState('Select an extracted GTA folder to begin.');
+  const [status, setStatus] = useState('Select an extracted GTA folder or zip archive to begin.');
   const [activeBackend, setActiveBackend] = useState('WebGL');
   const [buildProgress, setBuildProgress] = useState({ active: false, current: 0, total: 0 });
   const [showGameIcon, setShowGameIcon] = useState(false);
@@ -1459,7 +1463,7 @@ function App() {
   const rebuildWorld = useCallback(async () => {
     const fileIndex = fileIndexRef.current;
     if (!fileIndex) {
-      setStatus('No files loaded. Choose a folder first.');
+      setStatus('No files loaded. Choose a folder or zip archive first.');
       pushConsoleLine('warn', 'Build requested without loaded files');
       return;
     }
@@ -2839,19 +2843,71 @@ function App() {
     }
   }, [activeBackend, clearWorld, pushConsoleLine, pushFailedModel, pushLoadedFile]);
 
-  const onPickFolder = useCallback((event) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length === 0) return;
-
-    const index = buildFileIndex(files);
+  const applyImportedEntries = useCallback((entries, options = {}) => {
+    const index = buildFileIndex(entries);
     fileIndexRef.current = index;
-    pushConsoleLine('info', `Folder indexed: ${index.count} files`);
-
+    pushConsoleLine('info', options.consoleMessage || `Map indexed: ${index.count} files`);
     setStats((prev) => ({ ...prev, files: index.count }));
     setShowMapPickerFallback(false);
-    setStatus(`Indexed ${index.count} files. Click Build World.`);
-    event.target.value = '';
+    setStatus(options.statusMessage || `Indexed ${index.count} files. Click Build World.`);
+    return index;
   }, [pushConsoleLine]);
+
+  const importZipMap = useCallback(async (archiveFile, options = {}) => {
+    const sourceLabel = options.sourceLabel || archiveFile?.name || 'archive.zip';
+    setStatus(`Loading ${sourceLabel}...`);
+    pushConsoleLine('info', `Reading zip archive: ${sourceLabel}`);
+    try {
+      const entries = await expandZipArchive(archiveFile);
+      return applyImportedEntries(entries, {
+        consoleMessage: `Zip indexed: ${sourceLabel} (${entries.length} files)`,
+        statusMessage: `Indexed ${entries.length} files from ${sourceLabel}. Click Build World.`,
+      });
+    } catch (error) {
+      setStatus(`Failed to load ${sourceLabel}.`);
+      pushConsoleLine('error', `Zip import failed: ${sourceLabel} | ${formatConsoleArg(error)}`);
+      return null;
+    }
+  }, [applyImportedEntries, pushConsoleLine]);
+
+  const onPickFolder = useCallback((event) => {
+    const input = event.target;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (files.length === 0) return;
+    applyImportedEntries(files, {
+      consoleMessage: `Folder indexed: ${files.length} files`,
+      statusMessage: `Indexed ${files.length} files. Click Build World.`,
+    });
+  }, [applyImportedEntries]);
+
+  const onPickZip = useCallback(async (event) => {
+    const input = event.target;
+    const archiveFile = input.files?.[0] || null;
+    input.value = '';
+    if (!archiveFile) return;
+    await importZipMap(archiveFile);
+  }, [importZipMap]);
+
+  const loadDefaultMap = useCallback(async (sourceUrl, sourceLabel) => {
+    setStatus(`Loading ${sourceLabel}...`);
+    pushConsoleLine('info', `Fetching default map: ${sourceLabel}`);
+    try {
+      const response = await fetch(sourceUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+      }
+      const archiveBuffer = await response.arrayBuffer();
+      const archiveFile = new File([archiveBuffer], sourceLabel, {
+        lastModified: Date.now(),
+        type: 'application/zip',
+      });
+      await importZipMap(archiveFile, { sourceLabel });
+    } catch (error) {
+      setStatus(`Failed to load ${sourceLabel}.`);
+      pushConsoleLine('error', `Default map load failed: ${sourceLabel} | ${formatConsoleArg(error)}`);
+    }
+  }, [importZipMap, pushConsoleLine]);
 
   const openMapPicker = useCallback((source = 'dom') => {
     const input = fileInputRef.current;
@@ -2886,6 +2942,30 @@ function App() {
         setShowMapPickerFallback(true);
         setStatus('Safari blocked the ImGui file dialog. Click the HUD folder picker below.');
       }
+      return false;
+    }
+  }, []);
+
+  const openZipPicker = useCallback(() => {
+    const input = zipInputRef.current;
+    if (!input) return false;
+
+    input.value = '';
+
+    try {
+      if (typeof input.showPicker === 'function') {
+        input.showPicker();
+        return true;
+      }
+    } catch {
+      // Some browsers only allow file pickers from trusted DOM gestures.
+    }
+
+    try {
+      input.click();
+      return true;
+    } catch {
+      setStatus('Browser blocked the zip file dialog. Use the HUD zip picker below.');
       return false;
     }
   }, []);
@@ -3859,6 +3939,7 @@ function App() {
         const fps = Math.min(240, 1 / dt);
         fpsHistoryRef.current[fpsHistoryIndexRef.current] = fps;
         fpsHistoryIndexRef.current = (fpsHistoryIndexRef.current + 1) % fpsHistoryRef.current.length;
+        fpsSampleCountRef.current = Math.min(fpsSampleCountRef.current + 1, fpsHistoryRef.current.length);
       }
       renderer.info?.reset?.();
 
@@ -4884,8 +4965,20 @@ function App() {
 
         if (ImGui.BeginMainMenuBar()) {
           if (ImGui.BeginMenu('File')) {
-            if (ImGui.MenuItem('Load map')) {
-              openMapPicker('imgui');
+            if (ImGui.BeginMenu('Load map')) {
+              if (ImGui.MenuItem('Extracted folder')) {
+                openMapPicker('imgui');
+              }
+              if (ImGui.MenuItem('Zip archive')) {
+                openZipPicker();
+              }
+              ImGui.EndMenu();
+            }
+            if (ImGui.BeginMenu('Default Maps')) {
+              if (ImGui.MenuItem('vcs.zip')) {
+                void loadDefaultMap(vcsDefaultMapUrl, 'vcs.zip');
+              }
+              ImGui.EndMenu();
             }
             ImGui.EndMenu();
           }
@@ -5441,19 +5534,38 @@ function App() {
         }
 
         if (isWindowOpen('statistics')) {
+          let statisticsWindowBegun = false;
           try {
+            const Vec4 = ImGui.ImVec4 ?? ImGui.Vec4;
             ImGui.SetNextWindowPos(new Vec2(460, 270), ImGui.Cond.Once);
-            ImGui.SetNextWindowSize(new Vec2(360, 180), ImGui.Cond.Once);
+            ImGui.SetNextWindowSize(new Vec2(360, 250), ImGui.Cond.Once);
+            ImGui.SetNextWindowSizeConstraints(new Vec2(260, 200), new Vec2(960, 720));
+            ImGui.SetNextWindowBgAlpha(0.92);
+            ImGui.PushStyleColor(ImGui.Col.WindowBg, new Vec4(0.02, 0.02, 0.02, 0.92));
+            ImGui.PushStyleColor(ImGui.Col.Border, new Vec4(0.92, 0.92, 0.92, 0.95));
+            ImGui.PushStyleColor(ImGui.Col.FrameBg, new Vec4(0.05, 0.05, 0.05, 1.0));
+            ImGui.PushStyleColor(ImGui.Col.PlotLines, new Vec4(0.56, 0.72, 1.0, 1.0));
+            ImGui.PushStyleColor(ImGui.Col.PlotLinesHovered, new Vec4(0.88, 0.92, 1.0, 1.0));
+            ImGui.PushStyleColor(ImGui.Col.Header, new Vec4(0.08, 0.08, 0.08, 1.0));
+            ImGui.PushStyleColor(ImGui.Col.HeaderHovered, new Vec4(0.12, 0.12, 0.12, 1.0));
+            ImGui.PushStyleColor(ImGui.Col.HeaderActive, new Vec4(0.16, 0.16, 0.16, 1.0));
+            ImGui.PushStyleVar(ImGui.StyleVar.WindowPadding, new Vec2(14, 12));
+            ImGui.PushStyleVar(ImGui.StyleVar.WindowBorderSize, 1);
+            ImGui.PushStyleVar(ImGui.StyleVar.WindowRounding, 0);
+            ImGui.PushStyleVar(ImGui.StyleVar.ItemSpacing, new Vec2(6, 4));
             ImGui.Begin(
               'Statistics',
               (value = isWindowOpen('statistics')) => setWindowOpen('statistics', value),
+              0,
             );
+            statisticsWindowBegun = true;
             const fpsValues = fpsHistoryRef.current;
+            const fpsSampleCount = fpsSampleCountRef.current;
             let fpsMin = Number.POSITIVE_INFINITY;
             let fpsMax = 0;
             let fpsSum = 0;
             let fpsCount = 0;
-            for (let i = 0; i < fpsValues.length; i += 1) {
+            for (let i = 0; i < fpsSampleCount; i += 1) {
               const value = fpsValues[i];
               if (value <= 0) continue;
               fpsMin = Math.min(fpsMin, value);
@@ -5464,42 +5576,122 @@ function App() {
             const fpsAvg = fpsCount > 0 ? (fpsSum / fpsCount) : 0;
             const fpsCurrentIndex = (fpsHistoryIndexRef.current - 1 + fpsValues.length) % fpsValues.length;
             const fpsCurrent = fpsValues[fpsCurrentIndex] || 0;
+            const frameCurrentMs = fpsCurrent > 0 ? (1000 / fpsCurrent) : 0;
+            const frameBestMs = fpsMax > 0 ? (1000 / fpsMax) : 0;
+            const frameWorstMs = fpsMin > 0 ? (1000 / fpsMin) : 0;
+            const frameAvgMs = fpsAvg > 0 ? (1000 / fpsAvg) : 0;
             const renderMetrics = renderMetricsRef.current;
-            ImGui.Text(`FPS: ${fpsCurrent.toFixed(1)} | avg ${fpsAvg.toFixed(1)} | min ${fpsCount > 0 ? fpsMin.toFixed(1) : '0.0'} | max ${fpsMax.toFixed(1)}`);
-            ImGui.Text(`Draw Calls: ${renderMetrics.drawCalls}`);
-            ImGui.Text(`Triangles: ${renderMetrics.triangles}`);
-            ImGui.Text(`World: calls ${renderMetrics.worldDrawCalls} | tris ${renderMetrics.worldTriangles}`);
-            ImGui.Text(`Water: calls ${renderMetrics.waterDrawCalls} | tris ${renderMetrics.waterTriangles}`);
-            ImGui.Text(`Sky/HUD: calls ${renderMetrics.skyDrawCalls} | tris ${renderMetrics.skyTriangles}`);
-            ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
-            ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
-            ImGui.Text(`Visible: near ${renderMetrics.visibleNear} | lod ${renderMetrics.visibleLod}`);
-            ImGui.Text(`Transparent Queue: blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
-            ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
-            ImGui.Text(`Lighting: IDE 2DFX ${statsRef.current.ideEffects} | objects ${statsRef.current.lightObjects} | emitters ${statsRef.current.lightEmitters}`);
-            ImGui.Text('FPS Graph');
-            const fpsPlotValues = Array.from({ length: fpsValues.length }, (_, i) => {
-              const idx = (fpsHistoryIndexRef.current + i) % fpsValues.length;
-              const value = fpsValues[idx];
-              return value > 0 ? value : fpsCurrent;
-            });
+            const statisticsWindowSize = ImGui.GetWindowSize();
+            const surfaceWidth = Number(canvasRef.current?.width) || 0;
+            const surfaceHeight = Number(canvasRef.current?.height) || 0;
+            const renderSummaryRow = (label, value, rangeText = '', color = new Vec4(1.0, 1.0, 1.0, 1.0), rangeColor = null) => {
+              const rowStartX = ImGui.GetCursorPosX();
+              const rowAvailWidth = Math.max(120, ImGui.GetContentRegionAvail().x);
+              const stackedLayout = rowAvailWidth < 290;
+              if (stackedLayout) {
+                ImGui.TextUnformatted(`${label}:`);
+                ImGui.SameLine();
+                ImGui.TextColored(color, value);
+                if (rangeText) {
+                  ImGui.PushTextWrapPos(rowStartX + rowAvailWidth);
+                  if (rangeColor) ImGui.TextColored(rangeColor, rangeText);
+                  else ImGui.TextDisabled(rangeText);
+                  ImGui.PopTextWrapPos();
+                }
+                return;
+              }
+
+              const valueColumnX = rowStartX + Math.max(74, Math.min(118, rowAvailWidth * 0.24));
+              const rangeColumnX = rowStartX + Math.max(150, Math.min(228, rowAvailWidth * 0.52));
+              ImGui.TextUnformatted(`${label}:`);
+              ImGui.SameLine(valueColumnX);
+              ImGui.TextColored(color, value);
+              if (rangeText) {
+                ImGui.SameLine(rangeColumnX);
+                ImGui.PushTextWrapPos(rowStartX + rowAvailWidth);
+                if (rangeColor) ImGui.TextColored(rangeColor, rangeText);
+                else ImGui.TextDisabled(rangeText);
+                ImGui.PopTextWrapPos();
+              }
+            };
+            renderSummaryRow('Renderer', activeBackend, `[${surfaceWidth}x${surfaceHeight}]`, new Vec4(1.0, 1.0, 1.0, 1.0), new Vec4(1.0, 1.0, 1.0, 1.0));
+            renderSummaryRow('FPS', fpsCurrent.toFixed(2), `[ ${fpsCount > 0 ? fpsMin.toFixed(2) : '0.00'}  ${fpsAvg.toFixed(2)}  ${fpsMax.toFixed(2)} ]`, new Vec4(0.94, 0.78, 0.34, 1.0));
+            renderSummaryRow('Frame', `${frameCurrentMs.toFixed(2)}ms`, `[ ${frameBestMs.toFixed(2)}  ${frameAvgMs.toFixed(2)}  ${frameWorstMs.toFixed(2)} ]`, new Vec4(0.48, 0.80, 1.0, 1.0));
+            renderSummaryRow('Triangles', `${renderMetrics.triangles}`, `[ world ${renderMetrics.worldTriangles}  water ${renderMetrics.waterTriangles} ]`, new Vec4(0.58, 0.90, 0.55, 1.0));
+            const graphAvailHeight = Math.max(0, ImGui.GetContentRegionAvail().y);
+            const graphAvailWidth = Math.max(1, ImGui.GetContentRegionAvail().x);
+            const fpsGraphHeight = Math.max(
+              72,
+              Math.min(
+                180,
+                Math.max(86, statisticsWindowSize.y * 0.34),
+                graphAvailHeight > 0 ? graphAvailHeight : 180,
+              ),
+            );
+            const fpsGraphSize = new Vec2(graphAvailWidth, fpsGraphHeight);
             const fpsPlotMin = fpsCount > 0 ? Math.max(0, fpsMin * 0.9) : 0;
             const fpsPlotMax = Math.max(fpsPlotMin + 1, fpsMax * 1.1, fpsAvg * 1.1, fpsCurrent * 1.1, 60);
-            ImGui.PlotLines(
-              '##fps-plot',
-              (values = fpsPlotValues, idx) => values[idx],
-              fpsPlotValues,
-              fpsPlotValues.length,
-              0,
-              '',
-              fpsPlotMin,
-              fpsPlotMax,
-              new Vec2(-1, 120),
-            );
-            ImGui.End();
+            if (fpsSampleCount > 0) {
+              const fpsPlotOffset = fpsSampleCount < fpsValues.length ? 0 : fpsHistoryIndexRef.current;
+              ImGui.PlotLines(
+                '##fps-plot',
+                fpsValues,
+                fpsSampleCount,
+                fpsPlotOffset,
+                '',
+                fpsPlotMin,
+                fpsPlotMax,
+                fpsGraphSize,
+              );
+            } else {
+              ImGui.Dummy(fpsGraphSize);
+            }
+            const fpsGraphDrawList = ImGui.GetWindowDrawList();
+            const fpsGraphMin = ImGui.GetItemRectMin();
+            const fpsGraphMax = ImGui.GetItemRectMax();
+            const fpsGraphGridColor = ImGui.GetColorU32(new Vec4(0.85, 0.92, 1.0, 0.22));
+            const fpsGraphBorderColor = ImGui.GetColorU32(new Vec4(0.92, 0.92, 0.92, 0.55));
+            const fpsGraphInsetMin = new Vec2(fpsGraphMin.x + 1, fpsGraphMin.y + 1);
+            const fpsGraphInsetMax = new Vec2(fpsGraphMax.x - 1, fpsGraphMax.y - 1);
+            for (let i = 1; i < 4; i += 1) {
+              const y = fpsGraphInsetMin.y + (((fpsGraphInsetMax.y - fpsGraphInsetMin.y) * i) / 4);
+              fpsGraphDrawList.AddLine(
+                new Vec2(fpsGraphInsetMin.x, y),
+                new Vec2(fpsGraphInsetMax.x, y),
+                fpsGraphGridColor,
+                1,
+              );
+            }
+            for (let i = 1; i < 6; i += 1) {
+              const x = fpsGraphInsetMin.x + (((fpsGraphInsetMax.x - fpsGraphInsetMin.x) * i) / 6);
+              fpsGraphDrawList.AddLine(
+                new Vec2(x, fpsGraphInsetMin.y),
+                new Vec2(x, fpsGraphInsetMax.y),
+                fpsGraphGridColor,
+                1,
+              );
+            }
+            fpsGraphDrawList.AddRect(fpsGraphMin, fpsGraphMax, fpsGraphBorderColor, 0, 0, 1);
+            ImGui.SetNextItemOpen(false, ImGui.Cond.Once);
+            if (ImGui.CollapsingHeader('Details')) {
+              ImGui.Text(`Draw Calls: ${renderMetrics.drawCalls}`);
+              ImGui.Text(`Triangles: ${renderMetrics.triangles}`);
+              ImGui.Text(`World: calls ${renderMetrics.worldDrawCalls} | tris ${renderMetrics.worldTriangles}`);
+              ImGui.Text(`Water: calls ${renderMetrics.waterDrawCalls} | tris ${renderMetrics.waterTriangles}`);
+              ImGui.Text(`Sky/HUD: calls ${renderMetrics.skyDrawCalls} | tris ${renderMetrics.skyTriangles}`);
+              ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
+              ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
+              ImGui.Text(`Transparent Queue: blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
+              ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
+              ImGui.Text(`Lighting: IDE 2DFX ${statsRef.current.ideEffects} | objects ${statsRef.current.lightObjects} | emitters ${statsRef.current.lightEmitters}`);
+            }
           } catch (error) {
             pushConsoleLine('error', `Statistics window error: ${formatConsoleArg(error)}`);
             setWindowOpen('statistics', false);
+          } finally {
+            if (statisticsWindowBegun) ImGui.End();
+            ImGui.PopStyleVar(4);
+            ImGui.PopStyleColor(8);
           }
         }
 
@@ -6483,6 +6675,9 @@ function App() {
     hasNearRenderable,
     hideRenderItemCompletely,
     isWindowOpen,
+    loadDefaultMap,
+    openMapPicker,
+    openZipPicker,
     pushConsoleLine,
     rebuildWorld,
     resetImguiTextureCache,
@@ -6506,6 +6701,15 @@ function App() {
             webkitdirectory=""
             directory=""
             onChange={onPickFolder}
+          />
+        </label>
+        <label className="picker">
+          <span>Pick map zip</span>
+          <input
+            ref={zipInputRef}
+            type="file"
+            accept=".zip,application/zip"
+            onChange={onPickZip}
           />
         </label>
         {showMapPickerFallback ? (
