@@ -195,7 +195,8 @@ function flushDirtyInstancedBatch(batch) {
 function setInstanceHandlesVisible(handles, visible, dirtyBatches) {
   if (!Array.isArray(handles) || handles.length === 0) return;
   for (const handle of handles) {
-    if (!handle?.batch?.mesh || handle.index < 0 || handle.visible === visible) continue;
+    // Handles use index: -1 until flush assigns activeIndex; visibility must still toggle.
+    if (!handle?.batch?.mesh || handle.visible === visible) continue;
     handle.visible = visible;
     handle.batch.visibleCount += visible ? 1 : -1;
     dirtyBatches?.add(handle.batch);
@@ -645,9 +646,11 @@ export class WorldStreamingRuntime {
       }
 
       const pairedItem = hasNear && hasLod;
+      // Unpaired near (no LOD mesh) or near-only: never use the LOD switch slider as IDE fallback —
+      // that was clipping buildings with no paired LOD. Paired crossfade uses nearRangeEnd below.
       const nearConfiguredDistance = resolveRenderableDistance(
         item.nearState?.drawDistance,
-        showLods ? drawDistance : renderingDistance,
+        renderingDistance,
       );
       const nearEndDistance = Math.min(nearConfiguredDistance, renderingDistance);
       const lodEndDistance = Math.min(

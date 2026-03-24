@@ -1,8 +1,8 @@
 import { appendManifestPath } from '../GTADatManifest.js';
 
 export class CDImageDatHandler {
-  constructor() {
-    this.keyword = 'CDIMAGE';
+  constructor(keyword = 'CDIMAGE') {
+    this.keyword = String(keyword || 'CDIMAGE').toUpperCase();
   }
 
   handle(entry, manifest) {

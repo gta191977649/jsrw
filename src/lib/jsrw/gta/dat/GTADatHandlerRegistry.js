@@ -31,7 +31,8 @@ export class GTADatHandlerRegistry {
 
 export function createDefaultGTADatHandlerRegistry() {
   return new GTADatHandlerRegistry([
-    new CDImageDatHandler(),
+    new CDImageDatHandler('CDIMAGE'),
+    new CDImageDatHandler('CDIMAGES'),
     new ImgDatHandler(),
     new ImgListDatHandler(),
     new ImagePathDatHandler(),
