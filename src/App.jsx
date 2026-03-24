@@ -150,6 +150,26 @@ const FRAME_STAGE_DEBUG_DEFAULTS = Object.freeze({
   sunFinal: true,
   hud: true,
 });
+const STATS_WINDOW_DEFAULT_POS = Object.freeze({ x: 460, y: 270 });
+const STATS_WINDOW_DEFAULT_SIZE = Object.freeze({ x: 360, y: 250 });
+const STATS_WINDOW_MIN_SIZE = Object.freeze({ x: 260, y: 200 });
+const STATS_WINDOW_MAX_SIZE = Object.freeze({ x: 960, y: 720 });
+const STATS_WINDOW_PADDING = Object.freeze({ x: 14, y: 12 });
+const STATS_WINDOW_ITEM_SPACING = Object.freeze({ x: 6, y: 4 });
+const STATS_COLOR_WINDOW_BG = Object.freeze({ x: 0.02, y: 0.02, z: 0.02, w: 0.92 });
+const STATS_COLOR_BORDER = Object.freeze({ x: 0.92, y: 0.92, z: 0.92, w: 0.95 });
+const STATS_COLOR_FRAME_BG = Object.freeze({ x: 0.05, y: 0.05, z: 0.05, w: 1.0 });
+const STATS_COLOR_PLOT_LINE = Object.freeze({ x: 0.56, y: 0.72, z: 1.0, w: 1.0 });
+const STATS_COLOR_PLOT_LINE_HOVER = Object.freeze({ x: 0.88, y: 0.92, z: 1.0, w: 1.0 });
+const STATS_COLOR_HEADER = Object.freeze({ x: 0.08, y: 0.08, z: 0.08, w: 1.0 });
+const STATS_COLOR_HEADER_HOVER = Object.freeze({ x: 0.12, y: 0.12, z: 0.12, w: 1.0 });
+const STATS_COLOR_HEADER_ACTIVE = Object.freeze({ x: 0.16, y: 0.16, z: 0.16, w: 1.0 });
+const STATS_COLOR_TEXT = Object.freeze({ x: 1.0, y: 1.0, z: 1.0, w: 1.0 });
+const STATS_COLOR_FPS = Object.freeze({ x: 0.94, y: 0.78, z: 0.34, w: 1.0 });
+const STATS_COLOR_FRAME = Object.freeze({ x: 0.48, y: 0.80, z: 1.0, w: 1.0 });
+const STATS_COLOR_TRIANGLES = Object.freeze({ x: 0.58, y: 0.90, z: 0.55, w: 1.0 });
+const STATS_COLOR_GRID = Object.freeze({ x: 0.85, y: 0.92, z: 1.0, w: 0.22 });
+const STATS_COLOR_GRAPH_BORDER = Object.freeze({ x: 0.92, y: 0.92, z: 0.92, w: 0.55 });
 const RW_DFF_LIGHT_TYPE = Object.freeze({
   DIRECTIONAL: 0x01,
   AMBIENT: 0x02,
@@ -1031,9 +1051,12 @@ function App() {
   const axesRef = useRef(null);
   const totalObjectsRef = useRef(0);
   const frameTimeRef = useRef(0);
-  const fpsHistoryRef = useRef(Array.from({ length: 180 }, () => 0));
+  const fpsHistoryRef = useRef(Array.from({ length: 120 }, () => 0));
   const fpsHistoryIndexRef = useRef(0);
   const fpsSampleCountRef = useRef(0);
+  const statsWindowSizeRef = useRef({ x: 0, y: 0 });
+  const statsGraphRectMinRef = useRef({ x: 0, y: 0 });
+  const statsGraphRectMaxRef = useRef({ x: 0, y: 0 });
   const lodUpdateAccumulatorRef = useRef(0);
   const activeFadeCountRef = useRef(0);
   const lookStateRef = useRef({
@@ -5536,23 +5559,22 @@ function App() {
         if (isWindowOpen('statistics')) {
           let statisticsWindowBegun = false;
           try {
-            const Vec4 = ImGui.ImVec4 ?? ImGui.Vec4;
-            ImGui.SetNextWindowPos(new Vec2(460, 270), ImGui.Cond.Once);
-            ImGui.SetNextWindowSize(new Vec2(360, 250), ImGui.Cond.Once);
-            ImGui.SetNextWindowSizeConstraints(new Vec2(260, 200), new Vec2(960, 720));
+            ImGui.SetNextWindowPos(STATS_WINDOW_DEFAULT_POS, ImGui.Cond.Once);
+            ImGui.SetNextWindowSize(STATS_WINDOW_DEFAULT_SIZE, ImGui.Cond.Once);
+            ImGui.SetNextWindowSizeConstraints(STATS_WINDOW_MIN_SIZE, STATS_WINDOW_MAX_SIZE);
             ImGui.SetNextWindowBgAlpha(0.92);
-            ImGui.PushStyleColor(ImGui.Col.WindowBg, new Vec4(0.02, 0.02, 0.02, 0.92));
-            ImGui.PushStyleColor(ImGui.Col.Border, new Vec4(0.92, 0.92, 0.92, 0.95));
-            ImGui.PushStyleColor(ImGui.Col.FrameBg, new Vec4(0.05, 0.05, 0.05, 1.0));
-            ImGui.PushStyleColor(ImGui.Col.PlotLines, new Vec4(0.56, 0.72, 1.0, 1.0));
-            ImGui.PushStyleColor(ImGui.Col.PlotLinesHovered, new Vec4(0.88, 0.92, 1.0, 1.0));
-            ImGui.PushStyleColor(ImGui.Col.Header, new Vec4(0.08, 0.08, 0.08, 1.0));
-            ImGui.PushStyleColor(ImGui.Col.HeaderHovered, new Vec4(0.12, 0.12, 0.12, 1.0));
-            ImGui.PushStyleColor(ImGui.Col.HeaderActive, new Vec4(0.16, 0.16, 0.16, 1.0));
-            ImGui.PushStyleVar(ImGui.StyleVar.WindowPadding, new Vec2(14, 12));
+            ImGui.PushStyleColor(ImGui.Col.WindowBg, STATS_COLOR_WINDOW_BG);
+            ImGui.PushStyleColor(ImGui.Col.Border, STATS_COLOR_BORDER);
+            ImGui.PushStyleColor(ImGui.Col.FrameBg, STATS_COLOR_FRAME_BG);
+            ImGui.PushStyleColor(ImGui.Col.PlotLines, STATS_COLOR_PLOT_LINE);
+            ImGui.PushStyleColor(ImGui.Col.PlotLinesHovered, STATS_COLOR_PLOT_LINE_HOVER);
+            ImGui.PushStyleColor(ImGui.Col.Header, STATS_COLOR_HEADER);
+            ImGui.PushStyleColor(ImGui.Col.HeaderHovered, STATS_COLOR_HEADER_HOVER);
+            ImGui.PushStyleColor(ImGui.Col.HeaderActive, STATS_COLOR_HEADER_ACTIVE);
+            ImGui.PushStyleVar(ImGui.StyleVar.WindowPadding, STATS_WINDOW_PADDING);
             ImGui.PushStyleVar(ImGui.StyleVar.WindowBorderSize, 1);
             ImGui.PushStyleVar(ImGui.StyleVar.WindowRounding, 0);
-            ImGui.PushStyleVar(ImGui.StyleVar.ItemSpacing, new Vec2(6, 4));
+            ImGui.PushStyleVar(ImGui.StyleVar.ItemSpacing, STATS_WINDOW_ITEM_SPACING);
             ImGui.Begin(
               'Statistics',
               (value = isWindowOpen('statistics')) => setWindowOpen('statistics', value),
@@ -5581,10 +5603,10 @@ function App() {
             const frameWorstMs = fpsMin > 0 ? (1000 / fpsMin) : 0;
             const frameAvgMs = fpsAvg > 0 ? (1000 / fpsAvg) : 0;
             const renderMetrics = renderMetricsRef.current;
-            const statisticsWindowSize = ImGui.GetWindowSize();
+            const statisticsWindowSize = ImGui.GetWindowSize(statsWindowSizeRef.current);
             const surfaceWidth = Number(canvasRef.current?.width) || 0;
             const surfaceHeight = Number(canvasRef.current?.height) || 0;
-            const renderSummaryRow = (label, value, rangeText = '', color = new Vec4(1.0, 1.0, 1.0, 1.0), rangeColor = null) => {
+            const renderSummaryRow = (label, value, rangeText = '', color = STATS_COLOR_TEXT, rangeColor = null) => {
               const rowStartX = ImGui.GetCursorPosX();
               const rowAvailWidth = Math.max(120, ImGui.GetContentRegionAvail().x);
               const stackedLayout = rowAvailWidth < 290;
@@ -5614,10 +5636,10 @@ function App() {
                 ImGui.PopTextWrapPos();
               }
             };
-            renderSummaryRow('Renderer', activeBackend, `[${surfaceWidth}x${surfaceHeight}]`, new Vec4(1.0, 1.0, 1.0, 1.0), new Vec4(1.0, 1.0, 1.0, 1.0));
-            renderSummaryRow('FPS', fpsCurrent.toFixed(2), `[ ${fpsCount > 0 ? fpsMin.toFixed(2) : '0.00'}  ${fpsAvg.toFixed(2)}  ${fpsMax.toFixed(2)} ]`, new Vec4(0.94, 0.78, 0.34, 1.0));
-            renderSummaryRow('Frame', `${frameCurrentMs.toFixed(2)}ms`, `[ ${frameBestMs.toFixed(2)}  ${frameAvgMs.toFixed(2)}  ${frameWorstMs.toFixed(2)} ]`, new Vec4(0.48, 0.80, 1.0, 1.0));
-            renderSummaryRow('Triangles', `${renderMetrics.triangles}`, `[ world ${renderMetrics.worldTriangles}  water ${renderMetrics.waterTriangles} ]`, new Vec4(0.58, 0.90, 0.55, 1.0));
+            renderSummaryRow('Renderer', activeBackend, `[${surfaceWidth}x${surfaceHeight}]`, STATS_COLOR_TEXT, STATS_COLOR_TEXT);
+            renderSummaryRow('FPS', fpsCurrent.toFixed(2), `[ ${fpsCount > 0 ? fpsMin.toFixed(2) : '0.00'}  ${fpsAvg.toFixed(2)}  ${fpsMax.toFixed(2)} ]`, STATS_COLOR_FPS);
+            renderSummaryRow('Frame', `${frameCurrentMs.toFixed(2)}ms`, `[ ${frameBestMs.toFixed(2)}  ${frameAvgMs.toFixed(2)}  ${frameWorstMs.toFixed(2)} ]`, STATS_COLOR_FRAME);
+            renderSummaryRow('Triangles', `${renderMetrics.triangles}`, `[ world ${renderMetrics.worldTriangles}  water ${renderMetrics.waterTriangles} ]`, STATS_COLOR_TRIANGLES);
             const graphAvailHeight = Math.max(0, ImGui.GetContentRegionAvail().y);
             const graphAvailWidth = Math.max(1, ImGui.GetContentRegionAvail().x);
             const fpsGraphHeight = Math.max(
@@ -5628,7 +5650,7 @@ function App() {
                 graphAvailHeight > 0 ? graphAvailHeight : 180,
               ),
             );
-            const fpsGraphSize = new Vec2(graphAvailWidth, fpsGraphHeight);
+            const fpsGraphSize = { x: graphAvailWidth, y: fpsGraphHeight };
             const fpsPlotMin = fpsCount > 0 ? Math.max(0, fpsMin * 0.9) : 0;
             const fpsPlotMax = Math.max(fpsPlotMin + 1, fpsMax * 1.1, fpsAvg * 1.1, fpsCurrent * 1.1, 60);
             if (fpsSampleCount > 0) {
@@ -5647,17 +5669,17 @@ function App() {
               ImGui.Dummy(fpsGraphSize);
             }
             const fpsGraphDrawList = ImGui.GetWindowDrawList();
-            const fpsGraphMin = ImGui.GetItemRectMin();
-            const fpsGraphMax = ImGui.GetItemRectMax();
-            const fpsGraphGridColor = ImGui.GetColorU32(new Vec4(0.85, 0.92, 1.0, 0.22));
-            const fpsGraphBorderColor = ImGui.GetColorU32(new Vec4(0.92, 0.92, 0.92, 0.55));
-            const fpsGraphInsetMin = new Vec2(fpsGraphMin.x + 1, fpsGraphMin.y + 1);
-            const fpsGraphInsetMax = new Vec2(fpsGraphMax.x - 1, fpsGraphMax.y - 1);
+            const fpsGraphMin = ImGui.GetItemRectMin(statsGraphRectMinRef.current);
+            const fpsGraphMax = ImGui.GetItemRectMax(statsGraphRectMaxRef.current);
+            const fpsGraphGridColor = ImGui.GetColorU32(STATS_COLOR_GRID);
+            const fpsGraphBorderColor = ImGui.GetColorU32(STATS_COLOR_GRAPH_BORDER);
+            const fpsGraphInsetMin = { x: fpsGraphMin.x + 1, y: fpsGraphMin.y + 1 };
+            const fpsGraphInsetMax = { x: fpsGraphMax.x - 1, y: fpsGraphMax.y - 1 };
             for (let i = 1; i < 4; i += 1) {
               const y = fpsGraphInsetMin.y + (((fpsGraphInsetMax.y - fpsGraphInsetMin.y) * i) / 4);
               fpsGraphDrawList.AddLine(
-                new Vec2(fpsGraphInsetMin.x, y),
-                new Vec2(fpsGraphInsetMax.x, y),
+                { x: fpsGraphInsetMin.x, y },
+                { x: fpsGraphInsetMax.x, y },
                 fpsGraphGridColor,
                 1,
               );
@@ -5665,8 +5687,8 @@ function App() {
             for (let i = 1; i < 6; i += 1) {
               const x = fpsGraphInsetMin.x + (((fpsGraphInsetMax.x - fpsGraphInsetMin.x) * i) / 6);
               fpsGraphDrawList.AddLine(
-                new Vec2(x, fpsGraphInsetMin.y),
-                new Vec2(x, fpsGraphInsetMax.y),
+                { x, y: fpsGraphInsetMin.y },
+                { x, y: fpsGraphInsetMax.y },
                 fpsGraphGridColor,
                 1,
               );
