@@ -824,7 +824,7 @@ function App() {
     wireframe: false,
     disableVertexColor: false,
     disableBackfaceCulling: true,
-    enableOcclusion: false,
+    enableOcclusion: true,
     renderWater: true,
     waterUvSpeed: 1,
     waterWaveHeight: 35,

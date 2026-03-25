@@ -71,27 +71,24 @@ export {
 } from './renderer/world/createDefaultPipelineRegistry.js';
 export * from './renderer/world/sky/index.js';
 export { PostFxRuntime } from './renderer/postfx/PostFxRuntime.js';
+export { Renderer, createRenderer } from './renderer/Renderer.js';
+export { RWRenderQueue, RenderQueue } from './renderer/queue/index.js';
+export { CoronaRuntime } from './renderer/corona/CoronaRuntime.js';
 export { RWPostFxPipeline } from './renderer/postfx/RWPostFxPipeline.js';
-export { RWCoronaPipeline } from './renderer/corona/RWCoronaPipeline.js';
+export { RWCoronaPipeline, RWCoronaPipeline as Coronas } from './renderer/corona/RWCoronaPipeline.js';
+export { ShadowRuntime } from './renderer/shadows/ShadowRuntime.js';
 export { RWShadowPipeline } from './renderer/shadows/RWShadowPipeline.js';
 export {
   buildTrafficLightCoronaEmitters,
   isTrafficLightModelName,
   resolveTrafficLightPhase,
 } from './renderer/corona/TrafficLights.js';
-export { RWWaterPipeline } from './renderer/water/RWWaterPipeline.js';
+export { WaterRuntime } from './renderer/water/WaterRuntime.js';
+export { RWWaterPipeline, RWWaterPipeline as WaterLevel } from './renderer/water/RWWaterPipeline.js';
+export { RWShadowPipeline as Shadows } from './renderer/shadows/RWShadowPipeline.js';
 
 export { JsrwRendererSession } from './integration/JsrwRendererSession.js';
 export { createJsrwRenderer } from './integration/createJsrwRenderer.js';
-export { Renderer, createRenderer } from './render/Renderer.js';
-export { RWRenderQueue } from './render/RWRenderQueue.js';
-export { RenderQueue } from './render/RenderQueue.js';
-export { CoronaRuntime } from './render/CoronaRuntime.js';
-export { Coronas } from './render/Coronas.js';
-export { ShadowRuntime } from './render/ShadowRuntime.js';
-export { Shadows } from './render/Shadows.js';
-export { WaterRuntime } from './render/WaterRuntime.js';
-export { WaterLevel } from './render/WaterLevel.js';
 export { Streaming } from './core/Streaming.js';
 export { World } from './core/World.js';
 export { RendererHost } from './gta/integration/RendererHost.js';

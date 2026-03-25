@@ -905,6 +905,9 @@ export class JsrwGtaSession {
         if (!ENABLE_WORLD_INSTANCING) return false;
         if (!model?.instancable || !Array.isArray(model.meshDescriptors) || model.meshDescriptors.length === 0) return false;
         if (ide?.section === 'tobjs') return false;
+        // Small props are more correctness-sensitive than performance-sensitive here;
+        // keep them on the regular object path to avoid instanced-only visibility issues.
+        if (Number.isFinite(ide?.drawDistance) && ide.drawDistance <= 250) return false;
         const decoded = decodeRwIdeFlags(ide?.flags);
         if (decoded.drawLast || decoded.additive || decoded.noZWrite) return false;
         return model.meshDescriptors.every((descriptor) => {
