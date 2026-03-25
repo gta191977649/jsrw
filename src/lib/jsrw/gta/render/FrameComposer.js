@@ -186,6 +186,7 @@ export class FrameComposer {
     coronaRuntime?.setEnabled(render2dfxEnabled);
     shadowRuntime?.setEnabled(render2dfxEnabled && uiStateRef.current.shadows.enabled);
     coronaRuntime?.setDebugShowAll(uiStateRef.current.debug2dfx);
+    shadowRuntime?.markSceneMeshesDirty?.();
     waterPipeline?.applySettings?.({
       uvSpeed: uiStateRef.current.waterUvSpeed,
       waveHeight: uiStateRef.current.waterWaveHeight,

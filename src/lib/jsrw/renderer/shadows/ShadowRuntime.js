@@ -22,6 +22,10 @@ export class ShadowRuntime {
     this.pipeline.setTextureDictionary(textureDictionary);
   }
 
+  markSceneMeshesDirty() {
+    this.pipeline.markSceneMeshesDirty();
+  }
+
   update(camera, runtimeContext = {}) {
     this.pipeline.update(camera, runtimeContext);
   }

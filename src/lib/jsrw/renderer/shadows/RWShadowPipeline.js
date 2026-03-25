@@ -14,11 +14,21 @@ const TMP_SAMPLE = new THREE.Vector3();
 const TMP_WORLD_A = new THREE.Vector3();
 const TMP_WORLD_B = new THREE.Vector3();
 const TMP_WORLD_C = new THREE.Vector3();
+const TMP_LOCAL_A = new THREE.Vector3();
+const TMP_LOCAL_B = new THREE.Vector3();
+const TMP_LOCAL_C = new THREE.Vector3();
+const TMP_LOCAL_CENTER = new THREE.Vector3();
+const TMP_LOCAL_FRONT = new THREE.Vector3();
+const TMP_LOCAL_SIDE = new THREE.Vector3();
+const TMP_LOCAL_POINT = new THREE.Vector3();
+const TMP_WORLD_POINT = new THREE.Vector3();
 const TMP_TRI_EDGE = new THREE.Vector2();
 const TMP_TRI_TO_POINT = new THREE.Vector2();
 const TMP_TRI_NORMAL = new THREE.Vector3();
-const TMP_TRIANGLE_BOX = new THREE.Box3();
+const TMP_RECEIVER_INVERSE = new THREE.Matrix4();
 const TMP_COLOR = new THREE.Color();
+const TMP_INSTANCE_MATRIX = new THREE.Matrix4();
+const TMP_INSTANCE_WORLD_MATRIX = new THREE.Matrix4();
 const CORNER_OFFSETS = [
   { front: 1, side: -1, uv: [0, 0] },
   { front: 1, side: 1, uv: [1, 0] },
@@ -30,7 +40,6 @@ const DEFAULT_SHADOW_Z_DISTANCE = 15;
 const DEFAULT_SHADOW_DRAW_DISTANCE = 40;
 const DEFAULT_MAX_REBUILDS_PER_FRAME = 6;
 const MAX_ACTIVE_SHADOWS = 48;
-const RECEIVER_HEIGHT_EPSILON = 0.25;
 
 function overlapRange(minA, maxA, minB, maxB) {
   return minA <= maxB && maxA >= minB;
@@ -91,8 +100,34 @@ function solvePlaneHeight(normal, pointOnPlane, x, z) {
   return pointOnPlane.y - ((normal.x * (x - pointOnPlane.x)) + (normal.z * (z - pointOnPlane.z))) / normal.y;
 }
 
+function transformPointToLocal(target, point, inverseMatrix) {
+  return target.copy(point).applyMatrix4(inverseMatrix);
+}
+
 function clamp01(value) {
   return THREE.MathUtils.clamp(Number(value) || 0, 0, 1);
+}
+
+function inferShadowBlendMode(emitter) {
+  const explicitMode = String(emitter?.shadow?.blendMode || '').trim().toLowerCase();
+  if (explicitMode === 'dark' || explicitMode === 'additive') return explicitMode;
+  if (emitter?.sourceType === '2dfx' || emitter?.sourceType === 'trafficLightShadow') return 'additive';
+  return 'dark';
+}
+
+function applyShadowBlendMode(material, mode = 'dark') {
+  material.blending = THREE.CustomBlending;
+  material.blendEquation = THREE.AddEquation;
+  material.blendEquationAlpha = THREE.AddEquation;
+  material.blendSrc = THREE.SrcAlphaFactor;
+  material.blendSrcAlpha = THREE.OneFactor;
+  if (mode === 'additive') {
+    material.blendDst = THREE.OneFactor;
+    material.blendDstAlpha = THREE.OneFactor;
+    return;
+  }
+  material.blendDst = THREE.OneMinusSrcAlphaFactor;
+  material.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
 }
 
 function toVector3(value, fallback = [0, 0, 0]) {
@@ -312,6 +347,9 @@ export class RWShadowPipeline {
     const frameVisibilityCandidates = Array.isArray(frameVisibility?.shadowCandidates)
       ? frameVisibility.shadowCandidates
       : [];
+    if (frameVisibilityCandidates.length === 0 && this.activeEntries.size === 0) {
+      return this.entries;
+    }
     const entries = [];
     const seen = new Set();
     for (const emitter of frameVisibilityCandidates) {
@@ -354,11 +392,30 @@ export class RWShadowPipeline {
       if (!geometry.boundingBox) geometry.computeBoundingBox();
       const positionAttribute = geometry.getAttribute?.('position');
       if (!geometry.boundingBox || !positionAttribute || positionAttribute.count < 3) return;
-      meshes.push({
+      const baseEntry = {
         object,
         geometry,
         positionAttribute,
         indexAttribute: geometry.getIndex?.() || null,
+      };
+      if (object.isInstancedMesh === true) {
+        const instanceCount = Math.max(0, Number(object.count) || 0);
+        for (let instanceIndex = 0; instanceIndex < instanceCount; instanceIndex += 1) {
+          object.getMatrixAt(instanceIndex, TMP_INSTANCE_MATRIX);
+          TMP_INSTANCE_WORLD_MATRIX.multiplyMatrices(object.matrixWorld, TMP_INSTANCE_MATRIX);
+          meshes.push({
+            ...baseEntry,
+            instanceIndex,
+            matrixWorld: TMP_INSTANCE_WORLD_MATRIX.clone(),
+            worldBox: geometry.boundingBox.clone().applyMatrix4(TMP_INSTANCE_WORLD_MATRIX),
+          });
+        }
+        return;
+      }
+      meshes.push({
+        ...baseEntry,
+        instanceIndex: -1,
+        matrixWorld: object.matrixWorld,
         worldBox: geometry.boundingBox.clone().applyMatrix4(object.matrixWorld),
       });
     });
@@ -369,27 +426,39 @@ export class RWShadowPipeline {
 
   createEntry(emitter, index) {
     if (!emitter) return null;
+    const shadowBlendMode = inferShadowBlendMode(emitter);
     const shadowMaterial = new THREE.MeshBasicMaterial({
       map: this.resolveTexture(emitter.shadow?.textureKey),
       color: 0xffffff,
       transparent: true,
       depthWrite: false,
       depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
       // Projected shadow polygons are generated from clipped quads whose
       // winding is not guaranteed to match the receiver triangle winding.
       // RenderWare's shadow pass does not rely on backface culling here, so
       // keep both sides visible to avoid losing the whole projection.
       side: THREE.DoubleSide,
       fog: false,
-      blending: THREE.CustomBlending,
       toneMapped: false,
     });
-    shadowMaterial.blendSrc = THREE.OneFactor;
-    shadowMaterial.blendDst = THREE.OneFactor;
-    shadowMaterial.blendEquation = THREE.AddEquation;
-    shadowMaterial.blendSrcAlpha = THREE.OneFactor;
-    shadowMaterial.blendDstAlpha = THREE.OneFactor;
-    shadowMaterial.blendEquationAlpha = THREE.AddEquation;
+    applyShadowBlendMode(shadowMaterial, shadowBlendMode);
+    shadowMaterial.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+        float rwShadowMask = diffuseColor.a;
+        #ifdef USE_MAP
+          float rwShadowLuma = max(texelColor.r, max(texelColor.g, texelColor.b));
+          rwShadowMask *= max(texelColor.a, rwShadowLuma);
+        #endif
+        diffuseColor.rgb = diffuse * rwShadowMask;
+        diffuseColor.a = rwShadowMask;`,
+      );
+    };
+    shadowMaterial.needsUpdate = true;
 
     const shadowMesh = new THREE.Mesh(createShadowGeometry(), shadowMaterial);
     shadowMesh.visible = false;
@@ -410,6 +479,7 @@ export class RWShadowPipeline {
       fadeAlpha: 0,
       streamAlpha: 0,
       shadowMesh,
+      shadowBlendMode,
       projected: false,
       lastProjectionKey: '',
       lastFallbackCornerCount: 0,
@@ -502,114 +572,97 @@ export class RWShadowPipeline {
 
     const positions = [];
     const uvs = [];
-    const projectedPolygons = [];
-    const pushVertex = (point, uv, normal) => {
-      const projectionNormal = normal?.isVector3 ? normal : TMP_TRI_NORMAL;
+    const pushVertex = (point, uv, up = null) => {
+      const projectionUp = up?.isVector3 ? up : TMP_TRI_NORMAL.set(0, 1, 0);
       positions.push(
-        point.x + (projectionNormal.x * vertexBias),
-        point.y + (projectionNormal.y * vertexBias),
-        point.z + (projectionNormal.z * vertexBias),
+        point.x + (projectionUp.x * vertexBias),
+        point.y + (projectionUp.y * vertexBias),
+        point.z + (projectionUp.z * vertexBias),
       );
       uvs.push(uv[0], uv[1]);
     };
 
     let fallbackCornerCount = 0;
-    let highestReceiverY = Number.NEGATIVE_INFINITY;
     for (const meshEntry of candidateMeshes) {
       const { object: mesh, positionAttribute, indexAttribute } = meshEntry;
+      const receiverMatrixWorld = meshEntry.matrixWorld || mesh.matrixWorld;
+      TMP_RECEIVER_INVERSE.copy(receiverMatrixWorld).invert();
+      transformPointToLocal(TMP_LOCAL_CENTER, center, TMP_RECEIVER_INVERSE);
+      transformPointToLocal(TMP_LOCAL_FRONT, center.clone().add(TMP_FRONT), TMP_RECEIVER_INVERSE).sub(TMP_LOCAL_CENTER);
+      transformPointToLocal(TMP_LOCAL_SIDE, center.clone().add(TMP_SIDE), TMP_RECEIVER_INVERSE).sub(TMP_LOCAL_CENTER);
+
+      const localQuad = CORNER_OFFSETS.map((offset) => ({
+        x: TMP_LOCAL_CENTER.x
+          + (TMP_LOCAL_FRONT.x * offset.front)
+          + (TMP_LOCAL_SIDE.x * offset.side),
+        z: TMP_LOCAL_CENTER.z
+          + (TMP_LOCAL_FRONT.z * offset.front)
+          + (TMP_LOCAL_SIDE.z * offset.side),
+        u: offset.uv[0],
+        v: offset.uv[1],
+      }));
+      const localMinX = Math.min(...localQuad.map((point) => point.x));
+      const localMaxX = Math.max(...localQuad.map((point) => point.x));
+      const localMinZ = Math.min(...localQuad.map((point) => point.z));
+      const localMaxZ = Math.max(...localQuad.map((point) => point.z));
+      const localMaxY = TMP_LOCAL_CENTER.y;
+      const localMinY = TMP_LOCAL_CENTER.y - maxDistance;
+
+      const receiverUp = TMP_WORLD_A.set(0, 1, 0)
+        .applyMatrix4(receiverMatrixWorld)
+        .sub(TMP_WORLD_B.set(0, 0, 0).applyMatrix4(receiverMatrixWorld))
+        .normalize()
+        .clone();
       const triangleCount = indexAttribute ? indexAttribute.count / 3 : positionAttribute.count / 3;
       for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
         const ia = indexAttribute ? indexAttribute.getX((triangleIndex * 3) + 0) : ((triangleIndex * 3) + 0);
         const ib = indexAttribute ? indexAttribute.getX((triangleIndex * 3) + 1) : ((triangleIndex * 3) + 1);
         const ic = indexAttribute ? indexAttribute.getX((triangleIndex * 3) + 2) : ((triangleIndex * 3) + 2);
-        TMP_WORLD_A.fromBufferAttribute(positionAttribute, ia).applyMatrix4(mesh.matrixWorld);
-        TMP_WORLD_B.fromBufferAttribute(positionAttribute, ib).applyMatrix4(mesh.matrixWorld);
-        TMP_WORLD_C.fromBufferAttribute(positionAttribute, ic).applyMatrix4(mesh.matrixWorld);
+        TMP_LOCAL_A.fromBufferAttribute(positionAttribute, ia);
+        TMP_LOCAL_B.fromBufferAttribute(positionAttribute, ib);
+        TMP_LOCAL_C.fromBufferAttribute(positionAttribute, ic);
 
-        const triangleMinX = Math.min(TMP_WORLD_A.x, TMP_WORLD_B.x, TMP_WORLD_C.x);
-        const triangleMaxX = Math.max(TMP_WORLD_A.x, TMP_WORLD_B.x, TMP_WORLD_C.x);
-        const triangleMinZ = Math.min(TMP_WORLD_A.z, TMP_WORLD_B.z, TMP_WORLD_C.z);
-        const triangleMaxZ = Math.max(TMP_WORLD_A.z, TMP_WORLD_B.z, TMP_WORLD_C.z);
-        const triangleMinY = Math.min(TMP_WORLD_A.y, TMP_WORLD_B.y, TMP_WORLD_C.y);
-        const triangleMaxY = Math.max(TMP_WORLD_A.y, TMP_WORLD_B.y, TMP_WORLD_C.y);
+        const triangleMinX = Math.min(TMP_LOCAL_A.x, TMP_LOCAL_B.x, TMP_LOCAL_C.x);
+        const triangleMaxX = Math.max(TMP_LOCAL_A.x, TMP_LOCAL_B.x, TMP_LOCAL_C.x);
+        const triangleMinZ = Math.min(TMP_LOCAL_A.z, TMP_LOCAL_B.z, TMP_LOCAL_C.z);
+        const triangleMaxZ = Math.max(TMP_LOCAL_A.z, TMP_LOCAL_B.z, TMP_LOCAL_C.z);
+        const triangleMinY = Math.min(TMP_LOCAL_A.y, TMP_LOCAL_B.y, TMP_LOCAL_C.y);
+        const triangleMaxY = Math.max(TMP_LOCAL_A.y, TMP_LOCAL_B.y, TMP_LOCAL_C.y);
         if (
-          !overlapRange(minX, maxX, triangleMinX, triangleMaxX)
-          || !overlapRange(minZ, maxZ, triangleMinZ, triangleMaxZ)
-          || !overlapRange(minY, maxY, triangleMinY, triangleMaxY)
+          !overlapRange(localMinX, localMaxX, triangleMinX, triangleMaxX)
+          || !overlapRange(localMinZ, localMaxZ, triangleMinZ, triangleMaxZ)
+          || !overlapRange(localMinY, localMaxY, triangleMinY, triangleMaxY)
         ) {
           continue;
         }
 
-        TMP_TRI_NORMAL.copy(TMP_WORLD_B).sub(TMP_WORLD_A).cross(TMP_WORLD_C.clone().sub(TMP_WORLD_A)).normalize();
+        TMP_TRI_NORMAL.copy(TMP_LOCAL_B).sub(TMP_LOCAL_A).cross(TMP_LOCAL_C.clone().sub(TMP_LOCAL_A)).normalize();
         if (Math.abs(TMP_TRI_NORMAL.y) <= 0.1) continue;
-        if (TMP_TRI_NORMAL.y < 0) TMP_TRI_NORMAL.negate();
 
-        const clippedPolygon = clipShadowQuadToTriangle(quad, [
-          { x: TMP_WORLD_A.x, y: TMP_WORLD_A.z },
-          { x: TMP_WORLD_B.x, y: TMP_WORLD_B.z },
-          { x: TMP_WORLD_C.x, y: TMP_WORLD_C.z },
+        const clippedPolygon = clipShadowQuadToTriangle(localQuad, [
+          { x: TMP_LOCAL_A.x, y: TMP_LOCAL_A.z },
+          { x: TMP_LOCAL_B.x, y: TMP_LOCAL_B.z },
+          { x: TMP_LOCAL_C.x, y: TMP_LOCAL_C.z },
         ]);
         if (clippedPolygon.length < 3) continue;
 
-        const centerPolygonPoint = clippedPolygon.reduce((acc, point) => {
-          acc.x += point.x;
-          acc.z += point.z;
-          acc.u += point.u;
-          acc.v += point.v;
-          return acc;
-        }, { x: 0, z: 0, u: 0, v: 0 });
-        centerPolygonPoint.x /= clippedPolygon.length;
-        centerPolygonPoint.z /= clippedPolygon.length;
-        centerPolygonPoint.u /= clippedPolygon.length;
-        centerPolygonPoint.v /= clippedPolygon.length;
-        const projectedCenter = new THREE.Vector3(
-          centerPolygonPoint.x,
-          solvePlaneHeight(TMP_TRI_NORMAL, TMP_WORLD_A, centerPolygonPoint.x, centerPolygonPoint.z),
-          centerPolygonPoint.z,
-        );
-        const polygonVertices = [];
-
-        for (let index = 0; index < clippedPolygon.length; index += 1) {
-          const current = clippedPolygon[index];
-          const next = clippedPolygon[(index + 1) % clippedPolygon.length];
-          const currentPoint = new THREE.Vector3(
-            current.x,
-            solvePlaneHeight(TMP_TRI_NORMAL, TMP_WORLD_A, current.x, current.z),
-            current.z,
+        const localPoints = clippedPolygon.map((point) => {
+          TMP_LOCAL_POINT.set(
+            point.x,
+            solvePlaneHeight(TMP_TRI_NORMAL, TMP_LOCAL_A, point.x, point.z),
+            point.z,
           );
-          const nextPoint = new THREE.Vector3(
-            next.x,
-            solvePlaneHeight(TMP_TRI_NORMAL, TMP_WORLD_A, next.x, next.z),
-            next.z,
-          );
-          polygonVertices.push([
-            projectedCenter.clone(),
-            [centerPolygonPoint.u, centerPolygonPoint.v],
-          ]);
-          polygonVertices.push([
-            currentPoint,
-            [current.u, current.v],
-          ]);
-          polygonVertices.push([
-            nextPoint,
-            [next.u, next.v],
-          ]);
-        }
-        highestReceiverY = Math.max(highestReceiverY, projectedCenter.y);
-        projectedPolygons.push({
-          centerY: projectedCenter.y,
-          normal: TMP_TRI_NORMAL.clone(),
-          vertices: polygonVertices,
+          return {
+            point: TMP_WORLD_POINT.copy(TMP_LOCAL_POINT).applyMatrix4(receiverMatrixWorld).clone(),
+            uv: [point.u, point.v],
+          };
         });
-      }
-    }
 
-    for (const polygon of projectedPolygons) {
-      if (polygon.centerY < (highestReceiverY - RECEIVER_HEIGHT_EPSILON)) {
-        continue;
-      }
-      for (const [point, uv] of polygon.vertices) {
-        pushVertex(point, uv, polygon.normal);
+        for (let index = 1; index < localPoints.length - 1; index += 1) {
+          pushVertex(localPoints[0].point, localPoints[0].uv, receiverUp);
+          pushVertex(localPoints[index].point, localPoints[index].uv, receiverUp);
+          pushVertex(localPoints[index + 1].point, localPoints[index + 1].uv, receiverUp);
+        }
       }
     }
 
