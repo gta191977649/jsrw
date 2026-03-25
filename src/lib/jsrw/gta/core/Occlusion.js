@@ -1,4 +1,8 @@
 import * as THREE from 'three';
+import {
+  createCameraRuntimeSnapshot,
+  projectPointToCameraViewport,
+} from '../../core/camera/CameraRuntime.js';
 
 const BOX_CORNERS = [
   new THREE.Vector3(),
@@ -12,11 +16,10 @@ const BOX_CORNERS = [
 ];
 
 const BOX_OCCLUSION_TEST_CORNER_INDICES = [0, 3, 5, 6];
-const CLIP_POINT = new THREE.Vector4();
 const BOX_CENTER = new THREE.Vector3();
 
 const SCREEN_RECT_EPSILON = 0.015;
-const DEPTH_EPSILON = 0.02;
+const DEPTH_EPSILON = 4.0;
 const MIN_OCCLUDER_WIDTH = 0.14;
 const MIN_OCCLUDER_HEIGHT = 0.14;
 const MIN_OCCLUDER_AREA = 0.03;
@@ -46,26 +49,9 @@ function fillBoxCorners(box) {
 }
 
 function projectPointToViewport(camera, point) {
-  if (!camera?.projectionMatrix || !camera?.matrixWorldInverse || !point?.isVector3) return null;
-  CLIP_POINT.set(point.x, point.y, point.z, 1);
-  CLIP_POINT.applyMatrix4(camera.matrixWorldInverse);
-  CLIP_POINT.applyMatrix4(camera.projectionMatrix);
-  if (!Number.isFinite(CLIP_POINT.x) || !Number.isFinite(CLIP_POINT.y) || !Number.isFinite(CLIP_POINT.z) || !Number.isFinite(CLIP_POINT.w)) {
-    return null;
-  }
-  if (CLIP_POINT.w <= 1e-6) return null;
-  const invW = 1 / CLIP_POINT.w;
-  const ndcX = CLIP_POINT.x * invW;
-  const ndcY = CLIP_POINT.y * invW;
-  const ndcZ = CLIP_POINT.z * invW;
-  if (!Number.isFinite(ndcX) || !Number.isFinite(ndcY) || !Number.isFinite(ndcZ)) return null;
-  return {
-    ndcX,
-    ndcY,
-    depth: ndcZ,
-    x: (ndcX * 0.5) + 0.5,
-    y: (ndcY * -0.5) + 0.5,
-  };
+  if (!point?.isVector3) return null;
+  const cameraRuntime = camera?.tanHalfFovX ? camera : createCameraRuntimeSnapshot(camera);
+  return projectPointToCameraViewport(cameraRuntime, point);
 }
 
 function getChunkOcclusionBox(chunk) {
@@ -124,7 +110,7 @@ function canRegisterOccluder(data) {
   if (!data?.center) return false;
   if (data.center.x < 0 || data.center.y < 0 || data.center.x > 1 || data.center.y > 1) return false;
   if (data.minX < 0 || data.minY < 0 || data.maxX > 1 || data.maxY > 1) return false;
-  if (data.minDepth < -1 || data.maxDepth > 1) return false;
+  if (!Number.isFinite(data.minDepth) || !Number.isFinite(data.maxDepth) || data.maxDepth <= 0) return false;
   if (data.width < MIN_OCCLUDER_WIDTH || data.height < MIN_OCCLUDER_HEIGHT) return false;
   if ((data.width * data.height) < MIN_OCCLUDER_AREA) return false;
   return true;

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { formatConsoleArg } from '../../../console.js';
 import { createDefaultTimecycleState } from '../../core/TimecycleState.js';
+import { createCameraRuntimeSnapshot } from '../../core/camera/CameraRuntime.js';
 import { createFrameVisibilityResult, resetFrameVisibilityResult } from '../core/FrameVisibility.js';
 import { resetChunkOcclusionState } from '../core/Occlusion.js';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from '../../utils/gtaTransforms.js';
@@ -350,25 +351,13 @@ export class JsrwGtaSession {
 
   async requestStreamingPlan(context = {}) {
     if (!this.streamingPlannerClient || !this.streamingPlannerReady) return null;
-    const cameraSnapshot = cloneStreamingCamera(context.camera);
-    if (!cameraSnapshot?.projectionMatrix || !cameraSnapshot?.matrixWorldInverse) return null;
-    const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(
-      cameraSnapshot.projectionMatrix,
-      cameraSnapshot.matrixWorldInverse,
-    );
+    const cameraRuntime = createCameraRuntimeSnapshot(context.camera);
     try {
       return await this.streamingPlannerClient.plan({
-        camera: {
-          position: [
-            Number(cameraSnapshot.position.x) || 0,
-            Number(cameraSnapshot.position.y) || 0,
-            Number(cameraSnapshot.position.z) || 0,
-          ],
-        },
+        camera: cameraRuntime,
         renderDistance: Number(context?.uiStateRef?.current?.renderingDistance) || 0,
         priorityDistance: Number(context?.uiStateRef?.current?.drawDistance) || 0,
         chunkActiveMargin: CHUNK_ACTIVE_MARGIN,
-        projScreenMatrix: Array.from(projScreenMatrix.elements),
       });
     } catch {
       return null;

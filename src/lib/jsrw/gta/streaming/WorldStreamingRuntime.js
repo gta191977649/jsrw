@@ -28,6 +28,12 @@ import {
 import { applyRwIdeFlagsToInstance } from '../../adapters/three/RwIdeFlagsAdapter.js';
 import { cloneRwMaterialDescriptor as cloneRWMaterialDescriptor } from '../../core/material/RwMaterialDescriptor.js';
 import {
+  createCameraRuntimeSnapshot,
+  getCameraForwardPlanarWeight,
+  isBoxVisibleInCameraRuntime,
+  isSphereVisibleInCameraRuntime,
+} from '../../core/camera/CameraRuntime.js';
+import {
   applyGlobalBackfaceCulling,
   applyWireframe,
   WORLD_CHUNK_SIZE,
@@ -419,13 +425,13 @@ export class WorldStreamingRuntime {
   collectGroundScanChunks(camera, renderDistance, priorityDistance, renderChunkLookupRef) {
     const chunkLookup = renderChunkLookupRef.current;
     if (!(chunkLookup instanceof Map) || chunkLookup.size === 0 || !camera) return [];
+    const cameraRuntime = createCameraRuntimeSnapshot(camera);
 
     const resolvedRenderDistance = Math.max(WORLD_CHUNK_SIZE, renderDistance || WORLD_CHUNK_SIZE);
     const resolvedPriorityDistance = Math.max(
       WORLD_CHUNK_SIZE,
       Math.min(resolvedRenderDistance, priorityDistance || Math.min(resolvedRenderDistance, resolvedRenderDistance * 0.2)),
     );
-    const cameraPoint = new THREE.Vector2(camera.position.x, camera.position.z);
     const cameraChunkX = Math.floor(camera.position.x / WORLD_CHUNK_SIZE);
     const cameraChunkZ = Math.floor(camera.position.z / WORLD_CHUNK_SIZE);
     const scanRadius = Math.ceil(
@@ -439,24 +445,27 @@ export class WorldStreamingRuntime {
         if (!chunk) continue;
         const chunkCenter = chunk?.center;
         if (!chunkCenter) continue;
-        const dx = (chunkCenter.x ?? 0) - cameraPoint.x;
-        const dz = (chunkCenter.z ?? 0) - cameraPoint.y;
+        const dx = (chunkCenter.x ?? 0) - cameraRuntime.position.x;
+        const dz = (chunkCenter.z ?? 0) - cameraRuntime.position.z;
         const chunkRadius = Math.max(
           WORLD_CHUNK_SIZE,
           Number(chunk.boundingSphere?.radius) || 0,
         );
         const distance = Math.hypot(dx, dz);
         if (distance > resolvedRenderDistance + chunkRadius + CHUNK_ACTIVE_MARGIN) continue;
+        const forwardWeight = getCameraForwardPlanarWeight(cameraRuntime, chunkCenter);
         candidates.push({
           chunk,
           distance,
-          priority: distance <= resolvedPriorityDistance + chunkRadius,
+          priority: forwardWeight >= -(chunkRadius * 0.5) || distance <= resolvedPriorityDistance + chunkRadius,
+          forwardWeight,
         });
       }
     }
 
     candidates.sort((left, right) => {
       if (left.priority !== right.priority) return left.priority ? -1 : 1;
+      if (Math.abs(left.forwardWeight - right.forwardWeight) > 1e-4) return right.forwardWeight - left.forwardWeight;
       return left.distance - right.distance;
     });
 
@@ -628,12 +637,9 @@ export class WorldStreamingRuntime {
     const distanceFadeConfig = DISTANCE_FADE_DEFAULTS;
     const fadeEpsilon = RenderEntityController.getEpsilon(distanceFadeConfig);
     const frameVisibility = resetFrameVisibilityResult(frameVisibilityRef.current);
+    const cameraRuntime = createCameraRuntimeSnapshot(camera);
     const chunkActiveDist = renderingDistance + CHUNK_ACTIVE_MARGIN;
     const chunkActiveDistSq = chunkActiveDist * chunkActiveDist;
-    const chunkFrustum = context.chunkFrustumRef.current;
-    const chunkProjScreenMatrix = context.chunkProjScreenMatrixRef.current;
-    chunkProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    chunkFrustum.setFromProjectionMatrix(chunkProjScreenMatrix);
     const dirtyBatches = new Set();
     // Always scan out to the camera far clip. Pairing only affects near vs LOD *inside* a chunk;
     // capping scan by the LOD switch distance would skip whole chunks and hide distant LOD meshes.
@@ -773,10 +779,10 @@ export class WorldStreamingRuntime {
         itemInFrustum = isComplexFrustumItem(item)
           ? (
             item.boundingBox?.isBox3
-              ? chunkFrustum.intersectsBox(item.boundingBox)
-              : chunkFrustum.intersectsSphere(item.boundingSphere)
+              ? isBoxVisibleInCameraRuntime(cameraRuntime, item.boundingBox)
+              : isSphereVisibleInCameraRuntime(cameraRuntime, item.boundingSphere?.center, item.boundingSphere?.radius)
           )
-          : chunkFrustum.intersectsSphere(item.boundingSphere);
+          : isSphereVisibleInCameraRuntime(cameraRuntime, item.boundingSphere?.center, item.boundingSphere?.radius);
         frustumCpuMs += Math.max(0, getProfilingTimeNow() - frustumStart);
       }
       if (!itemInFrustum) {
@@ -793,7 +799,7 @@ export class WorldStreamingRuntime {
         } else {
           const occlusionStart = getProfilingTimeNow();
           itemOcclusionTests += 1;
-          itemOccluded = isChunkOccluded(occlusionState, camera, item);
+          itemOccluded = isChunkOccluded(occlusionState, cameraRuntime, item);
           occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
           item.__rwOcclusionCheckedAt = nowMs;
           item.__rwOcclusionResult = itemOccluded;
@@ -967,8 +973,8 @@ export class WorldStreamingRuntime {
           const frustumStart = getProfilingTimeNow();
           chunkFrustumTests += 1;
           chunkInFrustum = chunk.boundingBox?.isBox3
-            ? chunkFrustum.intersectsBox(chunk.boundingBox)
-            : chunkFrustum.intersectsSphere(chunk.boundingSphere);
+            ? isBoxVisibleInCameraRuntime(cameraRuntime, chunk.boundingBox)
+            : isSphereVisibleInCameraRuntime(cameraRuntime, chunk.boundingSphere?.center, chunk.boundingSphere?.radius);
           frustumCpuMs += Math.max(0, getProfilingTimeNow() - frustumStart);
         }
       } else if (chunkInRange && bypassCloseRangeChunkFrustum) {
@@ -988,7 +994,7 @@ export class WorldStreamingRuntime {
       if (enableOcclusion) {
         const occlusionStart = getProfilingTimeNow();
         chunkOcclusionTests += 1;
-        chunkOccluded = isChunkOccluded(occlusionState, camera, chunk);
+        chunkOccluded = isChunkOccluded(occlusionState, cameraRuntime, chunk);
         occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
       }
       if (chunkOccluded) {
@@ -1012,7 +1018,7 @@ export class WorldStreamingRuntime {
       }
       if (enableOcclusion) {
         const occlusionStart = getProfilingTimeNow();
-        registerChunkOccluder(occlusionState, camera, chunk);
+        registerChunkOccluder(occlusionState, cameraRuntime, chunk);
         occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
       }
     }

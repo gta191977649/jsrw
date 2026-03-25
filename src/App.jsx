@@ -686,8 +686,6 @@ function App() {
     cloudRotation: 0,
     individualRotation: 0,
   });
-  const chunkFrustumRef = useRef(new THREE.Frustum());
-  const chunkProjScreenMatrixRef = useRef(new THREE.Matrix4());
   const raycasterRef = useRef(new THREE.Raycaster());
   const pointerNdcRef = useRef(new THREE.Vector2());
   const imguiGlRef = useRef(null);
@@ -2130,9 +2128,7 @@ function App() {
         activeRenderChunksRef,
         bigBuildingItemsRef,
         camera,
-        chunkFrustumRef,
         chunkOcclusionStateRef,
-        chunkProjScreenMatrixRef,
         dt,
         effectiveFarClip,
         frameVisibilityRef,
