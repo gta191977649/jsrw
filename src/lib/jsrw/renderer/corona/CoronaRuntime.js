@@ -42,6 +42,10 @@ export class CoronaRuntime {
     this.pipeline.render(renderer, camera);
   }
 
+  hasActiveEntries() {
+    return this.pipeline.hasActiveEntries();
+  }
+
   dispose() {
     this.pipeline.dispose();
   }

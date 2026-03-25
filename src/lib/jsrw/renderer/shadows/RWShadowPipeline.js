@@ -353,7 +353,7 @@ export class RWShadowPipeline {
       ? frameVisibility.shadowCandidates
       : [];
     if (frameVisibilityCandidates.length === 0 && this.activeEntries.size === 0) {
-      return this.entries;
+      return [];
     }
     const entries = [];
     const seen = new Set();
@@ -369,6 +369,10 @@ export class RWShadowPipeline {
       entries.push(entry);
     }
     return entries;
+  }
+
+  hasActiveEntries() {
+    return this.activeEntries.size > 0;
   }
 
   getSceneMeshes() {

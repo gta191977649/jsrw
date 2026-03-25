@@ -38,6 +38,10 @@ export class ShadowRuntime {
     this.pipeline.render(renderer, camera);
   }
 
+  hasActiveEntries() {
+    return this.pipeline.hasActiveEntries();
+  }
+
   dispose() {
     this.pipeline.dispose();
   }

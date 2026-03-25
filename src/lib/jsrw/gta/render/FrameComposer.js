@@ -184,39 +184,47 @@ export class FrameComposer {
     const coronaRuntime = this.rendererSession?.getCoronaRuntime?.();
     const shadowRuntime = this.rendererSession?.getShadowRuntime?.();
     const frameVisibility = frameVisibilityRef.current;
+    const frameVisibilityComputed = frameVisibility?.computed === true;
+    const hasCoronaCandidates = (frameVisibility?.coronaCandidates?.length || 0) > 0;
+    const hasShadowCandidates = (frameVisibility?.shadowCandidates?.length || 0) > 0;
+    const shouldUpdateCoronas = !frameVisibilityComputed || hasCoronaCandidates || coronaRuntime?.hasActiveEntries?.();
+    const shouldUpdateShadows = !frameVisibilityComputed || hasShadowCandidates || shadowRuntime?.hasActiveEntries?.();
 
     coronaRuntime?.setEnabled(render2dfxEnabled);
     shadowRuntime?.setEnabled(render2dfxEnabled && uiStateRef.current.shadows.enabled);
     coronaRuntime?.setDebugShowAll(uiStateRef.current.debug2dfx);
-    shadowRuntime?.markSceneMeshesDirty?.();
     waterPipeline?.applySettings?.({
       uvSpeed: uiStateRef.current.waterUvSpeed,
       waveHeight: uiStateRef.current.waterWaveHeight,
       farAlpha: uiStateRef.current.waterAlpha,
     });
-    coronaRuntime?.setViewport?.(viewportWidth, viewportHeight);
-    coronaRuntime?.update?.(camera, {
-      ...pipelineRuntimeContext,
-      frameVisibility,
-      timeMs: context.timeMs,
-      dt: context.dt,
-      viewportWidth,
-      viewportHeight,
-      forceRender2dfx: uiStateRef.current.forceRender2dfx,
-      twoDfx: uiStateRef.current.twoDfx,
-      trafficLights: uiStateRef.current.trafficLights,
-    });
-    shadowRuntime?.update?.(camera, {
-      ...pipelineRuntimeContext,
-      frameVisibility,
-      timeMs: context.timeMs,
-      dt: context.dt,
-      viewportWidth,
-      viewportHeight,
-      forceRender2dfx: uiStateRef.current.forceRender2dfx,
-      trafficLights: uiStateRef.current.trafficLights,
-      shadows: uiStateRef.current.shadows,
-    });
+    if (shouldUpdateCoronas) {
+      coronaRuntime?.setViewport?.(viewportWidth, viewportHeight);
+      coronaRuntime?.update?.(camera, {
+        ...pipelineRuntimeContext,
+        frameVisibility,
+        timeMs: context.timeMs,
+        dt: context.dt,
+        viewportWidth,
+        viewportHeight,
+        forceRender2dfx: uiStateRef.current.forceRender2dfx,
+        twoDfx: uiStateRef.current.twoDfx,
+        trafficLights: uiStateRef.current.trafficLights,
+      });
+    }
+    if (shouldUpdateShadows) {
+      shadowRuntime?.update?.(camera, {
+        ...pipelineRuntimeContext,
+        frameVisibility,
+        timeMs: context.timeMs,
+        dt: context.dt,
+        viewportWidth,
+        viewportHeight,
+        forceRender2dfx: uiStateRef.current.forceRender2dfx,
+        trafficLights: uiStateRef.current.trafficLights,
+        shadows: uiStateRef.current.shadows,
+      });
+    }
 
     const farBackgroundColor = skyBottomColor;
     const rwRenderQueue = rwRenderQueueRef.current;

@@ -406,6 +406,10 @@ export class RWCoronaPipeline {
     return entries;
   }
 
+  hasActiveEntries() {
+    return this.activeEntries.size > 0;
+  }
+
   createEntry(emitter, index) {
     if (!emitter) return null;
     const entry = {
