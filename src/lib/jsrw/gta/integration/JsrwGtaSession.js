@@ -143,6 +143,10 @@ function createRenderMetrics() {
     skyCloudsPassDrawCalls: 0,
     skyCloudsPassTriangles: 0,
     streamingCpuMs: 0,
+    streamingResidencyCpuMs: 0,
+    streamingVisibilityCpuMs: 0,
+    frustumCpuMs: 0,
+    occlusionCpuMs: 0,
     frameCpuMs: 0,
     queuePrepareCpuMs: 0,
     coronaUpdateCpuMs: 0,
@@ -156,6 +160,19 @@ function createRenderMetrics() {
     skyCpuMs: 0,
     postFxCpuMs: 0,
     hudCpuMs: 0,
+    chunkFrustumTests: 0,
+    itemFrustumTests: 0,
+    chunkOcclusionTests: 0,
+    itemOcclusionTests: 0,
+    residentChunkCount: 0,
+    visibilityProcessedItems: 0,
+    queueMeshCount: 0,
+    coronaSpriteCount: 0,
+    coronaLightCount: 0,
+    coronaLosChecks: 0,
+    coronaRenderPasses: 0,
+    waterVisibleFarCells: 0,
+    waterVisibleFarCoarseCells: 0,
   };
 }
 
@@ -380,6 +397,7 @@ export class JsrwGtaSession {
       lodUpdateStateRef.current.lastCameraNear = Number.NaN;
       lodUpdateStateRef.current.lastCameraFar = Number.NaN;
       lodUpdateStateRef.current.residentScanChunks = [];
+      lodUpdateStateRef.current.scanCode = 0;
     }
     setShowGameIcon?.(false);
     if (renderResourcesReadyRef) renderResourcesReadyRef.current = false;
@@ -1360,6 +1378,7 @@ export class JsrwGtaSession {
       lodUpdateStateRef.current.lastCameraChunkX = Number.NaN;
       lodUpdateStateRef.current.lastCameraChunkZ = Number.NaN;
       lodUpdateStateRef.current.residentScanChunks = [];
+      lodUpdateStateRef.current.scanCode = 0;
       setBuildProgress?.({ active: false, current: buildTotal, total: buildTotal });
       setStatus?.(`Done. Loaded ${loaded} placements.`);
       setShowGameIcon?.(true);

@@ -8,6 +8,7 @@ export class WaterRuntime {
 
   setBackend(backend) {
     this.backend = backend || null;
+    this.pipeline.setBackend?.(this.backend);
   }
 
   applySettings(settings) {
@@ -56,6 +57,10 @@ export class WaterRuntime {
 
   renderWake(renderer, camera) {
     this.pipeline.renderWake(renderer, camera);
+  }
+
+  getDebugStats() {
+    return this.pipeline.debugStats || null;
   }
 
   dispose() {

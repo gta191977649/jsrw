@@ -22,6 +22,9 @@ const DEBUG_HELPER_GEOMETRY = new THREE.BoxGeometry(0.18, 0.18, 0.18);
 const MIN_LOS_INTERVAL_MS = 250;
 const DEFAULT_POINT_LIGHT_INTENSITY = 1.5;
 const MAX_ACTIVE_CORONAS = 96;
+const MAX_ACTIVE_CORONA_LIGHTS = 24;
+const TRAFFIC_LIGHT_MAX_LIGHT_DISTANCE = 90;
+const DEFAULT_MAX_LIGHT_DISTANCE = 140;
 const OFFSCREEN_FADE_MARGIN = 0;
 
 function clamp01(value) {
@@ -261,6 +264,10 @@ export class RWCoronaPipeline {
       entryCount: 0,
       candidateCount: 0,
       activeCount: 0,
+      spriteCount: 0,
+      lightCount: 0,
+      losChecks: 0,
+      renderPasses: 0,
     };
     this.raycaster = new THREE.Raycaster();
     this.cachedOccluderMeshes = null;
@@ -410,6 +417,11 @@ export class RWCoronaPipeline {
     return this.activeEntries.size > 0;
   }
 
+  hasVisibleRenderables() {
+    return (this.debugStats.spriteCount > 0)
+      || (this.enableDebugHelpers && this.debugShowAll);
+  }
+
   createEntry(emitter, index) {
     if (!emitter) return null;
     const entry = {
@@ -555,6 +567,7 @@ export class RWCoronaPipeline {
   computeLosVisible(entry, camera, timeMs) {
     if (!entry.emitter.losCheck || !this.root) return true;
     if ((timeMs - entry.lastLosCheckMs) < MIN_LOS_INTERVAL_MS) return entry.losVisible;
+    this.debugStats.losChecks += 1;
     const occluders = this.getOccluderMeshes();
     if (occluders.length === 0) {
       entry.losVisible = true;
@@ -600,6 +613,9 @@ export class RWCoronaPipeline {
     const sourceEntries = this.getFrameEntries(runtimeContext?.frameVisibility);
     const candidateEntries = [];
     const nextActiveEntries = new Set();
+    this.debugStats.spriteCount = 0;
+    this.debugStats.lightCount = 0;
+    this.debugStats.losChecks = 0;
 
     for (const entry of sourceEntries) {
       const emitter = entry.emitter;
@@ -628,6 +644,23 @@ export class RWCoronaPipeline {
 
     let activeBudget = Math.max(0, Math.floor(Number(runtimeContext?.twoDfx?.maxActiveCoronas) || MAX_ACTIVE_CORONAS));
     const selectedEntries = RenderEntityController.selectClosest(candidateEntries, activeBudget, fadeConfig);
+    const lightBudget = Math.min(
+      activeBudget,
+      Math.max(0, Math.floor(Number(runtimeContext?.twoDfx?.maxActiveCoronaLights) || MAX_ACTIVE_CORONA_LIGHTS)),
+    );
+    const sortedSelectedEntries = candidateEntries
+      .filter((item) => selectedEntries.has(item.entry))
+      .sort((left, right) => left.distance - right.distance);
+    const selectedLightEntries = new Set();
+    for (const item of sortedSelectedEntries) {
+      if (!item.entry?.light) continue;
+      const maxLightDistance = item.entry.emitter?.sourceType === 'trafficLight'
+        ? TRAFFIC_LIGHT_MAX_LIGHT_DISTANCE
+        : DEFAULT_MAX_LIGHT_DISTANCE;
+      if (item.distance > maxLightDistance) continue;
+      selectedLightEntries.add(item.entry);
+      if (selectedLightEntries.size >= lightBudget) break;
+    }
 
     for (const item of candidateEntries) {
       const { entry, visibility, distance, drawDistance, withinDrawDistance } = item;
@@ -697,6 +730,7 @@ export class RWCoronaPipeline {
         const visible = this.enabled && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon && screenVisible;
         entry.sprite.visible = Boolean(visible);
         if (visible) {
+          this.debugStats.spriteCount += 1;
           const color = normalizeEmitterColor(emitter.color);
           const coronaAlpha = clamp01((Number(emitter.alpha) || 255) / 255);
           const trafficLightSettings = runtimeContext?.trafficLights || null;
@@ -726,7 +760,7 @@ export class RWCoronaPipeline {
       if (entry.light) {
         const lightDescriptor = emitter.light || {};
         const visible = this.enabled
-          && selectedEntries.has(entry)
+          && selectedLightEntries.has(entry)
           && visibility.active
           && withinDrawDistance
           && losVisible
@@ -735,6 +769,7 @@ export class RWCoronaPipeline {
         TMP_COLOR.setRGB(color.r, color.g, color.b, THREE.SRGBColorSpace);
         entry.light.color.copy(TMP_COLOR);
         entry.light.visible = visible;
+        if (visible) this.debugStats.lightCount += 1;
         const brightnessScale = lightDescriptor.colorScale === 'spriteBrightness'
           ? spriteBrightness
           : 1;
@@ -804,8 +839,9 @@ export class RWCoronaPipeline {
   }
 
   render(renderer, camera) {
-    if (!renderer || !camera || !this.enabled) return;
+    if (!renderer || !camera || !this.enabled || !this.hasVisibleRenderables()) return;
     this.renderScene.updateMatrixWorld(true);
+    this.debugStats.renderPasses += 1;
     renderer.render(this.renderScene, camera);
   }
 

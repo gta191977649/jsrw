@@ -568,12 +568,15 @@ export class FrameComposer {
       transparentQueue: rwRenderQueueRef.current?.debugStats?.transparentCount ?? 0,
       additiveQueue: rwRenderQueueRef.current?.debugStats?.additiveCount ?? 0,
       overlayQueue: rwRenderQueueRef.current?.debugStats?.overlayCount ?? 0,
+      queueMeshCount: rwRenderQueueRef.current?.debugStats?.frameMeshCount ?? 0,
       drawCalls: Math.max(0, frameEndStats.calls - frameStartStats.calls),
       triangles: Math.max(0, frameEndStats.triangles - frameStartStats.triangles),
       worldDrawCalls: stageWorldStats.drawCalls,
       worldTriangles: stageWorldStats.triangles,
       waterDrawCalls: stageWaterStats.drawCalls,
       waterTriangles: stageWaterStats.triangles,
+      waterVisibleFarCells: sessionStats?.water?.visibleFarCells ?? 0,
+      waterVisibleFarCoarseCells: sessionStats?.water?.visibleFarCoarseCells ?? 0,
       skyDrawCalls: stageSkyStats.drawCalls,
       skyTriangles: stageSkyStats.triangles,
       skyCloudsPassInvoked,
@@ -592,6 +595,10 @@ export class FrameComposer {
       skyCpuMs,
       postFxCpuMs,
       hudCpuMs,
+      coronaSpriteCount: sessionStats?.corona?.spriteCount ?? 0,
+      coronaLightCount: sessionStats?.corona?.lightCount ?? 0,
+      coronaLosChecks: sessionStats?.corona?.losChecks ?? 0,
+      coronaRenderPasses: sessionStats?.corona?.renderPasses ?? 0,
     };
   }
 }

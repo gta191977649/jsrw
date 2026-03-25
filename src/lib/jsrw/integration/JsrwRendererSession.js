@@ -67,6 +67,12 @@ export class JsrwRendererSession {
       renderQueue: {
         ...(this.renderQueue?.debugStats || {}),
       },
+      corona: {
+        ...(this.coronaRuntime?.getDebugStats?.() || {}),
+      },
+      water: {
+        ...(this.waterRuntime?.getDebugStats?.() || {}),
+      },
     };
   }
 

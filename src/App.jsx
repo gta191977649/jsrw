@@ -640,6 +640,10 @@ function App() {
     skyCloudsPassDrawCalls: 0,
     skyCloudsPassTriangles: 0,
     streamingCpuMs: 0,
+    streamingResidencyCpuMs: 0,
+    streamingVisibilityCpuMs: 0,
+    frustumCpuMs: 0,
+    occlusionCpuMs: 0,
     frameCpuMs: 0,
     queuePrepareCpuMs: 0,
     coronaUpdateCpuMs: 0,
@@ -653,6 +657,19 @@ function App() {
     skyCpuMs: 0,
     postFxCpuMs: 0,
     hudCpuMs: 0,
+    chunkFrustumTests: 0,
+    itemFrustumTests: 0,
+    chunkOcclusionTests: 0,
+    itemOcclusionTests: 0,
+    residentChunkCount: 0,
+    visibilityProcessedItems: 0,
+    queueMeshCount: 0,
+    coronaSpriteCount: 0,
+    coronaLightCount: 0,
+    coronaLosChecks: 0,
+    coronaRenderPasses: 0,
+    waterVisibleFarCells: 0,
+    waterVisibleFarCoarseCells: 0,
   });
   const selectedObjectRootRef = useRef(null);
   const selectedInstanceHighlightRef = useRef(null);
@@ -828,6 +845,7 @@ function App() {
     lastCameraNear: Number.NaN,
     lastCameraFar: Number.NaN,
     residentScanChunks: [],
+    scanCode: 0,
   });
 
   const uiStateRef = useRef({
@@ -2869,14 +2887,22 @@ function App() {
                 `Sky clouds pass: ${renderMetrics.skyCloudsPassInvoked ? 'yes' : 'no'} | calls ${renderMetrics.skyCloudsPassDrawCalls ?? 0} | tris ${renderMetrics.skyCloudsPassTriangles ?? 0}`,
               );
               ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
-              ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
+              ImGui.Text(`Chunks resident/visible: ${renderMetrics.residentChunkCount} / ${renderMetrics.frustumChunks}`);
+              ImGui.Text(`Active Items: ${renderMetrics.activeItems} | processed ${renderMetrics.visibilityProcessedItems}`);
               ImGui.Text(`Pipeline materials: active ${renderMetrics.pipelineActiveMaterials} | cached ${renderMetrics.pipelineCachedMaterials}`);
               ImGui.Text(`Fade: active ${renderMetrics.activeFadeCount} | proxies ${renderMetrics.fadeProxyCount}`);
               ImGui.Text(`Render Queue: opaque ${renderMetrics.opaqueQueue} | cutout ${renderMetrics.cutoutQueue} | blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
+              ImGui.Text(`Render Queue meshes: ${renderMetrics.queueMeshCount}`);
+              ImGui.Text(`Frustum tests: chunk ${renderMetrics.chunkFrustumTests} | item ${renderMetrics.itemFrustumTests}`);
+              ImGui.Text(`Occlusion tests: chunk ${renderMetrics.chunkOcclusionTests} | item ${renderMetrics.itemOcclusionTests}`);
               ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
               ImGui.Text(`Lighting: IDE 2DFX ${statsRef.current.ideEffects} | objects ${statsRef.current.lightObjects} | emitters ${statsRef.current.lightEmitters}`);
+              ImGui.Text(`Coronas: sprites ${renderMetrics.coronaSpriteCount} | lights ${renderMetrics.coronaLightCount} | LOS ${renderMetrics.coronaLosChecks} | passes ${renderMetrics.coronaRenderPasses}`);
+              ImGui.Text(`Water cells: fine ${renderMetrics.waterVisibleFarCells} | coarse ${renderMetrics.waterVisibleFarCoarseCells}`);
               ImGui.Separator();
               ImGui.Text(`CPU total: frame ${renderMetrics.frameCpuMs.toFixed(2)}ms | streaming ${renderMetrics.streamingCpuMs.toFixed(2)}ms`);
+              ImGui.Text(`CPU streaming: residency ${renderMetrics.streamingResidencyCpuMs.toFixed(2)}ms | visibility ${renderMetrics.streamingVisibilityCpuMs.toFixed(2)}ms`);
+              ImGui.Text(`CPU culling: frustum ${renderMetrics.frustumCpuMs.toFixed(2)}ms | occlusion ${renderMetrics.occlusionCpuMs.toFixed(2)}ms`);
               ImGui.Text(`CPU scene: queue ${renderMetrics.queuePrepareCpuMs.toFixed(2)}ms | opaque ${renderMetrics.sceneOpaqueCpuMs.toFixed(2)}ms | transparent ${renderMetrics.sceneTransparentCpuMs.toFixed(2)}ms`);
               ImGui.Text(`CPU 2DFX: shadow update ${renderMetrics.shadowUpdateCpuMs.toFixed(2)}ms | shadow render ${renderMetrics.shadowRenderCpuMs.toFixed(2)}ms`);
               ImGui.Text(`CPU 2DFX: corona update ${renderMetrics.coronaUpdateCpuMs.toFixed(2)}ms | corona render ${renderMetrics.coronaRenderCpuMs.toFixed(2)}ms`);

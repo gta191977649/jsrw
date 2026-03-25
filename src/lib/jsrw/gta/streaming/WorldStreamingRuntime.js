@@ -41,8 +41,13 @@ const CHUNK_ACTIVE_MARGIN = 384;
 const CHUNK_CULL_MARGIN_XZ = WORLD_CHUNK_SIZE * 1.0;
 const CHUNK_CULL_MARGIN_Y = WORLD_CHUNK_SIZE * 1.5;
 const RW_FADE_EPSILON = DISTANCE_FADE_DEFAULTS.epsilon;
+const OCCLUSION_CACHE_MS = 120;
 const FALLBACK_AMBIENT = new THREE.Color(1, 1, 1);
 const FALLBACK_EMISSIVE = new THREE.Color(0, 0, 0);
+
+function getProfilingTimeNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
 
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
@@ -428,22 +433,22 @@ export class WorldStreamingRuntime {
       for (let chunkX = cameraChunkX - scanRadius; chunkX <= cameraChunkX + scanRadius; chunkX += 1) {
         const chunk = chunkLookup.get(`${chunkX},${chunkZ}`);
         if (!chunk) continue;
-      const chunkCenter = chunk?.center;
-      if (!chunkCenter) continue;
-      const dx = (chunkCenter.x ?? 0) - cameraPoint.x;
-      const dz = (chunkCenter.z ?? 0) - cameraPoint.y;
-      const chunkRadius = Math.max(
-        WORLD_CHUNK_SIZE,
-        Number(chunk.boundingSphere?.radius) || 0,
-      );
-      const distance = Math.hypot(dx, dz);
-      if (distance > resolvedRenderDistance + chunkRadius + CHUNK_ACTIVE_MARGIN) continue;
-      candidates.push({
-        chunk,
-        distance,
-        priority: distance <= resolvedPriorityDistance + chunkRadius,
-      });
-    }
+        const chunkCenter = chunk?.center;
+        if (!chunkCenter) continue;
+        const dx = (chunkCenter.x ?? 0) - cameraPoint.x;
+        const dz = (chunkCenter.z ?? 0) - cameraPoint.y;
+        const chunkRadius = Math.max(
+          WORLD_CHUNK_SIZE,
+          Number(chunk.boundingSphere?.radius) || 0,
+        );
+        const distance = Math.hypot(dx, dz);
+        if (distance > resolvedRenderDistance + chunkRadius + CHUNK_ACTIVE_MARGIN) continue;
+        candidates.push({
+          chunk,
+          distance,
+          priority: distance <= resolvedPriorityDistance + chunkRadius,
+        });
+      }
     }
 
     candidates.sort((left, right) => {
@@ -587,6 +592,17 @@ export class WorldStreamingRuntime {
     }
 
     lodUpdateAccumulatorRef.current = 0;
+    const frameScanCode = ((((Number(lodState.scanCode) || 0) + 1) >>> 0) || 1);
+    lodState.scanCode = frameScanCode;
+    const visibilityStageStart = getProfilingTimeNow();
+    let residencyCpuMs = 0;
+    let frustumCpuMs = 0;
+    let occlusionCpuMs = 0;
+    let chunkFrustumTests = 0;
+    let itemFrustumTests = 0;
+    let chunkOcclusionTests = 0;
+    let itemOcclusionTests = 0;
+    let visibilityProcessedItems = 0;
     const distanceFadeConfig = DISTANCE_FADE_DEFAULTS;
     const fadeEpsilon = RenderEntityController.getEpsilon(distanceFadeConfig);
     const frameVisibility = resetFrameVisibilityResult(frameVisibilityRef.current);
@@ -603,12 +619,14 @@ export class WorldStreamingRuntime {
     const needsResidencyRefresh = lodState.needsResidencyRefresh
       || !Array.isArray(lodState.residentScanChunks)
       || lodState.residentScanChunks.length === 0;
+    const residencyStart = getProfilingTimeNow();
     const candidateChunks = needsResidencyRefresh
       ? this.collectGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef)
       : lodState.residentScanChunks;
     if (needsResidencyRefresh) {
       lodState.residentScanChunks = candidateChunks;
     }
+    residencyCpuMs = Math.max(0, getProfilingTimeNow() - residencyStart);
     candidateChunks.sort((a, b) => {
       const da = camera.position.distanceToSquared(a.center);
       const db = camera.position.distanceToSquared(b.center);
@@ -619,7 +637,6 @@ export class WorldStreamingRuntime {
     const previousActiveChunks = activeRenderChunksRef.current;
     const nextActiveChunks = new Set();
     const protectedItems = new Set();
-    const processedItems = new Set();
     let activeChunks = 0;
     let frustumChunks = 0;
     let activeItems = 0;
@@ -629,29 +646,50 @@ export class WorldStreamingRuntime {
     let fadeProxyCount = 0;
 
     const processRenderItem = (item, { checkOcclusion = false } = {}) => {
-      if (!item || processedItems.has(item)) return;
-      processedItems.add(item);
+      if (!item || item.__rwVisibilityScanCode === frameScanCode) return;
+      item.__rwVisibilityScanCode = frameScanCode;
+      visibilityProcessedItems += 1;
 
       const distSq = camera.position.distanceToSquared(item.anchor);
       const hasNear = hasNearRenderable(item);
       const hasLod = hasLodRenderable(item);
       const bypassCloseRangeFrustum = shouldBypassCloseRangeItemFrustum(item, distSq);
-      const itemInFrustum = !enableOcclusion || bypassCloseRangeFrustum || (
-        isComplexFrustumItem(item)
+      let itemInFrustum = !enableOcclusion || bypassCloseRangeFrustum;
+      if (!itemInFrustum) {
+        const frustumStart = getProfilingTimeNow();
+        itemFrustumTests += 1;
+        itemInFrustum = isComplexFrustumItem(item)
           ? (
             item.boundingBox?.isBox3
               ? chunkFrustum.intersectsBox(item.boundingBox)
               : chunkFrustum.intersectsSphere(item.boundingSphere)
           )
-          : chunkFrustum.intersectsSphere(item.boundingSphere)
-      );
+          : chunkFrustum.intersectsSphere(item.boundingSphere);
+        frustumCpuMs += Math.max(0, getProfilingTimeNow() - frustumStart);
+      }
       if (!itemInFrustum) {
         this.hideRenderItemCompletely(item, dirtyBatches, context);
         return;
       }
-      if (enableOcclusion && checkOcclusion && isChunkOccluded(occlusionState, camera, item)) {
-        this.hideRenderItemCompletely(item, dirtyBatches, context);
-        return;
+      if (enableOcclusion && checkOcclusion) {
+        const nowMs = Number(context.timeMs) || 0;
+        let itemOccluded = false;
+        const canReuseOcclusion = Number.isFinite(item.__rwOcclusionCheckedAt)
+          && (nowMs - item.__rwOcclusionCheckedAt) <= OCCLUSION_CACHE_MS;
+        if (canReuseOcclusion) {
+          itemOccluded = item.__rwOcclusionResult === true;
+        } else {
+          const occlusionStart = getProfilingTimeNow();
+          itemOcclusionTests += 1;
+          itemOccluded = isChunkOccluded(occlusionState, camera, item);
+          occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
+          item.__rwOcclusionCheckedAt = nowMs;
+          item.__rwOcclusionResult = itemOccluded;
+        }
+        if (itemOccluded) {
+          this.hideRenderItemCompletely(item, dirtyBatches, context);
+          return;
+        }
       }
 
       activeItems += 1;
@@ -803,15 +841,17 @@ export class WorldStreamingRuntime {
     for (const chunk of candidateChunks) {
       const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
       const bypassCloseRangeChunkFrustum = shouldBypassCloseRangeChunkFrustum(chunk, camera);
-      const chunkInFrustum = chunkInRange && (
-        !enableOcclusion || (
-        bypassCloseRangeChunkFrustum || (
-        chunk.boundingBox?.isBox3
+      let chunkInFrustum = chunkInRange && !enableOcclusion;
+      if (chunkInRange && enableOcclusion && !bypassCloseRangeChunkFrustum) {
+        const frustumStart = getProfilingTimeNow();
+        chunkFrustumTests += 1;
+        chunkInFrustum = chunk.boundingBox?.isBox3
           ? chunkFrustum.intersectsBox(chunk.boundingBox)
-          : chunkFrustum.intersectsSphere(chunk.boundingSphere)
-        )
-        )
-      );
+          : chunkFrustum.intersectsSphere(chunk.boundingSphere);
+        frustumCpuMs += Math.max(0, getProfilingTimeNow() - frustumStart);
+      } else if (chunkInRange && bypassCloseRangeChunkFrustum) {
+        chunkInFrustum = true;
+      }
       if (chunkInRange) frustumChunks += chunkInFrustum ? 1 : 0;
       if (!chunkInFrustum) {
         if (chunk.active) {
@@ -822,7 +862,14 @@ export class WorldStreamingRuntime {
         }
         continue;
       }
-      if (enableOcclusion && isChunkOccluded(occlusionState, camera, chunk)) {
+      let chunkOccluded = false;
+      if (enableOcclusion) {
+        const occlusionStart = getProfilingTimeNow();
+        chunkOcclusionTests += 1;
+        chunkOccluded = isChunkOccluded(occlusionState, camera, chunk);
+        occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
+      }
+      if (chunkOccluded) {
         if (chunk.active) {
           chunk.active = false;
           for (const item of chunk.items) {
@@ -842,7 +889,9 @@ export class WorldStreamingRuntime {
         processRenderItem(item);
       }
       if (enableOcclusion) {
+        const occlusionStart = getProfilingTimeNow();
         registerChunkOccluder(occlusionState, camera, chunk);
+        occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
       }
     }
 
@@ -877,6 +926,16 @@ export class WorldStreamingRuntime {
       shadowCandidates: frameVisibility.shadowCandidates.length,
       fadeProxyCount,
       activeFadeCount: activeFades,
+      streamingResidencyCpuMs: residencyCpuMs,
+      streamingVisibilityCpuMs: Math.max(0, getProfilingTimeNow() - visibilityStageStart),
+      frustumCpuMs,
+      occlusionCpuMs,
+      chunkFrustumTests,
+      itemFrustumTests,
+      chunkOcclusionTests,
+      itemOcclusionTests,
+      residentChunkCount: candidateChunks.length,
+      visibilityProcessedItems,
     };
     frameVisibility.computed = true;
     activeFadeCountRef.current = activeFades;

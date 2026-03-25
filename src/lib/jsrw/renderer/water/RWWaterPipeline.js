@@ -9,6 +9,8 @@ const MIN_FAR_RENDER_DISTANCE = 512;
 const COARSE_WATER_START_DISTANCE = 500;
 const COARSE_WATER_GROUP_SIZE = 4;
 const WATER_CULL_MARGIN_MULTIPLIER = 1.25;
+const WATER_VISIBILITY_POSITION_EPSILON_SQ = 9;
+const WATER_VISIBILITY_ROTATION_DOT = 0.9998;
 
 function createFallbackTexture() {
   const data = new Uint8Array([255, 255, 255, 255]);
@@ -292,6 +294,7 @@ export class RWWaterPipeline {
     this.parsed = options.parsed;
     this.enabled = options.enabled !== false;
     this.timecycleProvider = null;
+    this.backendId = String(options.backend?.id || 'WEBGL').toUpperCase();
 
     this.settings = {
       uvSpeed: 1,
@@ -369,10 +372,21 @@ export class RWWaterPipeline {
     this.visibleFarCells = 0;
     this.visibleFarCoarseCells = 0;
     this.waterCellCount = sectorCount;
+    this.lastVisibilityCameraPos = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
+    this.lastVisibilityCameraQuat = new THREE.Quaternion(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+    this.debugStats = {
+      visibleFarCells: 0,
+      visibleFarCoarseCells: 0,
+      waterCellCount: sectorCount,
+    };
 
     this.applySettings(options.settings || null);
     this.setEnabled(this.enabled);
     this.setWireframe(Boolean(options.wireframe));
+  }
+
+  setBackend(backend) {
+    this.backendId = String(backend?.id || this.backendId || 'WEBGL').toUpperCase();
   }
 
   setTexture(sourceTexture) {
@@ -423,6 +437,21 @@ export class RWWaterPipeline {
 
   updateVisibleFarSectors(camera) {
     if (!camera || !this.farMesh || !this.farCoarseMesh || !Array.isArray(this.sectorEntries)) return;
+    const knownCameraPos = Number.isFinite(this.lastVisibilityCameraPos.x)
+      && Number.isFinite(this.lastVisibilityCameraPos.y)
+      && Number.isFinite(this.lastVisibilityCameraPos.z);
+    const knownCameraQuat = Number.isFinite(this.lastVisibilityCameraQuat.x)
+      && Number.isFinite(this.lastVisibilityCameraQuat.y)
+      && Number.isFinite(this.lastVisibilityCameraQuat.z)
+      && Number.isFinite(this.lastVisibilityCameraQuat.w);
+    const cameraMoved = !knownCameraPos
+      || camera.position.distanceToSquared(this.lastVisibilityCameraPos) > WATER_VISIBILITY_POSITION_EPSILON_SQ;
+    const cameraRotated = !knownCameraQuat
+      || Math.abs(camera.quaternion.dot(this.lastVisibilityCameraQuat)) < WATER_VISIBILITY_ROTATION_DOT;
+    if (!cameraMoved && !cameraRotated) return;
+
+    this.lastVisibilityCameraPos.copy(camera.position);
+    this.lastVisibilityCameraQuat.copy(camera.quaternion);
     this.tempProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.tempFrustum.setFromProjectionMatrix(this.tempProjScreenMatrix);
     const renderDistance = Math.max(
@@ -430,9 +459,12 @@ export class RWWaterPipeline {
       (Number(camera.far) || MIN_FAR_RENDER_DISTANCE) * 1.1,
     );
     const renderDistanceSq = renderDistance * renderDistance;
+    const coarseStartDistance = this.backendId === 'WEBGPU'
+      ? Math.max(COARSE_WATER_START_DISTANCE * 0.7, renderDistance * 0.15)
+      : Math.max(COARSE_WATER_START_DISTANCE, renderDistance * 0.2);
     const coarseStartDistanceSq = Math.min(
       renderDistanceSq,
-      Math.max(COARSE_WATER_START_DISTANCE, renderDistance * 0.2) ** 2,
+      coarseStartDistance ** 2,
     );
     let visibleFineCount = 0;
     let visibleCoarseCount = 0;
@@ -460,6 +492,9 @@ export class RWWaterPipeline {
     }
     this.visibleFarCells = visibleFineCount;
     this.visibleFarCoarseCells = visibleCoarseCount;
+    this.debugStats.visibleFarCells = visibleFineCount;
+    this.debugStats.visibleFarCoarseCells = visibleCoarseCount;
+    this.debugStats.waterCellCount = this.waterCellCount;
     this.farMesh.count = visibleFineCount;
     this.farMesh.instanceMatrix.needsUpdate = true;
     this.farCoarseMesh.count = visibleCoarseCount;

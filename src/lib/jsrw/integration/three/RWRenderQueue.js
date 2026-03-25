@@ -128,6 +128,7 @@ export class RWRenderQueue {
       transparentCount: 0,
       additiveCount: 0,
       overlayCount: 0,
+      frameMeshCount: 0,
       alphaBuildingCount: 0,
       alphaEntityCount: 0,
       alphaUnderwaterCount: 0,
@@ -219,6 +220,7 @@ export class RWRenderQueue {
     this.debugStats.transparentCount = 0;
     this.debugStats.additiveCount = 0;
     this.debugStats.overlayCount = 0;
+    this.debugStats.frameMeshCount = 0;
     this.debugStats.alphaBuildingCount = 0;
     this.debugStats.alphaEntityCount = 0;
     this.debugStats.alphaUnderwaterCount = 0;
@@ -240,6 +242,7 @@ export class RWRenderQueue {
       }
 
       if (this.frameBuckets[entry.bucket]) this.frameBuckets[entry.bucket].push(entry);
+      this.debugStats.frameMeshCount += 1;
       if (entry.bucket === 'opaque') this.debugStats.opaqueCount += 1;
       else if (entry.bucket === 'cutout') this.debugStats.cutoutCount += 1;
       else if (entry.bucket === 'transparent') this.debugStats.transparentCount += 1;

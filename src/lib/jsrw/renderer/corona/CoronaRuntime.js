@@ -46,6 +46,10 @@ export class CoronaRuntime {
     return this.pipeline.hasActiveEntries();
   }
 
+  getDebugStats() {
+    return this.pipeline.debugStats || null;
+  }
+
   dispose() {
     this.pipeline.dispose();
   }
