@@ -653,6 +653,33 @@ export class WorldStreamingRuntime {
       const distSq = camera.position.distanceToSquared(item.anchor);
       const hasNear = hasNearRenderable(item);
       const hasLod = hasLodRenderable(item);
+      const nearConfiguredDistance = Math.min(
+        resolveRenderableDistance(item.nearState?.drawDistance, renderingDistance),
+        renderingDistance,
+      );
+      const lodConfiguredDistance = Math.min(
+        resolveRenderableDistance(item.lodState?.drawDistance, renderingDistance),
+        renderingDistance,
+      );
+      const maxRenderableDistance = Math.max(
+        hasNear && !forceLodOnly ? nearConfiguredDistance : 0,
+        hasLod ? lodConfiguredDistance : 0,
+      );
+      const currentVisibilityAlpha = Math.max(
+        Number(item?.nearState?.fadeAlpha) || 0,
+        Number(item?.nearState?.streamAlpha) || 0,
+        Number(item?.lodState?.fadeAlpha) || 0,
+        Number(item?.lodState?.streamAlpha) || 0,
+      );
+      const hardCullDistance = maxRenderableDistance + distanceFadeConfig.window;
+      if (
+        maxRenderableDistance > 0
+        && distSq > (hardCullDistance * hardCullDistance)
+        && currentVisibilityAlpha <= fadeEpsilon
+      ) {
+        this.hideRenderItemCompletely(item, dirtyBatches, context);
+        return;
+      }
       const bypassCloseRangeFrustum = shouldBypassCloseRangeItemFrustum(item, distSq);
       let itemInFrustum = !enableOcclusion || bypassCloseRangeFrustum;
       if (!itemInFrustum) {
@@ -703,15 +730,8 @@ export class WorldStreamingRuntime {
       const pairedItem = hasNear && hasLod;
       // Unpaired near (no LOD mesh) or near-only: never use the LOD switch slider as IDE fallback —
       // that was clipping buildings with no paired LOD. Paired crossfade uses nearRangeEnd below.
-      const nearConfiguredDistance = resolveRenderableDistance(
-        item.nearState?.drawDistance,
-        renderingDistance,
-      );
-      const nearEndDistance = Math.min(nearConfiguredDistance, renderingDistance);
-      const lodEndDistance = Math.min(
-        resolveRenderableDistance(item.lodState?.drawDistance, renderingDistance),
-        renderingDistance,
-      );
+      const nearEndDistance = nearConfiguredDistance;
+      const lodEndDistance = lodConfiguredDistance;
 
       let nearShouldShow = false;
       let lodShouldShow = false;
