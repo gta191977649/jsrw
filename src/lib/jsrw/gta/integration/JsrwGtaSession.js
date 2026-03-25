@@ -142,6 +142,20 @@ function createRenderMetrics() {
     skyCloudsPassInvoked: false,
     skyCloudsPassDrawCalls: 0,
     skyCloudsPassTriangles: 0,
+    streamingCpuMs: 0,
+    frameCpuMs: 0,
+    queuePrepareCpuMs: 0,
+    coronaUpdateCpuMs: 0,
+    coronaRenderCpuMs: 0,
+    shadowUpdateCpuMs: 0,
+    shadowRenderCpuMs: 0,
+    waterUpdateCpuMs: 0,
+    waterRenderCpuMs: 0,
+    sceneOpaqueCpuMs: 0,
+    sceneTransparentCpuMs: 0,
+    skyCpuMs: 0,
+    postFxCpuMs: 0,
+    hudCpuMs: 0,
   };
 }
 
@@ -251,7 +265,16 @@ export class JsrwGtaSession {
   }
 
   updateStreaming(context = {}) {
-    return this.streamingRuntime.update(context);
+    const startTime = globalThis.performance?.now?.() ?? Date.now();
+    const result = this.streamingRuntime.update(context);
+    const endTime = globalThis.performance?.now?.() ?? Date.now();
+    if (context?.renderMetricsRef?.current) {
+      context.renderMetricsRef.current = {
+        ...context.renderMetricsRef.current,
+        streamingCpuMs: Math.max(0, endTime - startTime),
+      };
+    }
+    return result;
   }
 
   renderFrame(context = {}) {
@@ -346,12 +369,17 @@ export class JsrwGtaSession {
     rwRenderQueueRef?.current?.markDirty?.();
     if (lodUpdateStateRef?.current) {
       lodUpdateStateRef.current.needsRefresh = true;
+      lodUpdateStateRef.current.needsVisibilityRefresh = true;
+      lodUpdateStateRef.current.needsResidencyRefresh = true;
       lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
       lodUpdateStateRef.current.lastCameraQuat.set(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+      lodUpdateStateRef.current.lastCameraChunkX = Number.NaN;
+      lodUpdateStateRef.current.lastCameraChunkZ = Number.NaN;
       lodUpdateStateRef.current.lastCameraAspect = Number.NaN;
       lodUpdateStateRef.current.lastCameraFov = Number.NaN;
       lodUpdateStateRef.current.lastCameraNear = Number.NaN;
       lodUpdateStateRef.current.lastCameraFar = Number.NaN;
+      lodUpdateStateRef.current.residentScanChunks = [];
     }
     setShowGameIcon?.(false);
     if (renderResourcesReadyRef) renderResourcesReadyRef.current = false;
@@ -1325,8 +1353,13 @@ export class JsrwGtaSession {
       lastPipelineSelectionSignatureRef.current = '';
       rwRenderQueueRef.current?.markDirty();
       lodUpdateStateRef.current.needsRefresh = true;
+      lodUpdateStateRef.current.needsVisibilityRefresh = true;
+      lodUpdateStateRef.current.needsResidencyRefresh = true;
       lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
       lodUpdateStateRef.current.lastCameraQuat.set(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+      lodUpdateStateRef.current.lastCameraChunkX = Number.NaN;
+      lodUpdateStateRef.current.lastCameraChunkZ = Number.NaN;
+      lodUpdateStateRef.current.residentScanChunks = [];
       setBuildProgress?.({ active: false, current: buildTotal, total: buildTotal });
       setStatus?.(`Done. Loaded ${loaded} placements.`);
       setShowGameIcon?.(true);

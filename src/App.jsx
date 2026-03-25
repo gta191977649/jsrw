@@ -639,6 +639,20 @@ function App() {
     skyCloudsPassInvoked: false,
     skyCloudsPassDrawCalls: 0,
     skyCloudsPassTriangles: 0,
+    streamingCpuMs: 0,
+    frameCpuMs: 0,
+    queuePrepareCpuMs: 0,
+    coronaUpdateCpuMs: 0,
+    coronaRenderCpuMs: 0,
+    shadowUpdateCpuMs: 0,
+    shadowRenderCpuMs: 0,
+    waterUpdateCpuMs: 0,
+    waterRenderCpuMs: 0,
+    sceneOpaqueCpuMs: 0,
+    sceneTransparentCpuMs: 0,
+    skyCpuMs: 0,
+    postFxCpuMs: 0,
+    hudCpuMs: 0,
   });
   const selectedObjectRootRef = useRef(null);
   const selectedInstanceHighlightRef = useRef(null);
@@ -797,8 +811,12 @@ function App() {
   const appUnmountingRef = useRef(false);
   const lodUpdateStateRef = useRef({
     needsRefresh: true,
+    needsVisibilityRefresh: true,
+    needsResidencyRefresh: true,
     lastCameraPos: new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN),
     lastCameraQuat: new THREE.Quaternion(Number.NaN, Number.NaN, Number.NaN, Number.NaN),
+    lastCameraChunkX: Number.NaN,
+    lastCameraChunkZ: Number.NaN,
     lastDrawDistance: 300,
     lastRenderingDistance: 5000,
     lastShowLods: true,
@@ -809,6 +827,7 @@ function App() {
     lastCameraFov: Number.NaN,
     lastCameraNear: Number.NaN,
     lastCameraFar: Number.NaN,
+    residentScanChunks: [],
   });
 
   const uiStateRef = useRef({
@@ -2856,6 +2875,13 @@ function App() {
               ImGui.Text(`Render Queue: opaque ${renderMetrics.opaqueQueue} | cutout ${renderMetrics.cutoutQueue} | blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
               ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
               ImGui.Text(`Lighting: IDE 2DFX ${statsRef.current.ideEffects} | objects ${statsRef.current.lightObjects} | emitters ${statsRef.current.lightEmitters}`);
+              ImGui.Separator();
+              ImGui.Text(`CPU total: frame ${renderMetrics.frameCpuMs.toFixed(2)}ms | streaming ${renderMetrics.streamingCpuMs.toFixed(2)}ms`);
+              ImGui.Text(`CPU scene: queue ${renderMetrics.queuePrepareCpuMs.toFixed(2)}ms | opaque ${renderMetrics.sceneOpaqueCpuMs.toFixed(2)}ms | transparent ${renderMetrics.sceneTransparentCpuMs.toFixed(2)}ms`);
+              ImGui.Text(`CPU 2DFX: shadow update ${renderMetrics.shadowUpdateCpuMs.toFixed(2)}ms | shadow render ${renderMetrics.shadowRenderCpuMs.toFixed(2)}ms`);
+              ImGui.Text(`CPU 2DFX: corona update ${renderMetrics.coronaUpdateCpuMs.toFixed(2)}ms | corona render ${renderMetrics.coronaRenderCpuMs.toFixed(2)}ms`);
+              ImGui.Text(`CPU water: update ${renderMetrics.waterUpdateCpuMs.toFixed(2)}ms | render ${renderMetrics.waterRenderCpuMs.toFixed(2)}ms`);
+              ImGui.Text(`CPU other: sky ${renderMetrics.skyCpuMs.toFixed(2)}ms | postfx ${renderMetrics.postFxCpuMs.toFixed(2)}ms | hud ${renderMetrics.hudCpuMs.toFixed(2)}ms`);
             }
           } catch (error) {
             pushConsoleLine('error', `Statistics window error: ${formatConsoleArg(error)}`);

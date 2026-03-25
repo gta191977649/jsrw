@@ -20,13 +20,13 @@ import {
 import RenderEntityController from '../../renderer/common/RenderEntityController.js';
 import {
   applyDisableVertexColor,
-  createThreeMaterialFromRW,
   getRWMaterialDescriptor,
   prepareTobjInstanceMaterials,
+  setRWMaterialDescriptor,
+  syncThreeMaterialFromRW,
 } from '../../adapters/three/ThreeMaterialAdapter.js';
 import { applyRwIdeFlagsToInstance } from '../../adapters/three/RwIdeFlagsAdapter.js';
 import { cloneRwMaterialDescriptor as cloneRWMaterialDescriptor } from '../../core/material/RwMaterialDescriptor.js';
-import { createRWPipelineMaterialForProfile } from '../../renderer/world/createDefaultPipelineRegistry.js';
 import {
   applyGlobalBackfaceCulling,
   applyWireframe,
@@ -82,53 +82,6 @@ function disposeObjectMaterialsOnly(root) {
 function createFadeMaterial(material, geometry) {
   if (!material) return material;
   const descriptor = getRWMaterialDescriptor(material);
-  const activeBackend = String(material.userData?.rwPipelineBackend || 'WEBGL').toUpperCase();
-  if (material.userData?.rwPipelineMaterial && descriptor) {
-    const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);
-    if (fadeDescriptor.rwFlags?.additive) {
-      fadeDescriptor.alphaMode = 'additive';
-      fadeDescriptor.blending = THREE.AdditiveBlending;
-      fadeDescriptor.renderBucket = 'additive';
-    } else {
-      fadeDescriptor.alphaMode = 'blend';
-      fadeDescriptor.blending = THREE.NormalBlending;
-      fadeDescriptor.renderBucket = 'transparent';
-    }
-    fadeDescriptor.transparent = true;
-    fadeDescriptor.depthTest = true;
-    fadeDescriptor.depthWrite = false;
-    fadeDescriptor.alphaRef = 0;
-    fadeDescriptor.opacity = 1;
-    const pipelineMaterial = createRWPipelineMaterialForProfile(
-      material.userData?.rwPipelineProfileId,
-      {
-        descriptor: fadeDescriptor,
-        geometry,
-        activeBackend,
-        runtimeContext: {
-          activeBackend,
-        },
-      },
-    );
-    if (pipelineMaterial) {
-      pipelineMaterial.userData = {
-        ...(pipelineMaterial.userData || {}),
-        ...(material.userData || {}),
-        ...(pipelineMaterial.userData || {}),
-        rwPipelineOwnedMaterial: true,
-        rwPipelineBackend: activeBackend,
-      };
-      pipelineMaterial.transparent = true;
-      pipelineMaterial.opacity = 1;
-      pipelineMaterial.depthTest = true;
-      pipelineMaterial.depthWrite = false;
-      pipelineMaterial.alphaTest = 0;
-      pipelineMaterial.blending = fadeDescriptor.blending;
-      pipelineMaterial.fog = Boolean(pipelineMaterial.userData?.rwPipelineUsesThreeFog);
-      pipelineMaterial.needsUpdate = true;
-      return pipelineMaterial;
-    }
-  }
   if (descriptor) {
     const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);
     if (fadeDescriptor.rwFlags?.additive) {
@@ -145,7 +98,14 @@ function createFadeMaterial(material, geometry) {
     fadeDescriptor.depthWrite = false;
     fadeDescriptor.alphaRef = 0;
     fadeDescriptor.opacity = 1;
-    return createThreeMaterialFromRW(fadeDescriptor, geometry);
+    const cloned = material.clone();
+    cloned.userData = {
+      ...(material.userData || {}),
+      ...(cloned.userData || {}),
+      rwPipelineOwnedMaterial: true,
+    };
+    setRWMaterialDescriptor(cloned, fadeDescriptor);
+    return syncThreeMaterialFromRW(cloned, geometry);
   }
 
   const cloned = material.clone();
@@ -159,20 +119,6 @@ function createFadeMaterial(material, geometry) {
   }
   cloned.needsUpdate = true;
   return cloned;
-}
-
-function setFadeProxyOpacity(proxyRoot, opacity) {
-  const clampedOpacity = clamp01(opacity);
-  const materials = Array.isArray(proxyRoot?.userData?.rwFadeMaterials) ? proxyRoot.userData.rwFadeMaterials : [];
-  for (const material of materials) {
-    if (!material) continue;
-    const descriptor = getRWMaterialDescriptor(material);
-    if (descriptor) descriptor.opacity = clampedOpacity;
-    material.opacity = clampedOpacity;
-    if (material.uniforms?.opacity) {
-      material.uniforms.opacity.value = clampedOpacity;
-    }
-  }
 }
 
 function flushDirtyInstancedBatch(batch) {
@@ -440,15 +386,8 @@ export class WorldStreamingRuntime {
       return false;
     }
 
-    setRenderSideOriginalVisible(item, side, false, dirtyBatches);
-    const proxy = this.ensureRenderSideFadeProxy(item, side, context);
-    if (!proxy) {
-      setRenderSideOriginalVisible(item, side, true, dirtyBatches);
-      sideState.currentOpacity = 1;
-      return false;
-    }
-    setFadeProxyOpacity(proxy, clampedOpacity);
-    proxy.visible = true;
+    if (this.disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty?.();
+    setRenderSideOriginalVisible(item, side, clampedOpacity > RW_FADE_EPSILON, dirtyBatches);
     sideState.currentOpacity = clampedOpacity;
     return true;
   }
@@ -478,9 +417,17 @@ export class WorldStreamingRuntime {
       Math.min(resolvedRenderDistance, priorityDistance || Math.min(resolvedRenderDistance, resolvedRenderDistance * 0.2)),
     );
     const cameraPoint = new THREE.Vector2(camera.position.x, camera.position.z);
+    const cameraChunkX = Math.floor(camera.position.x / WORLD_CHUNK_SIZE);
+    const cameraChunkZ = Math.floor(camera.position.z / WORLD_CHUNK_SIZE);
+    const scanRadius = Math.ceil(
+      (resolvedRenderDistance + CHUNK_ACTIVE_MARGIN + WORLD_CHUNK_SIZE) / WORLD_CHUNK_SIZE,
+    );
     const candidates = [];
 
-    for (const chunk of chunkLookup.values()) {
+    for (let chunkZ = cameraChunkZ - scanRadius; chunkZ <= cameraChunkZ + scanRadius; chunkZ += 1) {
+      for (let chunkX = cameraChunkX - scanRadius; chunkX <= cameraChunkX + scanRadius; chunkX += 1) {
+        const chunk = chunkLookup.get(`${chunkX},${chunkZ}`);
+        if (!chunk) continue;
       const chunkCenter = chunk?.center;
       if (!chunkCenter) continue;
       const dx = (chunkCenter.x ?? 0) - cameraPoint.x;
@@ -497,6 +444,7 @@ export class WorldStreamingRuntime {
         priority: distance <= resolvedPriorityDistance + chunkRadius,
       });
     }
+    }
 
     candidates.sort((left, right) => {
       if (left.priority !== right.priority) return left.priority ? -1 : 1;
@@ -512,13 +460,6 @@ export class WorldStreamingRuntime {
     if ((sideState.currentOpacity ?? 0) <= RW_FADE_EPSILON) return;
 
     addVisibleItem(frameVisibility, item);
-
-    if (sideState.proxyRoot?.visible) {
-      for (const mesh of getCachedQueueMeshes(sideState.proxyRoot)) {
-        addVisibleQueueMesh(frameVisibility, mesh);
-      }
-      return;
-    }
 
     if (sideState.renderObject?.visible) {
       for (const mesh of getCachedQueueMeshes(sideState.renderObject)) {
@@ -584,14 +525,33 @@ export class WorldStreamingRuntime {
       lodState.lastShowTobjs = showTobjs;
       lodState.lastEnableOcclusion = enableOcclusion;
       lodState.needsRefresh = true;
+      lodState.needsVisibilityRefresh = true;
+      lodState.needsResidencyRefresh = true;
     }
 
     const knownCameraPos = Number.isFinite(lodState.lastCameraPos.x)
       && Number.isFinite(lodState.lastCameraPos.y)
       && Number.isFinite(lodState.lastCameraPos.z);
+    const currentCameraChunkX = Math.floor(camera.position.x / WORLD_CHUNK_SIZE);
+    const currentCameraChunkZ = Math.floor(camera.position.z / WORLD_CHUNK_SIZE);
+    const knownCameraChunk = Number.isFinite(lodState.lastCameraChunkX)
+      && Number.isFinite(lodState.lastCameraChunkZ);
+    const sectorChanged = !knownCameraChunk
+      || currentCameraChunkX !== lodState.lastCameraChunkX
+      || currentCameraChunkZ !== lodState.lastCameraChunkZ;
+
     if (!knownCameraPos || camera.position.distanceToSquared(lodState.lastCameraPos) > 9) {
       lodState.lastCameraPos.copy(camera.position);
       lodState.needsRefresh = true;
+      lodState.needsVisibilityRefresh = true;
+    }
+
+    if (sectorChanged) {
+      lodState.lastCameraChunkX = currentCameraChunkX;
+      lodState.lastCameraChunkZ = currentCameraChunkZ;
+      lodState.needsRefresh = true;
+      lodState.needsVisibilityRefresh = true;
+      lodState.needsResidencyRefresh = true;
     }
 
     const knownCameraQuat = Number.isFinite(lodState.lastCameraQuat.x)
@@ -602,6 +562,7 @@ export class WorldStreamingRuntime {
     if (!knownCameraQuat || cameraQuatDot < 0.99995) {
       lodState.lastCameraQuat.copy(camera.quaternion);
       lodState.needsRefresh = true;
+      lodState.needsVisibilityRefresh = true;
     }
 
     const projectionChanged = (
@@ -616,10 +577,12 @@ export class WorldStreamingRuntime {
       lodState.lastCameraNear = camera.near;
       lodState.lastCameraFar = camera.far;
       lodState.needsRefresh = true;
+      lodState.needsVisibilityRefresh = true;
     }
 
     const needsFadeTick = activeFadeCountRef.current > 0;
-    if (!(lodState.needsRefresh || needsFadeTick) || lodUpdateAccumulatorRef.current < 0.02) {
+    const needsVisibilityRefresh = lodState.needsVisibilityRefresh || lodState.needsRefresh || needsFadeTick;
+    if (!needsVisibilityRefresh || lodUpdateAccumulatorRef.current < 0.02) {
       return;
     }
 
@@ -637,7 +600,15 @@ export class WorldStreamingRuntime {
     // Always scan out to the camera far clip. Pairing only affects near vs LOD *inside* a chunk;
     // capping scan by the LOD switch distance would skip whole chunks and hide distant LOD meshes.
     const chunkScanDistance = renderingDistance;
-    const candidateChunks = this.collectGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef);
+    const needsResidencyRefresh = lodState.needsResidencyRefresh
+      || !Array.isArray(lodState.residentScanChunks)
+      || lodState.residentScanChunks.length === 0;
+    const candidateChunks = needsResidencyRefresh
+      ? this.collectGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef)
+      : lodState.residentScanChunks;
+    if (needsResidencyRefresh) {
+      lodState.residentScanChunks = candidateChunks;
+    }
     candidateChunks.sort((a, b) => {
       const da = camera.position.distanceToSquared(a.center);
       const db = camera.position.distanceToSquared(b.center);
@@ -910,6 +881,8 @@ export class WorldStreamingRuntime {
     frameVisibility.computed = true;
     activeFadeCountRef.current = activeFades;
     lodState.needsRefresh = activeFades > 0;
+    lodState.needsVisibilityRefresh = activeFades > 0;
+    lodState.needsResidencyRefresh = false;
   }
 }
 

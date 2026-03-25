@@ -16,6 +16,10 @@ const DEFAULT_SCENE_BACKGROUND = new THREE.Color(0x8ea9b5);
 const FALLBACK_AMBIENT = new THREE.Color(1, 1, 1);
 const FALLBACK_EMISSIVE = new THREE.Color(0, 0, 0);
 
+function getProfilingTimeNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
 function takeRenderStatsSnapshot(renderer) {
   return {
     calls: renderer?.info?.render?.calls ?? 0,
@@ -115,6 +119,7 @@ export class FrameComposer {
     } = context;
 
     if (!renderer || !scene || !camera) return;
+    const frameCpuStart = getProfilingTimeNow();
     const frameStartStats = takeRenderStatsSnapshot(renderer);
 
     const stageWorldStats = { drawCalls: 0, triangles: 0 };
@@ -122,7 +127,36 @@ export class FrameComposer {
     const stageSkyStats = { drawCalls: 0, triangles: 0 };
     const skyCloudPassStats = { drawCalls: 0, triangles: 0 };
     let skyCloudsPassInvoked = false;
+    let queuePrepareCpuMs = 0;
+    let coronaUpdateCpuMs = 0;
+    let coronaRenderCpuMs = 0;
+    let shadowUpdateCpuMs = 0;
+    let shadowRenderCpuMs = 0;
+    let waterUpdateCpuMs = 0;
+    let waterRenderCpuMs = 0;
+    let sceneOpaqueCpuMs = 0;
+    let sceneTransparentCpuMs = 0;
+    let skyCpuMs = 0;
+    let postFxCpuMs = 0;
+    let hudCpuMs = 0;
     const renderStages = uiStateRef.current.renderStages || {};
+    const wantsTransparentStages = Boolean(
+      renderStages.sceneTransparent
+      && (renderStages.sceneBlend || renderStages.sceneAdditive || renderStages.sceneOverlay),
+    );
+    const wantsWaterStages = Boolean(
+      renderStages.waterFar
+      || renderStages.waterNear
+      || renderStages.waterWavy
+      || renderStages.waterWake,
+    );
+    const wantsCoronaStage = Boolean(render2dfxEnabled && renderStages.coronas);
+    const wantsShadowStage = Boolean(
+      render2dfxEnabled
+      && uiStateRef.current.shadows.enabled
+      && (renderStages.sceneOpaque || wantsWaterStages),
+    );
+    const needsQueuePreparation = Boolean(renderStages.sceneOpaque || wantsTransparentStages);
 
     if (grid) grid.visible = uiStateRef.current.showGrid;
     if (axes) axes.visible = uiStateRef.current.showAxes;
@@ -187,18 +221,23 @@ export class FrameComposer {
     const frameVisibilityComputed = frameVisibility?.computed === true;
     const hasCoronaCandidates = (frameVisibility?.coronaCandidates?.length || 0) > 0;
     const hasShadowCandidates = (frameVisibility?.shadowCandidates?.length || 0) > 0;
-    const shouldUpdateCoronas = !frameVisibilityComputed || hasCoronaCandidates || coronaRuntime?.hasActiveEntries?.();
-    const shouldUpdateShadows = !frameVisibilityComputed || hasShadowCandidates || shadowRuntime?.hasActiveEntries?.();
+    const shouldUpdateCoronas = wantsCoronaStage
+      && (!frameVisibilityComputed || hasCoronaCandidates || coronaRuntime?.hasActiveEntries?.());
+    const shouldUpdateShadows = wantsShadowStage
+      && (!frameVisibilityComputed || hasShadowCandidates || shadowRuntime?.hasActiveEntries?.());
 
-    coronaRuntime?.setEnabled(render2dfxEnabled);
-    shadowRuntime?.setEnabled(render2dfxEnabled && uiStateRef.current.shadows.enabled);
+    coronaRuntime?.setEnabled(wantsCoronaStage);
+    shadowRuntime?.setEnabled(wantsShadowStage);
     coronaRuntime?.setDebugShowAll(uiStateRef.current.debug2dfx);
-    waterPipeline?.applySettings?.({
-      uvSpeed: uiStateRef.current.waterUvSpeed,
-      waveHeight: uiStateRef.current.waterWaveHeight,
-      farAlpha: uiStateRef.current.waterAlpha,
-    });
+    if (wantsWaterStages) {
+      waterPipeline?.applySettings?.({
+        uvSpeed: uiStateRef.current.waterUvSpeed,
+        waveHeight: uiStateRef.current.waterWaveHeight,
+        farAlpha: uiStateRef.current.waterAlpha,
+      });
+    }
     if (shouldUpdateCoronas) {
+      const coronaUpdateStart = getProfilingTimeNow();
       coronaRuntime?.setViewport?.(viewportWidth, viewportHeight);
       coronaRuntime?.update?.(camera, {
         ...pipelineRuntimeContext,
@@ -211,8 +250,10 @@ export class FrameComposer {
         twoDfx: uiStateRef.current.twoDfx,
         trafficLights: uiStateRef.current.trafficLights,
       });
+      coronaUpdateCpuMs += Math.max(0, getProfilingTimeNow() - coronaUpdateStart);
     }
     if (shouldUpdateShadows) {
+      const shadowUpdateStart = getProfilingTimeNow();
       shadowRuntime?.update?.(camera, {
         ...pipelineRuntimeContext,
         frameVisibility,
@@ -224,6 +265,7 @@ export class FrameComposer {
         trafficLights: uiStateRef.current.trafficLights,
         shadows: uiStateRef.current.shadows,
       });
+      shadowUpdateCpuMs += Math.max(0, getProfilingTimeNow() - shadowUpdateStart);
     }
 
     const farBackgroundColor = skyBottomColor;
@@ -235,7 +277,11 @@ export class FrameComposer {
         viewportHeight,
       })
       : null;
-    rwRenderQueue?.prepareFrame?.(camera, frameVisibility);
+    if (needsQueuePreparation) {
+      const queuePrepareStart = getProfilingTimeNow();
+      rwRenderQueue?.prepareFrame?.(camera, frameVisibility);
+      queuePrepareCpuMs += Math.max(0, getProfilingTimeNow() - queuePrepareStart);
+    }
     const queueStats = rwRenderQueue?.debugStats || {};
     const hasBlendQueue = (queueStats.transparentCount || 0) > 0;
     const hasAdditiveQueue = (queueStats.additiveCount || 0) > 0;
@@ -248,9 +294,11 @@ export class FrameComposer {
     renderer.setRenderTarget(postFxSceneTarget);
     renderer.autoClear = true;
     if (renderStages.skyDome && skyScene && skyCamera) {
+      const skyStageStart = getProfilingTimeNow();
       const beforeSkyDome = takeRenderStatsSnapshot(renderer);
       renderer.render(skyScene, skyCamera);
       accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSkyDome);
+      skyCpuMs += Math.max(0, getProfilingTimeNow() - skyStageStart);
     } else {
       renderer.setClearColor(farBackgroundColor, 1);
       renderer.clear(true, true, true);
@@ -258,11 +306,14 @@ export class FrameComposer {
     renderer.autoClear = false;
     renderer.clearDepth();
     if (renderStages.skyBackdrop) {
+      const skyStageStart = getProfilingTimeNow();
       const beforeBackdrop = takeRenderStatsSnapshot(renderer);
       skyFeature?.renderBackground?.(renderer);
       accumulateRenderStatsDelta(renderer, stageSkyStats, beforeBackdrop);
+      skyCpuMs += Math.max(0, getProfilingTimeNow() - skyStageStart);
     }
     if (renderStages.skyClouds && skyCloudScene) {
+      const skyStageStart = getProfilingTimeNow();
       const beforeClouds = takeRenderStatsSnapshot(renderer);
       const originalFar = camera.far;
       const cloudFar = Math.max(originalFar, 5000);
@@ -284,71 +335,93 @@ export class FrameComposer {
       accumulateRenderStatsDelta(renderer, stageSkyStats, beforeClouds);
       accumulateRenderStatsDelta(renderer, skyCloudPassStats, beforeClouds);
       renderer.clearDepth();
+      skyCpuMs += Math.max(0, getProfilingTimeNow() - skyStageStart);
     }
 
     const renderOpaqueAndTransparent = (allowWater = false) => {
       renderer.autoClear = false;
       if (allowWater && waterPipeline?.hasRenderableWater?.() && uiStateRef.current.renderWater) {
+        const shouldRunWaterPipeline = wantsWaterStages;
         let waterStage = 'update';
         try {
-          waterPipeline.update(camera, context.timeMs, context.dt);
+          if (shouldRunWaterPipeline) {
+            const waterUpdateStart = getProfilingTimeNow();
+            waterPipeline.update(camera, context.timeMs, context.dt);
+            waterUpdateCpuMs += Math.max(0, getProfilingTimeNow() - waterUpdateStart);
+          }
 
           if (renderStages.sceneOpaque) {
             waterStage = 'renderSceneOpaque';
+            const opaqueStageStart = getProfilingTimeNow();
             const beforeOpaque = takeRenderStatsSnapshot(renderer);
             rwRenderQueue?.renderOpaque?.(renderer, camera, {
               allowedBuckets: ['opaque', 'cutout'],
               fog: scene.fog || null,
             });
             accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaque);
+            sceneOpaqueCpuMs += Math.max(0, getProfilingTimeNow() - opaqueStageStart);
           }
 
           if (renderStages.waterFar) {
             waterStage = 'renderFar';
+            const waterRenderStart = getProfilingTimeNow();
             const beforeWaterFar = takeRenderStatsSnapshot(renderer);
             waterPipeline.renderFar(renderer, camera, null);
             accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterFar);
+            waterRenderCpuMs += Math.max(0, getProfilingTimeNow() - waterRenderStart);
           }
 
           if (renderStages.waterNear) {
             waterStage = 'renderNear';
+            const waterRenderStart = getProfilingTimeNow();
             const beforeWaterNear = takeRenderStatsSnapshot(renderer);
             waterPipeline.renderNear(renderer, camera);
             accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterNear);
+            waterRenderCpuMs += Math.max(0, getProfilingTimeNow() - waterRenderStart);
           }
 
           if (renderStages.waterWavy) {
             waterStage = 'renderWavy';
+            const waterRenderStart = getProfilingTimeNow();
             const beforeWaterWavy = takeRenderStatsSnapshot(renderer);
             waterPipeline.renderWavy(renderer, camera);
             accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterWavy);
+            waterRenderCpuMs += Math.max(0, getProfilingTimeNow() - waterRenderStart);
           }
 
           if (renderStages.waterWake) {
             waterStage = 'renderWake';
+            const waterRenderStart = getProfilingTimeNow();
             const beforeWaterWake = takeRenderStatsSnapshot(renderer);
             waterPipeline.renderWake(renderer, camera);
             accumulateRenderStatsDelta(renderer, stageWaterStats, beforeWaterWake);
+            waterRenderCpuMs += Math.max(0, getProfilingTimeNow() - waterRenderStart);
           }
 
-          if (render2dfxEnabled && uiStateRef.current.shadows.enabled) {
+          if (wantsShadowStage) {
+            const shadowRenderStart = getProfilingTimeNow();
             const beforeShadows = takeRenderStatsSnapshot(renderer);
             shadowRuntime?.render?.(renderer, camera);
             accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadows);
+            shadowRenderCpuMs += Math.max(0, getProfilingTimeNow() - shadowRenderStart);
           }
           if (transparentBuckets.length > 0) {
             waterStage = 'renderSceneTransparent';
+            const transparentStageStart = getProfilingTimeNow();
             const beforeTransparent = takeRenderStatsSnapshot(renderer);
             rwRenderQueue?.renderTransparent?.(renderer, camera, {
               allowedBuckets: transparentBuckets,
               fog: scene.fog || null,
             });
             accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparent);
+            sceneTransparentCpuMs += Math.max(0, getProfilingTimeNow() - transparentStageStart);
           }
           if (renderStages.coronas) {
+            const coronaRenderStart = getProfilingTimeNow();
             const beforeCoronas = takeRenderStatsSnapshot(renderer);
             coronaRuntime?.render?.(renderer, camera);
             accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCoronas);
+            coronaRenderCpuMs += Math.max(0, getProfilingTimeNow() - coronaRenderStart);
           }
           renderer.autoClear = true;
           return;
@@ -380,59 +453,75 @@ export class FrameComposer {
         const opaqueBuckets = sceneBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
         const transparentSceneBuckets = sceneBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
         if (opaqueBuckets.length > 0) {
+          const opaqueStageStart = getProfilingTimeNow();
           const beforeOpaque = takeRenderStatsSnapshot(renderer);
           rwRenderQueue?.renderOpaque?.(renderer, camera, {
             allowedBuckets: opaqueBuckets,
             fog: scene.fog || null,
           });
           accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaque);
+          sceneOpaqueCpuMs += Math.max(0, getProfilingTimeNow() - opaqueStageStart);
         }
-        if (render2dfxEnabled && uiStateRef.current.shadows.enabled) {
+        if (wantsShadowStage) {
+          const shadowRenderStart = getProfilingTimeNow();
           const beforeShadows = takeRenderStatsSnapshot(renderer);
           shadowRuntime?.render?.(renderer, camera);
           accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadows);
+          shadowRenderCpuMs += Math.max(0, getProfilingTimeNow() - shadowRenderStart);
         }
         if (transparentSceneBuckets.length > 0) {
+          const transparentStageStart = getProfilingTimeNow();
           const beforeTransparent = takeRenderStatsSnapshot(renderer);
           rwRenderQueue?.renderTransparent?.(renderer, camera, {
             allowedBuckets: transparentSceneBuckets,
             fog: scene.fog || null,
           });
           accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparent);
+          sceneTransparentCpuMs += Math.max(0, getProfilingTimeNow() - transparentStageStart);
         }
-      } else if (render2dfxEnabled && uiStateRef.current.shadows.enabled) {
+      } else if (wantsShadowStage) {
+        const shadowRenderStart = getProfilingTimeNow();
         const beforeShadows = takeRenderStatsSnapshot(renderer);
         shadowRuntime?.render?.(renderer, camera);
         accumulateRenderStatsDelta(renderer, stageWorldStats, beforeShadows);
+        shadowRenderCpuMs += Math.max(0, getProfilingTimeNow() - shadowRenderStart);
       }
       if (renderStages.coronas) {
+        const coronaRenderStart = getProfilingTimeNow();
         const beforeCoronas = takeRenderStatsSnapshot(renderer);
         coronaRuntime?.render?.(renderer, camera);
         accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCoronas);
+        coronaRenderCpuMs += Math.max(0, getProfilingTimeNow() - coronaRenderStart);
       }
     };
 
     renderOpaqueAndTransparent(true);
 
     if (postFxSceneTarget && postFxSunCoronaEnabled && renderStages.sunBloom) {
+      const skyStageStart = getProfilingTimeNow();
       renderer.clearDepth();
       const beforeSunBloom = takeRenderStatsSnapshot(renderer);
       skyFeature?.renderSun?.(renderer, { mode: 'bloom' });
       accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSunBloom);
+      skyCpuMs += Math.max(0, getProfilingTimeNow() - skyStageStart);
     }
     renderer.setRenderTarget(null);
     if (postFxSceneTarget) {
+      const postFxStart = getProfilingTimeNow();
       this.rendererSession?.renderPostFx?.(renderer, {
         ...pipelineRuntimeContext,
         viewportWidth,
         viewportHeight,
       });
+      postFxCpuMs += Math.max(0, getProfilingTimeNow() - postFxStart);
     }
     if (renderStages.sunFinal) {
+      const skyStageStart = getProfilingTimeNow();
       renderer.clearDepth();
       const beforeSunFinal = takeRenderStatsSnapshot(renderer);
       skyFeature?.renderSun?.(renderer, { mode: 'full' });
       accumulateRenderStatsDelta(renderer, stageSkyStats, beforeSunFinal);
+      skyCpuMs += Math.max(0, getProfilingTimeNow() - skyStageStart);
     }
 
     const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
@@ -452,17 +541,20 @@ export class FrameComposer {
       1,
     );
     if (renderStages.hud) {
+      const hudStart = getProfilingTimeNow();
       renderer.autoClear = false;
       renderer.clearDepth();
       const beforeHud = takeRenderStatsSnapshot(renderer);
       renderer.render(hudScene, hudCamera);
       accumulateRenderStatsDelta(renderer, stageSkyStats, beforeHud);
       renderer.autoClear = true;
+      hudCpuMs += Math.max(0, getProfilingTimeNow() - hudStart);
     }
 
     const rendererRuntimeInfo = rendererHost?.getRuntimeInfo?.() || null;
     const sessionStats = this.rendererSession?.getStats?.() || null;
     const frameEndStats = takeRenderStatsSnapshot(renderer);
+    const frameCpuMs = Math.max(0, getProfilingTimeNow() - frameCpuStart);
     renderMetricsRef.current = {
       ...renderMetricsRef.current,
       rendererBackend: rendererRuntimeInfo?.backend || String(activeBackend || 'UNKNOWN').toUpperCase(),
@@ -487,6 +579,19 @@ export class FrameComposer {
       skyCloudsPassInvoked,
       skyCloudsPassDrawCalls: skyCloudPassStats.drawCalls,
       skyCloudsPassTriangles: skyCloudPassStats.triangles,
+      frameCpuMs,
+      queuePrepareCpuMs,
+      coronaUpdateCpuMs,
+      coronaRenderCpuMs,
+      shadowUpdateCpuMs,
+      shadowRenderCpuMs,
+      waterUpdateCpuMs,
+      waterRenderCpuMs,
+      sceneOpaqueCpuMs,
+      sceneTransparentCpuMs,
+      skyCpuMs,
+      postFxCpuMs,
+      hudCpuMs,
     };
   }
 }
