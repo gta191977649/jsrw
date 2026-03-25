@@ -55,6 +55,9 @@ const BIG_BUILDING_MIN_LOD_DISTANCE = 400;
 const ENABLE_WORLD_INSTANCING = true;
 const FALLBACK_AMBIENT = new THREE.Color(1, 1, 1);
 const FALLBACK_EMISSIVE = new THREE.Color(0, 0, 0);
+const SMALL_NEAR_ONLY_MIN_CULL_SIZE_XZ = 4.0;
+const SMALL_NEAR_ONLY_MIN_CULL_SIZE_Y = 3.0;
+const SMALL_NEAR_ONLY_MAX_SPAN = 8.0;
 
 function collectQueueMeshes(root) {
   if (!root?.traverse) return [];
@@ -157,6 +160,25 @@ function expandBoundsWithHandles(boundsBox, handles = []) {
     point.setFromMatrixPosition(handle.matrix);
     boundsBox.expandByPoint(point);
   }
+}
+
+function stabilizeSmallNearOnlyBounds(boundsBox, item) {
+  if (!boundsBox?.isBox3 || boundsBox.isEmpty() || !item) return;
+  const hasNear = hasRenderableObject(item.nearObj, item.nearHandles);
+  const hasLod = hasRenderableObject(item.lodObj, item.lodHandles);
+  if (!hasNear || hasLod) return;
+
+  const size = boundsBox.getSize(new THREE.Vector3());
+  const horizontalSpan = Math.max(size.x, size.z);
+  if (horizontalSpan > SMALL_NEAR_ONLY_MAX_SPAN) return;
+
+  const stabilizedX = Math.max(size.x, SMALL_NEAR_ONLY_MIN_CULL_SIZE_XZ);
+  const stabilizedY = Math.max(size.y, SMALL_NEAR_ONLY_MIN_CULL_SIZE_Y);
+  const stabilizedZ = Math.max(size.z, SMALL_NEAR_ONLY_MIN_CULL_SIZE_XZ);
+  if (stabilizedX === size.x && stabilizedY === size.y && stabilizedZ === size.z) return;
+
+  const center = boundsBox.getCenter(new THREE.Vector3());
+  boundsBox.setFromCenterAndSize(center, new THREE.Vector3(stabilizedX, stabilizedY, stabilizedZ));
 }
 
 function resolveTextureFromDictionaryEntry(entry) {
@@ -913,6 +935,20 @@ export class JsrwGtaSession {
         };
         applyRwIdeFlagsToInstance(mesh, ide.flags);
         worldRoot.add(mesh);
+        this.rendererSession?.applyToObject(mesh, {
+          activeBackend,
+          worldGameVersion: buildGameVersion,
+          timecycleCurrent: timecycleStateRef.current?.current,
+          ambientColor: timecycleStateRef.current?.current?.values?.ambient
+            ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
+            : FALLBACK_AMBIENT,
+          emissiveColor: timecycleStateRef.current?.current?.values?.ambientBl
+            ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambientBl)
+            : FALLBACK_EMISSIVE,
+          fallbackAmbient: FALLBACK_AMBIENT,
+          fallbackEmissive: FALLBACK_EMISSIVE,
+        });
+        rwRenderQueueRef.current?.markDirty?.();
         const batch = {
           key: batchKey,
           mesh,
@@ -957,6 +993,7 @@ export class JsrwGtaSession {
             new THREE.Vector3(WORLD_CHUNK_SIZE * 0.5, WORLD_CHUNK_SIZE * 0.5, WORLD_CHUNK_SIZE * 0.5),
           );
         }
+        stabilizeSmallNearOnlyBounds(boundsBox, item);
 
         item.boundsMin = boundsBox.min.clone();
         item.boundsMax = boundsBox.max.clone();
@@ -1060,6 +1097,7 @@ export class JsrwGtaSession {
           instance.userData.rwQueueRenderClass = 'building';
           collectQueueMeshes(instance);
           worldRoot.add(instance);
+          rwRenderQueueRef.current?.markDirty?.();
           loaded += 1;
           return instance;
         } catch (error) {

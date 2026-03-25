@@ -795,6 +795,7 @@ function App() {
     lastShowLods: true,
     lastForceLodOnly: false,
     lastShowTobjs: false,
+    lastEnableOcclusion: false,
     lastCameraAspect: Number.NaN,
     lastCameraFov: Number.NaN,
     lastCameraNear: Number.NaN,
@@ -823,6 +824,7 @@ function App() {
     wireframe: false,
     disableVertexColor: false,
     disableBackfaceCulling: true,
+    enableOcclusion: false,
     renderWater: true,
     waterUvSpeed: 1,
     waterWaveHeight: 35,
@@ -2990,6 +2992,13 @@ function App() {
                 'Disable Backface Culling',
                 (value = uiStateRef.current.disableBackfaceCulling) => {
                   uiStateRef.current.disableBackfaceCulling = value;
+                  return value;
+                },
+              );
+              ImGui.Checkbox(
+                'Enable Occlusion',
+                (value = uiStateRef.current.enableOcclusion) => {
+                  uiStateRef.current.enableOcclusion = value;
                   return value;
                 },
               );

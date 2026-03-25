@@ -308,7 +308,9 @@ export class RWRenderQueue {
     proxy.matrixAutoUpdate = false;
     proxy.matrixWorldAutoUpdate = false;
     proxy.visible = false;
-    proxy.frustumCulled = source.frustumCulled;
+    // Frame visibility is already resolved upstream; letting Three frustum-cull
+    // queue proxies again causes near-camera props to disappear spuriously.
+    proxy.frustumCulled = false;
     setProxyDefaultLayer(proxy);
     proxy.userData = {
       ...(source.userData || {}),
@@ -332,7 +334,7 @@ export class RWRenderQueue {
     proxy.matrixWorld.copy(source.matrixWorld);
     proxy.matrixAutoUpdate = false;
     proxy.matrixWorldAutoUpdate = false;
-    proxy.frustumCulled = source.frustumCulled;
+    proxy.frustumCulled = false;
     setProxyDefaultLayer(proxy);
     proxy.userData.rwQueueBucket = entry.bucket;
     if (source.isInstancedMesh && proxy.isInstancedMesh) {

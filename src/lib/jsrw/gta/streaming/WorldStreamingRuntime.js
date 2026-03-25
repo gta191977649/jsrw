@@ -274,6 +274,35 @@ function hasLodRenderable(item) {
     || (Array.isArray(item?.lodHandles) && item.lodHandles.length > 0);
 }
 
+function shouldBypassCloseRangeItemFrustum(item, distanceSq) {
+  const hasNear = hasNearRenderable(item);
+  const hasLod = hasLodRenderable(item);
+  if (!hasNear || hasLod) return false;
+
+  const nearDrawDistance = Number(item?.nearState?.drawDistance);
+  if (!Number.isFinite(nearDrawDistance) || nearDrawDistance > 120) return false;
+
+  const boundingSphereRadius = Number(item?.boundingSphere?.radius);
+  if (!Number.isFinite(boundingSphereRadius) || boundingSphereRadius > 8) return false;
+
+  const closeRangeDistance = Math.max(6, boundingSphereRadius * 3);
+  return distanceSq <= (closeRangeDistance * closeRangeDistance);
+}
+
+function isComplexFrustumItem(item) {
+  return item?.isBigBuilding === true;
+}
+
+function shouldBypassCloseRangeChunkFrustum(chunk, camera) {
+  if (!chunk?.center || !camera?.position) return false;
+  const chunkRadius = Math.max(
+    WORLD_CHUNK_SIZE * 0.5,
+    Number(chunk.boundingSphere?.radius) || 0,
+  );
+  const closeRangeDistance = chunkRadius + WORLD_CHUNK_SIZE;
+  return camera.position.distanceToSquared(chunk.center) <= (closeRangeDistance * closeRangeDistance);
+}
+
 export class WorldStreamingRuntime {
   constructor(options = {}) {
     this.rendererSession = options.rendererSession || null;
@@ -531,6 +560,7 @@ export class WorldStreamingRuntime {
     const showLods = uiStateRef.current.showLods;
     const forceLodOnly = uiStateRef.current.forceLodOnly;
     const showTobjs = uiStateRef.current.showTobjs;
+    const enableOcclusion = uiStateRef.current.enableOcclusion === true;
 
     const configChanged = (
       lodState.lastDrawDistance !== drawDistance
@@ -538,6 +568,7 @@ export class WorldStreamingRuntime {
       || lodState.lastShowLods !== showLods
       || lodState.lastForceLodOnly !== forceLodOnly
       || lodState.lastShowTobjs !== showTobjs
+      || lodState.lastEnableOcclusion !== enableOcclusion
     );
     if (configChanged) {
       lodState.lastDrawDistance = drawDistance;
@@ -545,6 +576,7 @@ export class WorldStreamingRuntime {
       lodState.lastShowLods = showLods;
       lodState.lastForceLodOnly = forceLodOnly;
       lodState.lastShowTobjs = showTobjs;
+      lodState.lastEnableOcclusion = enableOcclusion;
       lodState.needsRefresh = true;
     }
 
@@ -622,22 +654,29 @@ export class WorldStreamingRuntime {
       if (!item || processedItems.has(item)) return;
       processedItems.add(item);
 
-      const itemInFrustum = item.boundingBox?.isBox3
-        ? chunkFrustum.intersectsBox(item.boundingBox)
-        : chunkFrustum.intersectsSphere(item.boundingSphere);
+      const distSq = camera.position.distanceToSquared(item.anchor);
+      const hasNear = hasNearRenderable(item);
+      const hasLod = hasLodRenderable(item);
+      const bypassCloseRangeFrustum = shouldBypassCloseRangeItemFrustum(item, distSq);
+      const itemInFrustum = !enableOcclusion || bypassCloseRangeFrustum || (
+        isComplexFrustumItem(item)
+          ? (
+            item.boundingBox?.isBox3
+              ? chunkFrustum.intersectsBox(item.boundingBox)
+              : chunkFrustum.intersectsSphere(item.boundingSphere)
+          )
+          : chunkFrustum.intersectsSphere(item.boundingSphere)
+      );
       if (!itemInFrustum) {
         this.hideRenderItemCompletely(item, dirtyBatches, context);
         return;
       }
-      if (checkOcclusion && isChunkOccluded(occlusionState, camera, item)) {
+      if (enableOcclusion && checkOcclusion && isChunkOccluded(occlusionState, camera, item)) {
         this.hideRenderItemCompletely(item, dirtyBatches, context);
         return;
       }
 
       activeItems += 1;
-      const distSq = camera.position.distanceToSquared(item.anchor);
-      const hasNear = hasNearRenderable(item);
-      const hasLod = hasLodRenderable(item);
       const tobjAllowed = !item.isTobj || showTobjs;
       const dist = Math.sqrt(distSq);
       if (!tobjAllowed || !RenderEntityController.isWithinDrawDistance(dist, renderingDistance, distanceFadeConfig)) {
@@ -783,10 +822,15 @@ export class WorldStreamingRuntime {
 
     for (const chunk of candidateChunks) {
       const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
+      const bypassCloseRangeChunkFrustum = shouldBypassCloseRangeChunkFrustum(chunk, camera);
       const chunkInFrustum = chunkInRange && (
+        !enableOcclusion || (
+        bypassCloseRangeChunkFrustum || (
         chunk.boundingBox?.isBox3
           ? chunkFrustum.intersectsBox(chunk.boundingBox)
           : chunkFrustum.intersectsSphere(chunk.boundingSphere)
+        )
+        )
       );
       if (chunkInRange) frustumChunks += chunkInFrustum ? 1 : 0;
       if (!chunkInFrustum) {
@@ -798,7 +842,7 @@ export class WorldStreamingRuntime {
         }
         continue;
       }
-      if (isChunkOccluded(occlusionState, camera, chunk)) {
+      if (enableOcclusion && isChunkOccluded(occlusionState, camera, chunk)) {
         if (chunk.active) {
           chunk.active = false;
           for (const item of chunk.items) {
@@ -817,7 +861,9 @@ export class WorldStreamingRuntime {
       for (const item of chunk.items) {
         processRenderItem(item);
       }
-      registerChunkOccluder(occlusionState, camera, chunk);
+      if (enableOcclusion) {
+        registerChunkOccluder(occlusionState, camera, chunk);
+      }
     }
 
     for (const item of bigBuildingItems) {
