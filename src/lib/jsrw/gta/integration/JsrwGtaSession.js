@@ -146,8 +146,14 @@ function expandBoundsWithObject(boundsBox, object3D) {
 function expandBoundsWithHandles(boundsBox, handles = []) {
   if (!boundsBox || !Array.isArray(handles) || handles.length === 0) return;
   const point = new THREE.Vector3();
+  const transformedBounds = new THREE.Box3();
   for (const handle of handles) {
     if (!handle?.matrix) continue;
+    if (handle.localBounds?.isBox3 && !handle.localBounds.isEmpty()) {
+      transformedBounds.copy(handle.localBounds).applyMatrix4(handle.matrix);
+      boundsBox.union(transformedBounds);
+      continue;
+    }
     point.setFromMatrixPosition(handle.matrix);
     boundsBox.expandByPoint(point);
   }
@@ -984,6 +990,9 @@ export class JsrwGtaSession {
           model.meshDescriptors.forEach((descriptor, descriptorIndex) => {
             const batch = ensureInstancedBatch(model, lodKind, ide, descriptorIndex, descriptor);
             const matrix = worldMatrix.clone().multiply(descriptor.localMatrix);
+            if (!descriptor.geometry.boundingBox) {
+              descriptor.geometry.computeBoundingBox();
+            }
             const handle = {
               batch,
               index: -1,
@@ -993,6 +1002,7 @@ export class JsrwGtaSession {
               visible: false,
               objectDetail,
               selectionTemplate: model.template,
+              localBounds: descriptor.geometry.boundingBox?.clone?.() || null,
               ideFlags: ide.flags | 0,
               isTobj: ide.section === 'tobjs',
             };
