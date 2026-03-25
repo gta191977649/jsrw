@@ -296,6 +296,31 @@ function normalizeModelLookupName(value = '') {
   return extensionIndex >= 0 ? normalized.slice(0, extensionIndex) : normalized;
 }
 
+function cloneWorkerPlanSnapshot(plan = null) {
+  if (!plan) return null;
+  return {
+    candidateChunkKeys: Array.isArray(plan.candidateChunkKeys) ? [...plan.candidateChunkKeys] : [],
+    frustumChunkKeys: Array.isArray(plan.frustumChunkKeys) ? [...plan.frustumChunkKeys] : [],
+    visibleChunkKeys: Array.isArray(plan.visibleChunkKeys) ? [...plan.visibleChunkKeys] : [],
+  };
+}
+
+function areWorkerPlanArraysEqual(left = [], right = []) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function areWorkerPlansEquivalent(left = null, right = null) {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return areWorkerPlanArraysEqual(left.candidateChunkKeys, right.candidateChunkKeys)
+    && areWorkerPlanArraysEqual(left.frustumChunkKeys, right.frustumChunkKeys)
+    && areWorkerPlanArraysEqual(left.visibleChunkKeys, right.visibleChunkKeys);
+}
+
 export class JsrwGtaSession {
   constructor(options = {}) {
     this.rendererSession = options.rendererSession || createJsrwRenderer(options);
@@ -309,6 +334,7 @@ export class JsrwGtaSession {
     this.streamingGeneration = 0;
     this.streamingPlannerClient = new StreamingWorkerClient();
     this.streamingPlannerReady = false;
+    this.lastAppliedWorkerPlan = null;
   }
 
   getRendererSession() {
@@ -377,6 +403,7 @@ export class JsrwGtaSession {
     const backMetrics = cloneRenderMetrics(this.streamingFrontMetrics);
     const cameraSnapshot = cloneStreamingCamera(context.camera);
     const workerPlan = await this.requestStreamingPlan(context);
+    const workerPlanStable = areWorkerPlansEquivalent(workerPlan, this.lastAppliedWorkerPlan);
     if (generation !== this.streamingGeneration) {
       this.streamingTaskActive = false;
       return;
@@ -386,6 +413,7 @@ export class JsrwGtaSession {
       ...context,
       camera: cameraSnapshot,
       workerPlan,
+      workerPlanStable,
       frameVisibilityRef: { current: backVisibility },
       renderMetricsRef: { current: backMetrics },
     });
@@ -394,6 +422,7 @@ export class JsrwGtaSession {
       this.streamingBackVisibility = this.streamingFrontVisibility;
       this.streamingFrontVisibility = backVisibility;
       this.streamingFrontMetrics = backMetrics;
+      this.lastAppliedWorkerPlan = cloneWorkerPlanSnapshot(workerPlan);
       if (context?.frameVisibilityRef) context.frameVisibilityRef.current = this.streamingFrontVisibility;
       if (context?.renderMetricsRef) context.renderMetricsRef.current = this.streamingFrontMetrics;
     }
@@ -458,6 +487,7 @@ export class JsrwGtaSession {
     this.streamingFrontVisibility = createFrameVisibilityResult();
     this.streamingBackVisibility = createFrameVisibilityResult();
     this.streamingFrontMetrics = createRenderMetrics();
+    this.lastAppliedWorkerPlan = null;
     this.streamingPlannerReady = false;
     this.streamingPlannerClient?.reset?.();
 

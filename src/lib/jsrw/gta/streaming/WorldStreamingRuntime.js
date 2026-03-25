@@ -605,6 +605,7 @@ export class WorldStreamingRuntime {
       Array.isArray(workerPlan?.candidateChunkKeys)
       || Array.isArray(workerPlan?.frustumChunkKeys),
     );
+    const workerPlanStable = hasWorkerVisibilityPlan && context.workerPlanStable === true;
     const needsFadeTick = activeFadeCountRef.current > 0;
     const needsVisibilityRefresh = lodState.needsVisibilityRefresh || lodState.needsRefresh || needsFadeTick;
     const rotationOnlyRefresh = cameraRotated
@@ -671,6 +672,9 @@ export class WorldStreamingRuntime {
     const workerFrustumChunkKeys = Array.isArray(workerPlan?.frustumChunkKeys)
       ? new Set(workerPlan.frustumChunkKeys)
       : null;
+    const workerVisibleChunkKeys = Array.isArray(workerPlan?.visibleChunkKeys)
+      ? new Set(workerPlan.visibleChunkKeys)
+      : null;
     const bigBuildingItems = bigBuildingItemsRef.current;
     const previousActiveChunks = activeRenderChunksRef.current;
     const nextActiveChunks = new Set();
@@ -685,7 +689,9 @@ export class WorldStreamingRuntime {
     const farChunkRefreshSet = new Set();
     if (farChunks.length > 0) {
       if (hasWorkerVisibilityPlan) {
-        for (const chunk of farChunks) farChunkRefreshSet.add(chunk);
+        if (!workerPlanStable) {
+          for (const chunk of farChunks) farChunkRefreshSet.add(chunk);
+        }
         lodState.visibilityChunkCursor = 0;
       } else {
         const farChunkBudget = Math.min(VISIBILITY_FAR_CHUNK_BUDGET, farChunks.length);
@@ -992,10 +998,14 @@ export class WorldStreamingRuntime {
       }
       let chunkOccluded = false;
       if (enableOcclusion) {
-        const occlusionStart = getProfilingTimeNow();
-        chunkOcclusionTests += 1;
-        chunkOccluded = isChunkOccluded(occlusionState, cameraRuntime, chunk);
-        occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
+        if (workerVisibleChunkKeys) {
+          chunkOccluded = !workerVisibleChunkKeys.has(chunk.key);
+        } else {
+          const occlusionStart = getProfilingTimeNow();
+          chunkOcclusionTests += 1;
+          chunkOccluded = isChunkOccluded(occlusionState, cameraRuntime, chunk);
+          occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
+        }
       }
       if (chunkOccluded) {
         if (chunk.active) {
@@ -1016,7 +1026,7 @@ export class WorldStreamingRuntime {
       for (const item of chunk.items) {
         processRenderItem(item);
       }
-      if (enableOcclusion) {
+      if (enableOcclusion && !workerVisibleChunkKeys) {
         const occlusionStart = getProfilingTimeNow();
         registerChunkOccluder(occlusionState, cameraRuntime, chunk);
         occlusionCpuMs += Math.max(0, getProfilingTimeNow() - occlusionStart);
@@ -1026,7 +1036,9 @@ export class WorldStreamingRuntime {
     const bigBuildingRefreshSet = new Set();
     if (bigBuildingItems.length > 0) {
       if (hasWorkerVisibilityPlan) {
-        for (const item of bigBuildingItems) bigBuildingRefreshSet.add(item);
+        if (!workerPlanStable) {
+          for (const item of bigBuildingItems) bigBuildingRefreshSet.add(item);
+        }
         lodState.bigBuildingCursor = 0;
       } else {
         const budget = Math.min(BIG_BUILDING_OCCLUSION_BUDGET, bigBuildingItems.length);
@@ -1043,7 +1055,7 @@ export class WorldStreamingRuntime {
     for (const item of bigBuildingItems) {
       const distSq = camera.position.distanceToSquared(item.anchor);
       const shouldFullyRefreshItem = distSq <= nearRefreshDistanceSq || bigBuildingRefreshSet.has(item);
-      if (shouldFullyRefreshItem) processRenderItem(item, { checkOcclusion: true });
+      if (shouldFullyRefreshItem) processRenderItem(item, { checkOcclusion: enableOcclusion && !hasWorkerVisibilityPlan });
       else collectExistingItemState(item);
     }
 
