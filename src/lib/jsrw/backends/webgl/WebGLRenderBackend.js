@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RenderTarget } from 'three/webgpu';
 import { RenderBackend } from '../common/RenderBackend.js';
 
 export class WebGLRenderBackend extends RenderBackend {
@@ -7,6 +8,9 @@ export class WebGLRenderBackend extends RenderBackend {
       id: 'WEBGL',
       capabilities: {
         supportsPatchedMaterials: true,
+        supportsNodeMaterials: true,
+        supportsRenderTargets: true,
+        supportsHistoryBuffers: true,
         supportsReadback: true,
         supportsPostFxHistory: true,
         supportsDebugTargets: true,
@@ -18,14 +22,14 @@ export class WebGLRenderBackend extends RenderBackend {
   }
 
   createRenderTarget(width, height, options = {}) {
-    const target = new THREE.WebGLRenderTarget(width, height, {
+    const target = new RenderTarget(width, height, {
       depthBuffer: options.depthBuffer === true,
       stencilBuffer: false,
       magFilter: options.magFilter || THREE.LinearFilter,
       minFilter: options.minFilter || THREE.LinearFilter,
       type: options.type || THREE.UnsignedByteType,
+      colorSpace: options.colorSpace || THREE.NoColorSpace,
     });
-    target.texture.colorSpace = options.colorSpace || THREE.NoColorSpace;
     target.texture.generateMipmaps = options.generateMipmaps === true;
     target.texture.userData = {
       ...(target.texture.userData || {}),

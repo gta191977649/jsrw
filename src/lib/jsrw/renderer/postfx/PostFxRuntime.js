@@ -3,7 +3,15 @@ import RWPostFxPipeline from './RWPostFxPipeline.js';
 export class PostFxRuntime {
   constructor(options = {}) {
     this.backend = options.backend || null;
-    this.pipeline = new RWPostFxPipeline(options.config || {});
+    this.pipeline = new RWPostFxPipeline({
+      backend: this.backend,
+      config: options.config || {},
+    });
+  }
+
+  setBackend(backend) {
+    this.backend = backend || null;
+    this.pipeline.setBackend?.(this.backend);
   }
 
   setConfig(config) {

@@ -82,6 +82,7 @@ function disposeObjectMaterialsOnly(root) {
 function createFadeMaterial(material, geometry) {
   if (!material) return material;
   const descriptor = getRWMaterialDescriptor(material);
+  const activeBackend = String(material.userData?.rwPipelineBackend || 'WEBGL').toUpperCase();
   if (material.userData?.rwPipelineMaterial && descriptor) {
     const fadeDescriptor = cloneRWMaterialDescriptor(descriptor);
     if (fadeDescriptor.rwFlags?.additive) {
@@ -103,6 +104,10 @@ function createFadeMaterial(material, geometry) {
       {
         descriptor: fadeDescriptor,
         geometry,
+        activeBackend,
+        runtimeContext: {
+          activeBackend,
+        },
       },
     );
     if (pipelineMaterial) {
@@ -111,6 +116,7 @@ function createFadeMaterial(material, geometry) {
         ...(material.userData || {}),
         ...(pipelineMaterial.userData || {}),
         rwPipelineOwnedMaterial: true,
+        rwPipelineBackend: activeBackend,
       };
       pipelineMaterial.transparent = true;
       pipelineMaterial.opacity = 1;
@@ -649,6 +655,7 @@ export class WorldStreamingRuntime {
     let visibleNear = 0;
     let visibleLod = 0;
     let activeFades = 0;
+    let fadeProxyCount = 0;
 
     const processRenderItem = (item, { checkOcclusion = false } = {}) => {
       if (!item || processedItems.has(item)) return;
@@ -818,6 +825,8 @@ export class WorldStreamingRuntime {
       ) {
         protectedItems.add(item);
       }
+      if (item.nearState?.proxyRoot?.visible) fadeProxyCount += 1;
+      if (item.lodState?.proxyRoot?.visible) fadeProxyCount += 1;
     };
 
     for (const chunk of candidateChunks) {
@@ -895,6 +904,8 @@ export class WorldStreamingRuntime {
       visibleQueueMeshes: frameVisibility.visibleQueueMeshes.length,
       coronaCandidates: frameVisibility.coronaCandidates.length,
       shadowCandidates: frameVisibility.shadowCandidates.length,
+      fadeProxyCount,
+      activeFadeCount: activeFades,
     };
     frameVisibility.computed = true;
     activeFadeCountRef.current = activeFades;

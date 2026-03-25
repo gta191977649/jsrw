@@ -1,7 +1,16 @@
 import * as THREE from 'three';
-import rwPostFxFullscreenVertexShader from '../../../../shaders/postfx/fullscreen.vertex.glsl.js';
-import rwPostFxCopyFragmentShader from '../../../../shaders/postfx/copy.fragment.glsl.js';
-import rwPostFxPresentFragmentShader from '../../../../shaders/postfx/present.fragment.glsl.js';
+import {
+  configurePostFxCompositeUniforms,
+  configurePostFxCopyUniforms,
+  configurePostFxRadiosityBlurUniforms,
+  configurePostFxSolidColorUniforms,
+  configurePostFxThresholdUniforms,
+  createPostFxCopyNodeMaterial,
+  createPostFxRadiosityBlurNodeMaterial,
+  createPostFxRadiosityCompositeNodeMaterial,
+  createPostFxRadiosityThresholdNodeMaterial,
+  createPostFxSolidColorNodeMaterial,
+} from '../../../../shaders/postfx/postfx.node.js';
 
 const SKYGFX_RADIOSITY_INTENSITY = 0x23;
 const VCS_BLUR_OFFSET = 2.1;
@@ -26,23 +35,6 @@ const POSTFX_DEBUG_VIEW = Object.freeze({
 
 function getPostFxDebugViewOrDefault(value) {
   return Object.values(POSTFX_DEBUG_VIEW).includes(value) ? value : POSTFX_DEBUG_VIEW.FINAL;
-}
-
-function createRenderTarget(width, height, options = {}) {
-  const target = new THREE.WebGLRenderTarget(width, height, {
-    depthBuffer: options.depthBuffer === true,
-    stencilBuffer: false,
-    magFilter: THREE.LinearFilter,
-    minFilter: THREE.LinearFilter,
-    type: options.type || THREE.UnsignedByteType,
-  });
-  target.texture.colorSpace = THREE.NoColorSpace;
-  target.texture.generateMipmaps = false;
-  target.texture.userData = {
-    ...(target.texture.userData || {}),
-    rwRenderTarget: target,
-  };
-  return target;
 }
 
 function computeRadiositySize(width, height, divisor = DEFAULT_RADIOSITY_RESOLUTION_DIVISOR) {
@@ -81,8 +73,13 @@ function setVector3FromColor(target, color, scale = 1) {
   );
 }
 
+function getPostFxFlipYForBackend(backend) {
+  return backend?.id === 'WEBGPU' ? 1 : 0;
+}
+
 export class RWPostFxPipeline {
   constructor(options = {}) {
+    this.backend = options.backend || null;
     this.enabled = true;
     this.viewportWidth = 1;
     this.viewportHeight = 1;
@@ -93,10 +90,8 @@ export class RWPostFxPipeline {
     this.sceneTarget = null;
     this.composeTarget = null;
     this.frontBufferTarget = null;
-    this.lastFrameTarget = null;
     this.radiosityTargetA = null;
     this.radiosityTargetB = null;
-    this.blurCurrentTarget = null;
     this.blurHistoryTarget = null;
     this.debugCurrentFrameTarget = null;
     this.debugRadiosityTarget = null;
@@ -111,107 +106,10 @@ export class RWPostFxPipeline {
     this.quad.frustumCulled = false;
     this.scene.add(this.quad);
 
-    this.copyMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uTex: { value: null },
-        uUvOffset: { value: new THREE.Vector2(0, 0) },
-        uColor: { value: new THREE.Vector3(1, 1, 1) },
-        uOpacity: { value: 1 },
-      },
-      vertexShader: rwPostFxFullscreenVertexShader,
-      fragmentShader: rwPostFxCopyFragmentShader,
-      depthTest: false,
-      depthWrite: false,
-      transparent: false,
-      toneMapped: false,
-    });
-
-    this.presentMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uTex: { value: null },
-        uUvOffset: { value: new THREE.Vector2(0, 0) },
-        uColor: { value: new THREE.Vector3(1, 1, 1) },
-        uOpacity: { value: 1 },
-      },
-      vertexShader: rwPostFxFullscreenVertexShader,
-      fragmentShader: rwPostFxPresentFragmentShader,
-      depthTest: false,
-      depthWrite: false,
-      transparent: false,
-      toneMapped: false,
-    });
-
-    this.radiosityBlurMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uTex: { value: null },
-        uTexelSize: { value: new THREE.Vector2(1, 1) },
-        uOffsetSet: { value: 0 },
-        uWeight: { value: VCS_RADIOSITY_SPREAD_WEIGHT },
-      },
-      vertexShader: rwPostFxFullscreenVertexShader,
-      fragmentShader: `
-uniform sampler2D uTex;
-uniform vec2 uTexelSize;
-uniform int uOffsetSet;
-uniform float uWeight;
-varying vec2 vUv;
-
-void main() {
-  vec2 offsets[8];
-  if (uOffsetSet == 0) {
-    offsets[0] = vec2(-1.0, 0.0);
-    offsets[1] = vec2(1.0, 0.0);
-    offsets[2] = vec2(0.0, -1.0);
-    offsets[3] = vec2(0.0, 1.0);
-    offsets[4] = vec2(-1.0, -1.0);
-    offsets[5] = vec2(1.0, -1.0);
-    offsets[6] = vec2(-1.0, 1.0);
-    offsets[7] = vec2(1.0, 1.0);
-  } else {
-    offsets[0] = vec2(1.0, 0.0);
-    offsets[1] = vec2(-1.0, 0.0);
-    offsets[2] = vec2(0.0, 1.0);
-    offsets[3] = vec2(0.0, -1.0);
-    offsets[4] = vec2(1.0, 1.0);
-    offsets[5] = vec2(-1.0, 1.0);
-    offsets[6] = vec2(1.0, -1.0);
-    offsets[7] = vec2(-1.0, -1.0);
-  }
-
-  vec3 color = vec3(0.0);
-  for (int i = 0; i < 8; i += 1) {
-    color += texture2D(uTex, clamp(vUv + (offsets[i] * uTexelSize), 0.0, 1.0)).rgb * uWeight;
-  }
-  gl_FragColor = vec4(color, 1.0);
-}
-`,
-      depthTest: false,
-      depthWrite: false,
-      transparent: false,
-      toneMapped: false,
-    });
-
-    this.radiosityCompositeMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uTex: { value: null },
-        uIntensity: { value: 0.0 },
-      },
-      vertexShader: rwPostFxFullscreenVertexShader,
-      fragmentShader: `
-uniform sampler2D uTex;
-uniform float uIntensity;
-varying vec2 vUv;
-
-void main() {
-  vec3 color = texture2D(uTex, clamp(vUv, 0.0, 1.0)).rgb * uIntensity;
-  gl_FragColor = vec4(color, 1.0);
-}
-`,
-      depthTest: false,
-      depthWrite: false,
-      transparent: true,
-      toneMapped: false,
-    });
+    this.copyMaterial = createPostFxCopyNodeMaterial();
+    this.presentMaterial = createPostFxCopyNodeMaterial();
+    this.radiosityBlurMaterial = createPostFxRadiosityBlurNodeMaterial();
+    this.radiosityCompositeMaterial = createPostFxRadiosityCompositeNodeMaterial();
     this.radiosityCompositeMaterial.blending = THREE.CustomBlending;
     this.radiosityCompositeMaterial.blendSrc = THREE.OneFactor;
     this.radiosityCompositeMaterial.blendDst = THREE.OneFactor;
@@ -220,30 +118,9 @@ void main() {
     this.radiosityCompositeMaterial.blendDstAlpha = THREE.ZeroFactor;
     this.radiosityCompositeMaterial.blendEquationAlpha = THREE.AddEquation;
 
-    this.radiosityThresholdMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uTex: { value: null },
-        uLimit: { value: 0.0 },
-      },
-      vertexShader: rwPostFxFullscreenVertexShader,
-      fragmentShader: `
-uniform sampler2D uTex;
-uniform float uLimit;
-varying vec2 vUv;
+    this.radiosityThresholdMaterial = createPostFxRadiosityThresholdNodeMaterial();
 
-void main() {
-  vec3 color = texture2D(uTex, clamp(vUv, 0.0, 1.0)).rgb;
-  color = max((color * 2.0) - vec3(uLimit), vec3(0.0));
-  gl_FragColor = vec4(color, 1.0);
-}
-`,
-      depthTest: false,
-      depthWrite: false,
-      transparent: false,
-      toneMapped: false,
-    });
-
-    this.accumulationMaterial = this.copyMaterial.clone();
+    this.accumulationMaterial = createPostFxCopyNodeMaterial();
     this.accumulationMaterial.transparent = true;
     this.accumulationMaterial.blending = THREE.CustomBlending;
     this.accumulationMaterial.blendSrc = THREE.ConstantColorFactor;
@@ -254,31 +131,14 @@ void main() {
     this.accumulationMaterial.blendEquationAlpha = THREE.AddEquation;
     this.accumulationMaterial.blendColor = new THREE.Color(VCS_BLUR_INTENSITY, VCS_BLUR_INTENSITY, VCS_BLUR_INTENSITY);
 
-    this.additiveMaterial = this.copyMaterial.clone();
+    this.additiveMaterial = createPostFxCopyNodeMaterial();
     this.additiveMaterial.transparent = true;
     this.additiveMaterial.blending = THREE.AdditiveBlending;
     this.additiveMaterial.blendSrcAlpha = THREE.OneFactor;
     this.additiveMaterial.blendDstAlpha = THREE.ZeroFactor;
     this.additiveMaterial.blendEquationAlpha = THREE.AddEquation;
 
-    this.solidColorMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uColor: { value: new THREE.Vector3(0, 0, 0) },
-        uOpacity: { value: 1 },
-      },
-      vertexShader: rwPostFxFullscreenVertexShader,
-      fragmentShader: `
-uniform vec3 uColor;
-uniform float uOpacity;
-void main() {
-  gl_FragColor = vec4(uColor, uOpacity);
-}
-`,
-      depthTest: false,
-      depthWrite: false,
-      transparent: true,
-      toneMapped: false,
-    });
+    this.solidColorMaterial = createPostFxSolidColorNodeMaterial();
     this.solidColorMaterial.blending = THREE.AdditiveBlending;
     this.solidColorMaterial.blendSrcAlpha = THREE.OneFactor;
     this.solidColorMaterial.blendDstAlpha = THREE.ZeroFactor;
@@ -313,11 +173,81 @@ void main() {
       debugView: POSTFX_DEBUG_VIEW.FINAL,
       debugCapture: false,
     };
-    this.setConfig(options);
+    this.setConfig(options.config || options);
+  }
+
+  setBackend(backend) {
+    this.backend = backend || null;
+  }
+
+  createRenderTarget(width, height, options = {}) {
+    if (!this.backend?.createRenderTarget) {
+      throw new Error('RWPostFxPipeline: backend.createRenderTarget() is required');
+    }
+    return this.backend.createRenderTarget(width, height, {
+      depthBuffer: options.depthBuffer === true,
+      magFilter: THREE.LinearFilter,
+      minFilter: THREE.LinearFilter,
+      type: options.type || THREE.UnsignedByteType,
+      colorSpace: THREE.NoColorSpace,
+      generateMipmaps: false,
+    });
   }
 
   shouldCaptureDebug() {
     return this.runtime.debugCapture || this.runtime.debugView !== POSTFX_DEBUG_VIEW.FINAL;
+  }
+
+  ensureDebugTargets() {
+    if (!this.shouldCaptureDebug()) {
+      this.debugCurrentFrameTarget?.dispose();
+      this.debugCurrentFrameTarget = null;
+      this.debugRadiosityTarget?.dispose();
+      this.debugRadiosityTarget = null;
+      this.debugBlurTarget?.dispose();
+      this.debugBlurTarget = null;
+      return;
+    }
+    if (!this.debugCurrentFrameTarget) {
+      this.debugCurrentFrameTarget = this.createRenderTarget(this.viewportWidth, this.viewportHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    }
+    if (!this.debugRadiosityTarget) {
+      this.debugRadiosityTarget = this.createRenderTarget(this.viewportWidth, this.viewportHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    }
+    if (!this.debugBlurTarget) {
+      this.debugBlurTarget = this.createRenderTarget(this.viewportWidth, this.viewportHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    }
+  }
+
+  ensureOptionalTargets() {
+    const needsRadiosity = this.configRuntime.enableRadiosity === true;
+    const needsHistory = this.configRuntime.enableBlur === true && this.configRuntime.enableTrails === true;
+
+    if (needsRadiosity) {
+      if (!this.radiosityTargetA) {
+        this.radiosityTargetA = this.createRenderTarget(this.radiosityWidth, this.radiosityHeight, { type: THREE.HalfFloatType });
+      }
+      if (!this.radiosityTargetB) {
+        this.radiosityTargetB = this.createRenderTarget(this.radiosityWidth, this.radiosityHeight, { type: THREE.HalfFloatType });
+      }
+    } else {
+      this.radiosityTargetA?.dispose();
+      this.radiosityTargetA = null;
+      this.radiosityTargetB?.dispose();
+      this.radiosityTargetB = null;
+    }
+
+    if (needsHistory) {
+      if (!this.blurHistoryTarget) {
+        this.blurHistoryTarget = this.createRenderTarget(this.viewportWidth, this.viewportHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+      }
+    } else {
+      this.blurHistoryTarget?.dispose();
+      this.blurHistoryTarget = null;
+      this.hasHistory = false;
+    }
+
+    this.ensureDebugTargets();
   }
 
   setEnabled(enabled) {
@@ -403,15 +333,8 @@ void main() {
       && this.sceneTarget
       && this.composeTarget
       && this.frontBufferTarget
-      && this.lastFrameTarget
-      && this.radiosityTargetA
-      && this.radiosityTargetB
-      && this.blurCurrentTarget
-      && this.blurHistoryTarget
-      && this.debugCurrentFrameTarget
-      && this.debugRadiosityTarget
-      && this.debugBlurTarget
     ) {
+      this.ensureOptionalTargets();
       return;
     }
     this.viewportWidth = nextWidth;
@@ -422,26 +345,23 @@ void main() {
     this.sceneTarget?.dispose();
     this.composeTarget?.dispose();
     this.frontBufferTarget?.dispose();
-    this.lastFrameTarget?.dispose();
     this.radiosityTargetA?.dispose();
     this.radiosityTargetB?.dispose();
-    this.blurCurrentTarget?.dispose();
     this.blurHistoryTarget?.dispose();
     this.debugCurrentFrameTarget?.dispose();
     this.debugRadiosityTarget?.dispose();
     this.debugBlurTarget?.dispose();
 
-    this.sceneTarget = createRenderTarget(nextWidth, nextHeight, { depthBuffer: true, type: FULL_RES_POSTFX_TARGET_TYPE });
-    this.composeTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
-    this.frontBufferTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
-    this.lastFrameTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
-    this.radiosityTargetA = createRenderTarget(this.radiosityWidth, this.radiosityHeight, { type: THREE.HalfFloatType });
-    this.radiosityTargetB = createRenderTarget(this.radiosityWidth, this.radiosityHeight, { type: THREE.HalfFloatType });
-    this.blurCurrentTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
-    this.blurHistoryTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
-    this.debugCurrentFrameTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
-    this.debugRadiosityTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
-    this.debugBlurTarget = createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.sceneTarget = this.createRenderTarget(nextWidth, nextHeight, { depthBuffer: true, type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.composeTarget = this.createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.frontBufferTarget = this.createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.radiosityTargetA = null;
+    this.radiosityTargetB = null;
+    this.blurHistoryTarget = null;
+    this.debugCurrentFrameTarget = null;
+    this.debugRadiosityTarget = null;
+    this.debugBlurTarget = null;
+    this.ensureOptionalTargets();
     this.resetHistory();
   }
 
@@ -500,20 +420,22 @@ void main() {
   }
 
   copyTarget(renderer, source, destination, clear = true) {
-    this.copyMaterial.uniforms.uTex.value = source.texture;
-    this.copyMaterial.uniforms.uUvOffset.value.set(0, 0);
-    this.copyMaterial.uniforms.uColor.value.set(1, 1, 1);
-    this.copyMaterial.uniforms.uOpacity.value = 1;
+    configurePostFxCopyUniforms(this.copyMaterial, {
+      textureValue: source.texture,
+      opacity: 1,
+      flipY: getPostFxFlipYForBackend(this.backend),
+    });
     this.copyMaterial.transparent = false;
     this.copyMaterial.blending = THREE.NormalBlending;
     this.renderFullscreen(renderer, destination, this.copyMaterial, clear);
   }
 
   presentTarget(renderer, source, clear = true) {
-    this.presentMaterial.uniforms.uTex.value = source.texture;
-    this.presentMaterial.uniforms.uUvOffset.value.set(0, 0);
-    this.presentMaterial.uniforms.uColor.value.set(1, 1, 1);
-    this.presentMaterial.uniforms.uOpacity.value = 1;
+    configurePostFxCopyUniforms(this.presentMaterial, {
+      textureValue: source.texture,
+      opacity: 1,
+      flipY: getPostFxFlipYForBackend(this.backend),
+    });
     this.presentMaterial.transparent = false;
     this.presentMaterial.blending = THREE.NormalBlending;
     this.renderFullscreen(renderer, null, this.presentMaterial, clear);
@@ -526,22 +448,29 @@ void main() {
 
   runRadiosityStage(renderer) {
     this.copyTarget(renderer, this.frontBufferTarget, this.composeTarget, true);
-    if (!this.runtime.enableRadiosity || this.runtime.radiosityIntensity <= 0) return;
+    if (!this.runtime.enableRadiosity || this.runtime.radiosityIntensity <= 0 || !this.radiosityTargetA || !this.radiosityTargetB) return;
 
-    this.radiosityThresholdMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
-    this.radiosityThresholdMaterial.uniforms.uLimit.value = this.runtime.radiosityLimit / 255.0;
+    configurePostFxThresholdUniforms(this.radiosityThresholdMaterial, {
+      textureValue: this.frontBufferTarget.texture,
+      limit: this.runtime.radiosityLimit / 255.0,
+      flipY: getPostFxFlipYForBackend(this.backend),
+    });
     this.renderFullscreen(renderer, this.radiosityTargetB, this.radiosityThresholdMaterial, true);
 
     let source = this.radiosityTargetB;
     let destination = this.radiosityTargetA;
-    this.radiosityBlurMaterial.uniforms.uTexelSize.value.set(
+    const radiosityTexelSize = new THREE.Vector2(
       1 / Math.max(1, this.radiosityTargetA.width),
       1 / Math.max(1, this.radiosityTargetA.height),
     );
-    this.radiosityBlurMaterial.uniforms.uWeight.value = VCS_RADIOSITY_SPREAD_WEIGHT;
     for (let i = 0; i < VCS_RADIOSITY_PING_PONG_PASSES; i += 1) {
-      this.radiosityBlurMaterial.uniforms.uTex.value = source.texture;
-      this.radiosityBlurMaterial.uniforms.uOffsetSet.value = i % 2;
+      configurePostFxRadiosityBlurUniforms(this.radiosityBlurMaterial, {
+        textureValue: source.texture,
+        texelSize: radiosityTexelSize,
+        offsetSet: i % 2,
+        weight: VCS_RADIOSITY_SPREAD_WEIGHT,
+        flipY: getPostFxFlipYForBackend(this.backend),
+      });
       this.renderFullscreen(renderer, destination, this.radiosityBlurMaterial, true);
       const nextSource = destination;
       destination = source;
@@ -550,12 +479,15 @@ void main() {
 
     this.captureDebugStage(renderer, source, this.radiosityTargetB === source ? this.debugRadiosityTarget : this.debugRadiosityTarget);
 
-    this.radiosityCompositeMaterial.uniforms.uTex.value = source.texture;
-    this.radiosityCompositeMaterial.uniforms.uIntensity.value = THREE.MathUtils.clamp(
-      (this.runtime.radiosityIntensity * 4) / 255.0,
-      0,
-      1,
-    );
+    configurePostFxCompositeUniforms(this.radiosityCompositeMaterial, {
+      textureValue: source.texture,
+      intensity: THREE.MathUtils.clamp(
+        (this.runtime.radiosityIntensity * 4) / 255.0,
+        0,
+        1,
+      ),
+      flipY: getPostFxFlipYForBackend(this.backend),
+    });
     this.renderFullscreen(renderer, this.composeTarget, this.radiosityCompositeMaterial, false);
     this.renderFullscreen(renderer, this.composeTarget, this.radiosityCompositeMaterial, false);
   }
@@ -563,9 +495,11 @@ void main() {
   runBlurStage(renderer) {
     if (!this.runtime.enableBlur) return;
 
-    this.accumulationMaterial.uniforms.uTex.value = this.frontBufferTarget.texture;
-    this.accumulationMaterial.uniforms.uColor.value.set(1, 1, 1);
-    this.accumulationMaterial.uniforms.uOpacity.value = 1;
+    configurePostFxCopyUniforms(this.accumulationMaterial, {
+      textureValue: this.frontBufferTarget.texture,
+      opacity: 1,
+      flipY: getPostFxFlipYForBackend(this.backend),
+    });
     setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
 
     const blurOffset = this.runtime.blurOffset;
@@ -576,20 +510,31 @@ void main() {
     ];
     setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
     for (const offset of offsets) {
-      this.accumulationMaterial.uniforms.uUvOffset.value.copy(offset);
+      configurePostFxCopyUniforms(this.accumulationMaterial, {
+        textureValue: this.frontBufferTarget.texture,
+        uvOffset: offset,
+        opacity: 1,
+        flipY: getPostFxFlipYForBackend(this.backend),
+      });
       this.renderFullscreen(renderer, this.composeTarget, this.accumulationMaterial, false);
     }
 
     if (this.runtime.enableColorFilter) {
-      setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
-      this.solidColorMaterial.uniforms.uOpacity.value = 1;
+      const solidColor = new THREE.Vector3();
+      setVector3FromColor(solidColor, this.runtime.blurColor);
+      configurePostFxSolidColorUniforms(this.solidColorMaterial, {
+        color: solidColor,
+        opacity: 1,
+      });
       this.renderFullscreen(renderer, this.composeTarget, this.solidColorMaterial, false);
     }
 
     if (this.runtime.enableTrails && this.hasHistory) {
-      this.accumulationMaterial.uniforms.uTex.value = this.blurHistoryTarget.texture;
-      this.accumulationMaterial.uniforms.uUvOffset.value.set(0, 0);
-      this.accumulationMaterial.uniforms.uColor.value.set(1, 1, 1);
+      configurePostFxCopyUniforms(this.accumulationMaterial, {
+        textureValue: this.blurHistoryTarget.texture,
+        opacity: 1,
+        flipY: getPostFxFlipYForBackend(this.backend),
+      });
       setMaterialBlendConstant(this.accumulationMaterial, this.runtime.historyIntensity);
       this.renderFullscreen(renderer, this.composeTarget, this.accumulationMaterial, false);
     }
@@ -620,11 +565,17 @@ void main() {
         return;
       case POSTFX_DEBUG_VIEW.BLUR_TINT:
         if (this.runtime.enableColorFilter) {
-          setVector3FromColor(this.solidColorMaterial.uniforms.uColor.value, this.runtime.blurColor);
-          this.solidColorMaterial.uniforms.uOpacity.value = 1;
+          const solidColor = new THREE.Vector3();
+          setVector3FromColor(solidColor, this.runtime.blurColor);
+          configurePostFxSolidColorUniforms(this.solidColorMaterial, {
+            color: solidColor,
+            opacity: 1,
+          });
         } else {
-          this.solidColorMaterial.uniforms.uColor.value.set(0, 0, 0);
-          this.solidColorMaterial.uniforms.uOpacity.value = 1;
+          configurePostFxSolidColorUniforms(this.solidColorMaterial, {
+            color: new THREE.Vector3(0, 0, 0),
+            opacity: 1,
+          });
         }
         this.renderFullscreen(renderer, null, this.solidColorMaterial, true);
         return;
@@ -637,8 +588,9 @@ void main() {
     if (!this.enabled || !renderer?.setRenderTarget || !this.sceneTarget) return;
     const width = runtimeContext.viewportWidth || this.viewportWidth;
     const height = runtimeContext.viewportHeight || this.viewportHeight;
-    this.ensureSize(width, height);
     this.updateRuntime(runtimeContext);
+    this.ensureSize(width, height);
+    this.ensureOptionalTargets();
 
     this.primeFrontBuffer(renderer);
     this.captureDebugStage(renderer, this.frontBufferTarget, this.debugCurrentFrameTarget);
@@ -694,10 +646,8 @@ void main() {
     this.sceneTarget?.dispose();
     this.composeTarget?.dispose();
     this.frontBufferTarget?.dispose();
-    this.lastFrameTarget?.dispose();
     this.radiosityTargetA?.dispose();
     this.radiosityTargetB?.dispose();
-    this.blurCurrentTarget?.dispose();
     this.blurHistoryTarget?.dispose();
     this.debugCurrentFrameTarget?.dispose();
     this.debugRadiosityTarget?.dispose();

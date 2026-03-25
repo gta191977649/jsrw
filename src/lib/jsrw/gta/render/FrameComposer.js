@@ -76,6 +76,7 @@ export class FrameComposer {
   render(context = {}) {
     const {
       renderer,
+      rendererHost,
       scene,
       camera,
       activeBackend,
@@ -450,8 +451,18 @@ export class FrameComposer {
       renderer.autoClear = true;
     }
 
+    const rendererRuntimeInfo = rendererHost?.getRuntimeInfo?.() || null;
+    const sessionStats = this.rendererSession?.getStats?.() || null;
     renderMetricsRef.current = {
       ...renderMetricsRef.current,
+      rendererBackend: rendererRuntimeInfo?.backend || String(activeBackend || 'UNKNOWN').toUpperCase(),
+      rendererActualBackend: rendererRuntimeInfo?.actualBackend || 'unknown',
+      rendererCurrentSamples: rendererRuntimeInfo?.currentSamples ?? 0,
+      rendererOutputBufferType: rendererRuntimeInfo?.outputBufferType || 'unknown',
+      pipelineActiveMaterials: sessionStats?.pipeline?.activeMaterialCount ?? 0,
+      pipelineCachedMaterials: sessionStats?.pipeline?.cachedMaterialCount ?? 0,
+      opaqueQueue: rwRenderQueueRef.current?.debugStats?.opaqueCount ?? 0,
+      cutoutQueue: rwRenderQueueRef.current?.debugStats?.cutoutCount ?? 0,
       transparentQueue: rwRenderQueueRef.current?.debugStats?.transparentCount ?? 0,
       additiveQueue: rwRenderQueueRef.current?.debugStats?.additiveCount ?? 0,
       overlayQueue: rwRenderQueueRef.current?.debugStats?.overlayCount ?? 0,

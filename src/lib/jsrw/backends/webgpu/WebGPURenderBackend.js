@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+import { RenderTarget } from 'three/webgpu';
 import { RenderBackend } from '../common/RenderBackend.js';
 
 export class WebGPURenderBackend extends RenderBackend {
@@ -7,17 +9,33 @@ export class WebGPURenderBackend extends RenderBackend {
       capabilities: {
         supportsPatchedMaterials: false,
         supportsReadback: false,
-        supportsPostFxHistory: false,
-        supportsDebugTargets: false,
+        supportsNodeMaterials: true,
+        supportsRenderTargets: true,
+        supportsHistoryBuffers: true,
+        supportsPostFxHistory: true,
+        supportsDebugTargets: true,
         supportsCustomBlendConstants: false,
-        supportsHalfFloatTargets: false,
+        supportsHalfFloatTargets: true,
         ...(options.capabilities || {}),
       },
     });
   }
 
-  createRenderTarget() {
-    throw new Error('WebGPURenderBackend: render targets are not implemented yet');
+  createRenderTarget(width, height, options = {}) {
+    const target = new RenderTarget(width, height, {
+      depthBuffer: options.depthBuffer === true,
+      stencilBuffer: false,
+      magFilter: options.magFilter || THREE.LinearFilter,
+      minFilter: options.minFilter || THREE.LinearFilter,
+      type: options.type || THREE.UnsignedByteType,
+      colorSpace: options.colorSpace || THREE.NoColorSpace,
+    });
+    target.texture.generateMipmaps = options.generateMipmaps === true;
+    target.texture.userData = {
+      ...(target.texture.userData || {}),
+      rwRenderTarget: target,
+    };
+    return target;
   }
 }
 

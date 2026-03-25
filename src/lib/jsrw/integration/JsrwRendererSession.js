@@ -24,6 +24,9 @@ export class JsrwRendererSession {
 
   setBackend(activeBackend) {
     this.backend = createBackend(activeBackend);
+    this.waterRuntime?.setBackend?.(this.backend);
+    this.coronaRuntime?.setBackend?.(this.backend);
+    this.shadowRuntime?.setBackend?.(this.backend);
     return this.backend;
   }
 
@@ -53,6 +56,18 @@ export class JsrwRendererSession {
 
   getRenderQueue() {
     return this.renderQueue;
+  }
+
+  getStats() {
+    return {
+      pipeline: this.pipelineController?.getStats?.() || {
+        activeMaterialCount: 0,
+        cachedMaterialCount: 0,
+      },
+      renderQueue: {
+        ...(this.renderQueue?.debugStats || {}),
+      },
+    };
   }
 
   applyToRoot(root, runtimeContext = {}) {

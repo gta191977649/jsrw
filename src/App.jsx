@@ -51,8 +51,7 @@ import {
 import saIcon from './assets/sa.png';
 import vcsIcon from './assets/vcs.png';
 import vcsDefaultMapUrl from './assets/maps/vcs.zip?url';
-import skyVertexShader from './shaders/sky.vertex.glsl.js';
-import skyFragmentShader from './shaders/sky.fragment.glsl.js';
+import { createSkyNodeMaterial } from './shaders/sky.node.js';
 import './App.css';
 
 const MAX_CONSOLE_LINES = 500;
@@ -616,6 +615,16 @@ function App() {
     visibleQueueMeshes: 0,
     coronaCandidates: 0,
     shadowCandidates: 0,
+    fadeProxyCount: 0,
+    activeFadeCount: 0,
+    rendererBackend: 'UNKNOWN',
+    rendererActualBackend: 'unknown',
+    rendererCurrentSamples: 0,
+    rendererOutputBufferType: 'unknown',
+    pipelineActiveMaterials: 0,
+    pipelineCachedMaterials: 0,
+    opaqueQueue: 0,
+    cutoutQueue: 0,
     transparentQueue: 0,
     additiveQueue: 0,
     overlayQueue: 0,
@@ -835,7 +844,7 @@ function App() {
     renderStages: { ...FRAME_STAGE_DEBUG_DEFAULTS },
     pipelineDebug: cloneRWPipelineSelections(RW_PIPELINE_SELECTION_DEFAULTS),
     appMode: APP_MODE_EDITOR,
-    backendSelection: 'WebGL',
+    backendSelection: 'WebGPU',
     windows: Object.fromEntries(WINDOW_DEFS.map((item) => [item.key, item.defaultVisible])),
   });
   const lastWireframeRef = useRef(false);
@@ -861,7 +870,7 @@ function App() {
   const postFxTimecycleSyncSignatureRef = useRef('');
 
   const [status, setStatus] = useState('Select an extracted GTA folder or zip archive to begin.');
-  const [activeBackend, setActiveBackend] = useState('WebGL');
+  const [activeBackend, setActiveBackend] = useState('WebGPU');
   const [buildProgress, setBuildProgress] = useState({ active: false, current: 0, total: 0 });
   const [showGameIcon, setShowGameIcon] = useState(false);
   const [stats, setStats] = useState({
@@ -1141,8 +1150,11 @@ function App() {
       if (activeBackend === 'WebGPU' && rendererHost.backend === 'WebGPU') {
         pushConsoleLine('info', 'WebGPU backend initialized');
       }
-      resize();
       rendererReady = true;
+      resize();
+      window.requestAnimationFrame(() => {
+        if (!cancelled) resize();
+      });
       backendSwitchingRef.current = false;
     }).catch((error) => {
       if (cancelled) return;
@@ -1157,30 +1169,7 @@ function App() {
     const skyScene = new THREE.Scene();
     const skyCloudScene = new THREE.Scene();
     const skyCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
-    const skyMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uSkyTop: { value: SKY_DEFAULT_TOP.clone() },
-        uSkyBottom: { value: SKY_DEFAULT_BOTTOM.clone() },
-        uFogColor: { value: SKY_DEFAULT_FOG.clone() },
-        uBelowHorizonColor: { value: new THREE.Color().setRGB(30 / 255, 30 / 255, 30 / 255, THREE.SRGBColorSpace) },
-        uCameraForward: { value: new THREE.Vector3(0, 0, -1) },
-        uCameraRight: { value: new THREE.Vector3(1, 0, 0) },
-        uCameraUp: { value: new THREE.Vector3(0, 1, 0) },
-        uHorizonY: { value: 0.5 },
-        uSmallStripHeight: { value: SKY_SMALL_STRIP_HEIGHT },
-        uHorizonStrength: { value: 0.8 },
-        uLowerBandEndY: { value: 0.38 },
-        uTanHalfFov: { value: Math.tan(THREE.MathUtils.degToRad(60 * 0.5)) },
-        uAspect: { value: 1 },
-        uBelowHorizonMix: { value: 0 },
-      },
-      vertexShader: skyVertexShader,
-      fragmentShader: skyFragmentShader,
-      depthTest: false,
-      depthWrite: false,
-      fog: false,
-      toneMapped: false,
-    });
+    const skyMaterial = createSkyNodeMaterial();
     const skyQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), skyMaterial);
     skyQuad.frustumCulled = false;
     skyScene.add(skyQuad);
@@ -1830,7 +1819,8 @@ function App() {
       const skyFeature = skyFeatureRef.current;
       const _sunPipeline = skyFeature?.sun || null;
       const cloudMotion = cloudMotionRef.current;
-      if (skyMaterial?.uniforms) {
+      const skyUniforms = skyMaterial?.userData?.rwSkyUniforms || null;
+      if (skyUniforms) {
         const cameraForward = new THREE.Vector3();
         const cameraRight = new THREE.Vector3();
         const cameraUp = new THREE.Vector3();
@@ -1850,20 +1840,20 @@ function App() {
           + (cameraUp.y < 0 ? 1.0 : Math.abs(cameraRight.y))
         ) * lodDistMultiplier;
         const lowerBandEndY = THREE.MathUtils.clamp(projectedHorizonY - SKY_SMALL_STRIP_HEIGHT - horizonStripSpan, 0, 1);
-        skyMaterial.uniforms.uSkyTop.value.copy(skyTopColor);
-        skyMaterial.uniforms.uSkyBottom.value.copy(skyBottomColor);
-        skyMaterial.uniforms.uFogColor.value.copy(fogColor);
-        skyMaterial.uniforms.uBelowHorizonColor.value.copy(belowHorizonColor);
-        skyMaterial.uniforms.uCameraForward.value.copy(cameraForward);
-        skyMaterial.uniforms.uCameraRight.value.copy(cameraRight);
-        skyMaterial.uniforms.uCameraUp.value.copy(cameraUp);
-        skyMaterial.uniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
-        skyMaterial.uniforms.uAspect.value = camera.aspect;
-        skyMaterial.uniforms.uBelowHorizonMix.value = THREE.MathUtils.clamp((camera.position.y - 25) / 80, 0, 1);
-        skyMaterial.uniforms.uHorizonY.value = projectedHorizonY;
-        skyMaterial.uniforms.uSmallStripHeight.value = SKY_SMALL_STRIP_HEIGHT;
-        skyMaterial.uniforms.uHorizonStrength.value = 1.0;
-        skyMaterial.uniforms.uLowerBandEndY.value = lowerBandEndY;
+        skyUniforms.uSkyTop.value.copy(skyTopColor);
+        skyUniforms.uSkyBottom.value.copy(skyBottomColor);
+        skyUniforms.uFogColor.value.copy(fogColor);
+        skyUniforms.uBelowHorizonColor.value.copy(belowHorizonColor);
+        skyUniforms.uCameraForward.value.copy(cameraForward);
+        skyUniforms.uCameraRight.value.copy(cameraRight);
+        skyUniforms.uCameraUp.value.copy(cameraUp);
+        skyUniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+        skyUniforms.uAspect.value = camera.aspect;
+        skyUniforms.uBelowHorizonMix.value = THREE.MathUtils.clamp((camera.position.y - 25) / 80, 0, 1);
+        skyUniforms.uHorizonY.value = projectedHorizonY;
+        skyUniforms.uSmallStripHeight.value = SKY_SMALL_STRIP_HEIGHT;
+        skyUniforms.uHorizonStrength.value = 1.0;
+        skyUniforms.uLowerBandEndY.value = lowerBandEndY;
       }
       const fluffyCloudTexture = fluffyCloudTextureRef.current;
       if (fluffyCloudTexture?.image && typeof fluffyCloudTexture.image.getContext === 'function') {
@@ -2004,9 +1994,9 @@ function App() {
       const skyLightMult = computeSkyLightMultFromLightsMult(sunLightsMult);
       skyTopColor.copy(baseSkyTopColor).multiplyScalar(skyLightMult);
       skyBottomColor.copy(baseSkyBottomColor).multiplyScalar(skyLightMult);
-      if (skyMaterial?.uniforms) {
-        skyMaterial.uniforms.uSkyTop.value.copy(skyTopColor);
-        skyMaterial.uniforms.uSkyBottom.value.copy(skyBottomColor);
+      if (skyUniforms) {
+        skyUniforms.uSkyTop.value.copy(skyTopColor);
+        skyUniforms.uSkyBottom.value.copy(skyBottomColor);
       }
 
       const sunLight = sunLightRef.current;
@@ -2090,6 +2080,7 @@ function App() {
           renderMetricsRef,
           renderResourcesReadyRef,
           renderer,
+          rendererHost: rendererHostRef.current,
           rwRenderQueueRef,
           scene,
           setStatus,
@@ -2850,6 +2841,8 @@ function App() {
             if (ImGui.CollapsingHeader('Details')) {
               ImGui.Text(`Draw Calls: ${renderMetrics.drawCalls}`);
               ImGui.Text(`Triangles: ${renderMetrics.triangles}`);
+              ImGui.Text(`Renderer backend: requested ${renderMetrics.rendererBackend} | actual ${renderMetrics.rendererActualBackend}`);
+              ImGui.Text(`Renderer target: samples ${renderMetrics.rendererCurrentSamples} | output ${renderMetrics.rendererOutputBufferType}`);
               ImGui.Text(`World: calls ${renderMetrics.worldDrawCalls} | tris ${renderMetrics.worldTriangles}`);
               ImGui.Text(`Water: calls ${renderMetrics.waterDrawCalls} | tris ${renderMetrics.waterTriangles}`);
               ImGui.Text(`Sky/HUD: calls ${renderMetrics.skyDrawCalls} | tris ${renderMetrics.skyTriangles}`);
@@ -2858,7 +2851,9 @@ function App() {
               );
               ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
               ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
-              ImGui.Text(`Transparent Queue: blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
+              ImGui.Text(`Pipeline materials: active ${renderMetrics.pipelineActiveMaterials} | cached ${renderMetrics.pipelineCachedMaterials}`);
+              ImGui.Text(`Fade: active ${renderMetrics.activeFadeCount} | proxies ${renderMetrics.fadeProxyCount}`);
+              ImGui.Text(`Render Queue: opaque ${renderMetrics.opaqueQueue} | cutout ${renderMetrics.cutoutQueue} | blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
               ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
               ImGui.Text(`Lighting: IDE 2DFX ${statsRef.current.ideEffects} | objects ${statsRef.current.lightObjects} | emitters ${statsRef.current.lightEmitters}`);
             }
@@ -3815,8 +3810,8 @@ function App() {
       if (appUnmountingRef.current && ready && ImGui && ImGui_Impl) {
         try {
           resetImguiTextureCache();
-          ImGui_Impl.Shutdown();
-          ImGui.DestroyContext();
+          if (typeof ImGui_Impl.Shutdown === 'function') ImGui_Impl.Shutdown();
+          if (typeof ImGui.DestroyContext === 'function') ImGui.DestroyContext();
         } catch {
           // Ignore context teardown errors during app shutdown.
         }

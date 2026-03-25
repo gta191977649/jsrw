@@ -6,6 +6,10 @@ export class CoronaRuntime {
     this.pipeline = new RWCoronaPipeline(options);
   }
 
+  setBackend(backend) {
+    this.backend = backend || null;
+  }
+
   setRoot(root) {
     this.pipeline.setRoot(root);
   }

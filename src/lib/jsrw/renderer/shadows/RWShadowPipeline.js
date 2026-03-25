@@ -6,6 +6,7 @@ import {
   DISTANCE_FADE_DEFAULTS,
 } from '../../gta/core/DistanceFade.js';
 import RenderEntityController from '../common/RenderEntityController.js';
+import { createRwShadowNodeMaterial } from '../../../../shaders/rw-shadow.node.js';
 
 const TMP_POSITION = new THREE.Vector3();
 const TMP_FRONT = new THREE.Vector3();
@@ -307,7 +308,11 @@ export class RWShadowPipeline {
     this.textureDictionary = textureDictionary || null;
     for (const entry of this.entries) {
       if (!entry.shadowMesh?.material) continue;
-      entry.shadowMesh.material.map = this.resolveTexture(entry.emitter.shadow?.textureKey);
+      const resolvedTexture = this.resolveTexture(entry.emitter.shadow?.textureKey);
+      entry.shadowMesh.material.map = resolvedTexture;
+      if (entry.shadowMesh.material.userData?.rwShadowUniforms?.uMap) {
+        entry.shadowMesh.material.userData.rwShadowUniforms.uMap.value = resolvedTexture;
+      }
       entry.shadowMesh.material.needsUpdate = true;
     }
   }
@@ -427,38 +432,13 @@ export class RWShadowPipeline {
   createEntry(emitter, index) {
     if (!emitter) return null;
     const shadowBlendMode = inferShadowBlendMode(emitter);
-    const shadowMaterial = new THREE.MeshBasicMaterial({
-      map: this.resolveTexture(emitter.shadow?.textureKey),
-      color: 0xffffff,
-      transparent: true,
-      depthWrite: false,
-      depthTest: true,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-      // Projected shadow polygons are generated from clipped quads whose
-      // winding is not guaranteed to match the receiver triangle winding.
-      // RenderWare's shadow pass does not rely on backface culling here, so
-      // keep both sides visible to avoid losing the whole projection.
-      side: THREE.DoubleSide,
-      fog: false,
-      toneMapped: false,
-    });
+    const shadowMaterial = createRwShadowNodeMaterial(this.resolveTexture(emitter.shadow?.textureKey));
+    // Projected shadow polygons are generated from clipped quads whose
+    // winding is not guaranteed to match the receiver triangle winding.
+    // RenderWare's shadow pass does not rely on backface culling here, so
+    // keep both sides visible to avoid losing the whole projection.
+    shadowMaterial.side = THREE.DoubleSide;
     applyShadowBlendMode(shadowMaterial, shadowBlendMode);
-    shadowMaterial.onBeforeCompile = (shader) => {
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <map_fragment>',
-        `#include <map_fragment>
-        float rwShadowMask = diffuseColor.a;
-        #ifdef USE_MAP
-          float rwShadowLuma = max(texelColor.r, max(texelColor.g, texelColor.b));
-          rwShadowMask *= max(texelColor.a, rwShadowLuma);
-        #endif
-        diffuseColor.rgb = diffuse * rwShadowMask;
-        diffuseColor.a = rwShadowMask;`,
-      );
-    };
-    shadowMaterial.needsUpdate = true;
 
     const shadowMesh = new THREE.Mesh(createShadowGeometry(), shadowMaterial);
     shadowMesh.visible = false;
@@ -829,6 +809,10 @@ export class RWShadowPipeline {
       );
       entry.shadowMesh.material.color.copy(TMP_COLOR);
       entry.shadowMesh.material.opacity = alphaScale;
+      entry.shadowMesh.material.userData?.rwShadowUniforms?.uColor?.value?.copy?.(TMP_COLOR);
+      if (entry.shadowMesh.material.userData?.rwShadowUniforms?.uOpacity) {
+        entry.shadowMesh.material.userData.rwShadowUniforms.uOpacity.value = alphaScale;
+      }
       if (
         entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
         || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon

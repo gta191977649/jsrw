@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { getWaterLevelIndex } from '../../utils/waterpro.js';
+import { createRwFarWaterNodeMaterial } from '../../../../shaders/water-far.node.js';
 
 const DEFAULT_WATER_COLOR = new THREE.Color(0xffffff);
 const RW_DEFAULT_WAVE_HEIGHT = 35.0;
@@ -276,51 +277,13 @@ function buildCoarseSectorEntries(sectorData, bounds, toThreePosition, groupSize
   };
 }
 
-function createFarMaterial(texture, options = {}) {
-  const material = new THREE.MeshBasicMaterial({
-    map: texture,
-    color: DEFAULT_WATER_COLOR.clone(),
-    transparent: true,
-    opacity: options.alpha ?? 0.8,
-    depthTest: true,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    fog: true,
-    toneMapped: false,
+function createFarMaterial(sourceTexture, options = {}) {
+  return createRwFarWaterNodeMaterial(sourceTexture, {
+    color: DEFAULT_WATER_COLOR,
+    alpha: options.alpha ?? 0.8,
+    waveHeight: options.waveHeight ?? 1.0,
+    wind: options.wind ?? RW_DEFAULT_WIND,
   });
-  material.userData.rwWaterUniforms = {
-    uTime: { value: 0 },
-    uWaveHeight: { value: options.waveHeight ?? 1.0 },
-    uWind: { value: options.wind ?? RW_DEFAULT_WIND },
-  };
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uTime = material.userData.rwWaterUniforms.uTime;
-    shader.uniforms.uWaveHeight = material.userData.rwWaterUniforms.uWaveHeight;
-    shader.uniforms.uWind = material.userData.rwWaterUniforms.uWind;
-    shader.vertexShader = shader.vertexShader
-      .replace(
-        '#include <common>',
-        `#include <common>
-uniform float uTime;
-uniform float uWaveHeight;
-uniform float uWind;`,
-      )
-      .replace(
-        '#include <begin_vertex>',
-        `vec3 transformed = vec3(position);
-float gridX = uv.x * 8.0;
-float gridY = uv.y * 8.0;
-float angle = mod(uTime * (6.28318530718 / 4.096), 6.28318530718);
-float waveA = sin(((gridX + gridY) * 0.78539816339) + angle);
-float waveB = sin(((gridY - gridX) * 3.14159265359) + (2.0 * angle));
-float windFactorA = (uWind * 0.7) + 0.3;
-float windFactorB = uWind * 0.2;
-transformed.y += ((windFactorA * waveA) + (windFactorB * waveB)) * uWaveHeight;`,
-      );
-    material.userData.rwWaterShader = shader;
-  };
-  material.customProgramCacheKey = () => 'rw-water-far-basic-v2';
-  return material;
 }
 
 export class RWWaterPipeline {
@@ -417,6 +380,7 @@ export class RWWaterPipeline {
     disposeTexture(this.farTexture);
     this.farTexture = nextFar;
     this.farMaterial.map = this.farTexture;
+    this.farMaterial.userData.rwWaterUniforms.uMap.value = this.farTexture;
     this.farMaterial.needsUpdate = true;
   }
 
@@ -442,6 +406,7 @@ export class RWWaterPipeline {
     }
     this.farMaterial.opacity = this.settings.farAlpha;
     this.farMaterial.userData.rwWaterUniforms.uWaveHeight.value = getRwWaveAmplitude(this.settings.waveHeight);
+    this.farMaterial.userData.rwWaterUniforms.uColor.value.copy(this.waterState.color);
   }
 
   hasRenderableWater() {
@@ -526,6 +491,7 @@ export class RWWaterPipeline {
     if (timecycleState?.color?.isColor) this.waterState.color.copy(timecycleState.color);
 
     this.farMaterial.color.copy(this.waterState.color);
+    this.farMaterial.userData.rwWaterUniforms.uColor.value.copy(this.waterState.color);
     this.farMaterial.opacity = this.waterState.farAlpha;
 
     const fogColor = timecycleState?.fogColor?.isColor ? timecycleState.fogColor : null;

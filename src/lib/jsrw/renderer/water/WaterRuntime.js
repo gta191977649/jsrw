@@ -6,6 +6,10 @@ export class WaterRuntime {
     this.pipeline = new RWWaterPipeline(options);
   }
 
+  setBackend(backend) {
+    this.backend = backend || null;
+  }
+
   applySettings(settings) {
     this.pipeline.applySettings(settings);
   }

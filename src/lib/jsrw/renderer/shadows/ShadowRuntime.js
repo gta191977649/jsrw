@@ -6,6 +6,10 @@ export class ShadowRuntime {
     this.pipeline = new RWShadowPipeline(options);
   }
 
+  setBackend(backend) {
+    this.backend = backend || null;
+  }
+
   setRoot(root) {
     this.pipeline.setRoot(root);
   }

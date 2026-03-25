@@ -326,6 +326,7 @@ export class RWPipelineController {
         rwPipelineOwnedMaterial: true,
         rwPipelineSharedMaterial: true,
         rwPipelineCacheKey: cacheKey,
+        rwPipelineBackend: backendId,
       };
       this.materialCache.set(cacheKey, material);
       return material;
@@ -376,6 +377,13 @@ export class RWPipelineController {
 
   getActiveEffect(category) {
     return this.activeEffects.get(category) || null;
+  }
+
+  getStats() {
+    return {
+      activeMaterialCount: this.activeMaterials.size,
+      cachedMaterialCount: this.materialCache.size,
+    };
   }
 
   getStatus(category = RW_PIPELINE_CATEGORY.BUILDING) {
