@@ -8,6 +8,12 @@ import {
   createResourceCacheState,
   pushLoadedFileEntry,
 } from './app/runtime/AppSessionController.js';
+import { RenderHostController } from './app/runtime/RenderHostController.js';
+import {
+  createRenderHostState,
+  resetRenderHostRefs,
+  syncRenderHostRefs,
+} from './app/runtime/renderHostState.js';
 import { formatConsoleArg } from './lib/console';
 import {
   DISTANCE_FADE_DEFAULTS,
@@ -35,7 +41,6 @@ import {
   RW_STARS_DEBUG_DEFAULTS,
   RW_SUN_DEBUG_DEFAULTS,
   SkyRendererBundle,
-  ThreeRendererHost,
 } from './lib/jsrw';
 import { prepareRwSpriteTexture } from './lib/jsrw/renderer/world/sky/RWSpriteUtils.js';
 import {
@@ -724,6 +729,7 @@ function App() {
   });
 
   const fileIndexRef = useRef(null);
+  const worldSnapshotRef = useRef(null);
   const worldGameVersionRef = useRef('VCS');
   const buildTokenRef = useRef(0);
   const buildActiveRef = useRef(false);
@@ -846,6 +852,8 @@ function App() {
     lastCameraFar: Number.NaN,
     residentScanChunks: [],
     scanCode: 0,
+    visibilityChunkCursor: 0,
+    bigBuildingCursor: 0,
   });
 
   const uiStateRef = useRef({
@@ -1123,6 +1131,7 @@ function App() {
       totalObjectsRef,
       uiStateRef,
       worldGameVersionRef,
+      worldSnapshotRef,
       worldRootRef,
     },
     setters: {
@@ -1160,12 +1169,10 @@ function App() {
     const imguiCanvas = imguiCanvasRef.current;
     if (!container || !canvas || !imguiCanvas) return undefined;
 
+    const renderHostState = createRenderHostState();
     let renderer = null;
-    let cancelled = false;
-    let rendererReady = false;
-    const rendererHost = new ThreeRendererHost({
+    const rendererHost = new RenderHostController({
       backend: activeBackend,
-      canvas,
       onLog: (level, message) => pushConsoleLine(level, message),
       onBackendFallback: (nextBackend) => {
         uiStateRef.current.backendSelection = nextBackend;
@@ -1176,25 +1183,53 @@ function App() {
         }
       },
     });
-    rendererHostRef.current = rendererHost;
-    rendererHost.initialize(activeBackend).then((nextRenderer) => {
-      if (cancelled) {
+    renderHostState.surface.rendererHost = rendererHost;
+    syncRenderHostRefs(renderHostState, {
+      rendererHostRef,
+      rendererRef,
+      sceneRef,
+      cameraRef,
+      skySceneRef,
+      skyCameraRef,
+      skyMaterialRef,
+      skyCloudSceneRef,
+      lowCloudSpritesRef,
+      fluffyCloudSpritesRef,
+      fluffyCloudTextureRef,
+      fluffyHighlightSpritesRef,
+      fluffyHighlightTextureRef,
+      skyFeatureRef,
+      gridRef,
+      axesRef,
+      sunLightRef,
+      hemiLightRef,
+    });
+    rendererHost.initialize({
+      canvas,
+      backend: activeBackend,
+      preferWorker: false,
+    }).then((nextRenderer) => {
+      if (renderHostState.surface.cancelled) {
         rendererHost.dispose();
         return;
       }
       renderer = nextRenderer;
-      rendererRef.current = nextRenderer;
+      renderHostState.surface.renderer = nextRenderer;
       if (activeBackend === 'WebGPU' && rendererHost.backend === 'WebGPU') {
         pushConsoleLine('info', 'WebGPU backend initialized');
       }
-      rendererReady = true;
+      renderHostState.surface.rendererReady = true;
+      syncRenderHostRefs(renderHostState, {
+        rendererHostRef,
+        rendererRef,
+      });
       resize();
       window.requestAnimationFrame(() => {
-        if (!cancelled) resize();
+        if (!renderHostState.surface.cancelled) resize();
       });
       backendSwitchingRef.current = false;
     }).catch((error) => {
-      if (cancelled) return;
+      if (renderHostState.surface.cancelled) return;
       pushConsoleLine('error', `Renderer init failed: ${formatConsoleArg(error)}`);
       setStatus(`Renderer init failed: ${formatConsoleArg(error)}`);
     });
@@ -1382,26 +1417,45 @@ function App() {
     gameIconSprite.renderOrder = 9999;
     hudScene.add(gameIconSprite);
 
-    rendererRef.current = renderer;
-    sceneRef.current = scene;
-    cameraRef.current = camera;
-    skySceneRef.current = skyScene;
-    skyCameraRef.current = skyCamera;
-    skyMaterialRef.current = skyMaterial;
-    skyCloudSceneRef.current = skyCloudScene;
-    lowCloudSpritesRef.current = lowCloudSprites;
-    fluffyCloudSpritesRef.current = fluffyCloudSprites;
-    fluffyCloudTextureRef.current = fluffyCloudTexture;
-    fluffyHighlightSpritesRef.current = fluffyHighlightSprites;
-    fluffyHighlightTextureRef.current = fluffyHighlightTexture;
-    skyFeatureRef.current = skyFeature;
+    renderHostState.sceneCamera.scene = scene;
+    renderHostState.sceneCamera.camera = camera;
+    renderHostState.sky.skyScene = skyScene;
+    renderHostState.sky.skyCamera = skyCamera;
+    renderHostState.sky.skyMaterial = skyMaterial;
+    renderHostState.sky.skyCloudScene = skyCloudScene;
+    renderHostState.sky.lowCloudSprites = lowCloudSprites;
+    renderHostState.sky.fluffyCloudSprites = fluffyCloudSprites;
+    renderHostState.sky.fluffyCloudTexture = fluffyCloudTexture;
+    renderHostState.sky.fluffyHighlightSprites = fluffyHighlightSprites;
+    renderHostState.sky.fluffyHighlightTexture = fluffyHighlightTexture;
+    renderHostState.sky.skyFeature = skyFeature;
     const jsrwSession = jsrwSessionRef.current;
     jsrwSession.setRoot(worldRootRef.current);
     rwRenderQueueRef.current = jsrwSession.getRenderQueue() || jsrwSession.createRenderQueue(worldRootRef.current);
-    gridRef.current = grid;
-    axesRef.current = axes;
-    sunLightRef.current = sun;
-    hemiLightRef.current = hemi;
+    renderHostState.sceneCamera.grid = grid;
+    renderHostState.sceneCamera.axes = axes;
+    renderHostState.sceneCamera.sun = sun;
+    renderHostState.sceneCamera.hemi = hemi;
+    syncRenderHostRefs(renderHostState, {
+      rendererHostRef,
+      rendererRef,
+      sceneRef,
+      cameraRef,
+      skySceneRef,
+      skyCameraRef,
+      skyMaterialRef,
+      skyCloudSceneRef,
+      lowCloudSpritesRef,
+      fluffyCloudSpritesRef,
+      fluffyCloudTextureRef,
+      fluffyHighlightSpritesRef,
+      fluffyHighlightTextureRef,
+      skyFeatureRef,
+      gridRef,
+      axesRef,
+      sunLightRef,
+      hemiLightRef,
+    });
 
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
@@ -1413,8 +1467,8 @@ function App() {
       camera.updateProjectionMatrix();
       hudCamera.updateProjectionMatrix();
       lodUpdateStateRef.current.needsRefresh = true;
-      if (!rendererReady) return;
-      rendererHost.resize({ width, height, dpr });
+      if (!renderHostState.surface.rendererReady) return;
+      void rendererHost.resize({ width, height, dpr });
       skyFeature.setViewport(width * dpr, height * dpr);
     };
 
@@ -1739,15 +1793,15 @@ function App() {
     container.addEventListener('mousedown', onMouseDown);
     container.addEventListener('contextmenu', onContextMenu);
 
-    let rafId = 0;
-    let mounted = true;
-    let backendRuntimeFailed = false;
+    renderHostState.surface.mounted = true;
+    renderHostState.surface.backendRuntimeFailed = false;
     const drawingBufferSize = new THREE.Vector2();
+    renderHostState.frameTelemetry.drawingBufferSize = drawingBufferSize;
 
     const animate = (time) => {
-      if (!mounted) return;
-      if (!rendererReady) {
-        rafId = window.requestAnimationFrame(animate);
+      if (!renderHostState.surface.mounted) return;
+      if (!renderHostState.surface.rendererReady) {
+        renderHostState.surface.rafId = window.requestAnimationFrame(animate);
         return;
       }
 
@@ -2137,8 +2191,8 @@ function App() {
         });
       } catch (error) {
         console.error('Renderer runtime error:', error);
-        if (!backendRuntimeFailed) {
-          backendRuntimeFailed = true;
+        if (!renderHostState.surface.backendRuntimeFailed) {
+          renderHostState.surface.backendRuntimeFailed = true;
           pushConsoleLine('error', `Renderer runtime error: ${formatConsoleArg(error)}`);
           if (activeBackend !== 'WebGL') {
             setStatus('Renderer backend failed at runtime. Switched to WebGL.');
@@ -2150,7 +2204,7 @@ function App() {
             backendSwitchingRef.current = false;
           }
         }
-        rafId = window.requestAnimationFrame(animate);
+        renderHostState.surface.rafId = window.requestAnimationFrame(animate);
         return;
       }
 
@@ -3755,7 +3809,7 @@ function App() {
         }
       }
 
-      rafId = window.requestAnimationFrame(animate);
+      renderHostState.surface.rafId = window.requestAnimationFrame(animate);
     };
 
     const worldRoot = worldRootRef.current;
@@ -3811,7 +3865,7 @@ function App() {
           throw new Error('Could not resolve ImGui implementation backend');
         }
 
-        if (!mounted) return;
+        if (!renderHostState.surface.mounted) return;
 
         const checkVersion = ImGui.CHECKVERSION ?? ImGui.IMGUI_CHECKVERSION;
         if (typeof checkVersion === 'function') {
@@ -3843,12 +3897,12 @@ function App() {
     };
 
     initImGui();
-    rafId = window.requestAnimationFrame(animate);
+    renderHostState.surface.rafId = window.requestAnimationFrame(animate);
 
     return () => {
-      mounted = false;
-      cancelled = true;
-      window.cancelAnimationFrame(rafId);
+      renderHostState.surface.mounted = false;
+      renderHostState.surface.cancelled = true;
+      window.cancelAnimationFrame(renderHostState.surface.rafId);
       window.removeEventListener('resize', resize);
       resizeObserver?.disconnect();
       window.removeEventListener('keydown', onKeyDown);
@@ -3857,6 +3911,26 @@ function App() {
       window.removeEventListener('mousemove', onMouseMove);
       container.removeEventListener('mousedown', onMouseDown);
       container.removeEventListener('contextmenu', onContextMenu);
+      resetRenderHostRefs({
+        rendererHostRef,
+        rendererRef,
+        sceneRef,
+        cameraRef,
+        skySceneRef,
+        skyCameraRef,
+        skyMaterialRef,
+        skyCloudSceneRef,
+        lowCloudSpritesRef,
+        fluffyCloudSpritesRef,
+        fluffyCloudTextureRef,
+        fluffyHighlightSpritesRef,
+        fluffyHighlightTextureRef,
+        skyFeatureRef,
+        gridRef,
+        axesRef,
+        sunLightRef,
+        hemiLightRef,
+      });
 
       const { ImGui, ImGui_Impl, ready } = imguiRef.current;
       if (appUnmountingRef.current && ready && ImGui && ImGui_Impl) {
@@ -3878,19 +3952,19 @@ function App() {
       rendererHostRef.current = null;
       Object.values(iconTextures).forEach((texture) => texture.dispose());
       iconMaterial.dispose();
-      for (const sprite of lowCloudSpritesRef.current) {
+      for (const sprite of lowCloudSprites) {
         sprite.material.map?.dispose?.();
         sprite.material.dispose?.();
       }
-      for (const sprite of fluffyCloudSpritesRef.current) {
+      for (const sprite of fluffyCloudSprites) {
         sprite.material.dispose?.();
       }
-      for (const sprite of fluffyHighlightSpritesRef.current) {
+      for (const sprite of fluffyHighlightSprites) {
         sprite.material.dispose?.();
       }
-      fluffyCloudTextureRef.current?.dispose?.();
-      fluffyHighlightTextureRef.current?.dispose?.();
-      skyFeatureRef.current?.dispose();
+      fluffyCloudTexture?.dispose?.();
+      fluffyHighlightTexture?.dispose?.();
+      skyFeature?.dispose();
       skyFeatureRef.current = null;
       skyQuad.geometry.dispose();
       skyMaterial.dispose();

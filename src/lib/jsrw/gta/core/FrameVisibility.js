@@ -18,6 +18,7 @@ function ensurePrivateState(result) {
 export function createFrameVisibilityResult() {
   const result = {
     computed: false,
+    version: 0,
     visibleChunks: [],
     visibleItems: [],
     visibleQueueMeshes: [],

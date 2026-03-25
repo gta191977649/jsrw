@@ -5,23 +5,35 @@ function basename(path) {
   return chunks[chunks.length - 1];
 }
 
-export function buildFileIndex(fileList) {
-  const byPath = new Map();
-  const byBasename = new Map();
+export function normalizeFileEntries(fileList) {
   const entries = [];
-
   for (const inputEntry of fileList) {
     const file = inputEntry?.file || inputEntry;
     if (!file) continue;
-    const rawPath = String(inputEntry?.path || file.webkitRelativePath || file.name || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
-    const rel = normalizePath(rawPath);
-    const entry = {
+    const rawPath = String(
+      inputEntry?.path
+      || file.webkitRelativePath
+      || file.name
+      || '',
+    ).trim().replaceAll('\\', '/').replace(/^\.\//, '');
+    const normalizedPath = inputEntry?.normalizedPath || normalizePath(rawPath);
+    entries.push({
       file,
       path: rawPath,
-      normalizedPath: rel,
-    };
+      normalizedPath,
+    });
+  }
+  return entries;
+}
+
+export function buildFileIndex(fileList) {
+  const byPath = new Map();
+  const byBasename = new Map();
+  const entries = normalizeFileEntries(fileList);
+
+  for (const entry of entries) {
+    const rel = entry.normalizedPath;
     byPath.set(rel, entry);
-    entries.push(entry);
 
     const base = basename(rel);
     if (!byBasename.has(base)) byBasename.set(base, []);

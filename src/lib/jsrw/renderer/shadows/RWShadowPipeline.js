@@ -375,6 +375,20 @@ export class RWShadowPipeline {
     return this.activeEntries.size > 0;
   }
 
+  hasTransientEntries() {
+    for (const entry of this.activeEntries) {
+      const fadeAlpha = Number(entry?.fadeAlpha) || 0;
+      const streamAlpha = Number(entry?.streamAlpha) || 0;
+      if (
+        (fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon && fadeAlpha < (1 - DISTANCE_FADE_DEFAULTS.epsilon))
+        || (streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon && streamAlpha < (1 - DISTANCE_FADE_DEFAULTS.epsilon))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   getSceneMeshes() {
     if (!this.root) return [];
     if (!this.sceneMeshesDirty && Array.isArray(this.cachedSceneMeshes)) return this.cachedSceneMeshes;

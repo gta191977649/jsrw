@@ -14,6 +14,10 @@ const RENDER_CLASS_ORDER = {
   entity: 1,
   underwater: 2,
 };
+const QUEUE_PREPARE_POSITION_EPSILON_SQ = 1;
+const QUEUE_PREPARE_ROTATION_DOT = 0.9992;
+const PROXY_WARMUP_BUDGET_MS = 2.0;
+const PROXY_WARMUP_BATCH = 48;
 
 function getBucketPriority(bucket) {
   if (bucket === 'overlay') return 4;
@@ -94,11 +98,15 @@ export class RWRenderQueue {
   constructor(root) {
     this.root = root;
     this.entries = [];
+    this.persistentOverlayEntries = [];
     this.entryByMesh = new WeakMap();
     this.tempWorldPos = new THREE.Vector3();
     this.tempProjScreenMatrix = new THREE.Matrix4();
     this.tempFrustum = new THREE.Frustum();
     this.tempSphere = new THREE.Sphere();
+    this.lastPrepareCameraPos = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
+    this.lastPrepareCameraQuat = new THREE.Quaternion(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+    this.lastPreparedVisibilityVersion = -1;
     this.frameBuckets = {
       opaque: [],
       cutout: [],
@@ -122,6 +130,8 @@ export class RWRenderQueue {
     this.activeTransparentEntries = [];
     this.cameraMaskStack = [];
     this.dirty = true;
+    this.proxyWarmupQueue = [];
+    this.proxyWarmupCursor = 0;
     this.debugStats = {
       opaqueCount: 0,
       cutoutCount: 0,
@@ -142,16 +152,20 @@ export class RWRenderQueue {
 
   markDirty() {
     this.dirty = true;
+    this.lastPreparedVisibilityVersion = -1;
   }
 
   rebuild(root = this.root) {
     this.root = root;
     this.entries = [];
+    this.persistentOverlayEntries = [];
     this.entryByMesh = new WeakMap();
     this.activeOpaqueEntries = [];
     this.activeTransparentEntries = [];
     this.opaqueRoot.clear();
     this.transparentRoot.clear();
+    this.proxyWarmupQueue = [];
+    this.proxyWarmupCursor = 0;
     if (!root) {
       this.dirty = false;
       return;
@@ -173,10 +187,30 @@ export class RWRenderQueue {
         proxyBucket: bucket,
       };
       this.entries.push(entry);
+      if (isPersistentOverlayEntry(entry)) this.persistentOverlayEntries.push(entry);
       this.entryByMesh.set(node, entry);
     });
 
+    this.proxyWarmupQueue = this.entries.slice();
+
     this.dirty = false;
+  }
+
+  warmupProxies() {
+    if (!Array.isArray(this.proxyWarmupQueue) || this.proxyWarmupQueue.length === 0) return;
+    const startTime = globalThis.performance?.now?.() ?? Date.now();
+    let processed = 0;
+    while (this.proxyWarmupCursor < this.proxyWarmupQueue.length && processed < PROXY_WARMUP_BATCH) {
+      this.ensureProxy(this.proxyWarmupQueue[this.proxyWarmupCursor]);
+      this.proxyWarmupCursor += 1;
+      processed += 1;
+      const elapsed = (globalThis.performance?.now?.() ?? Date.now()) - startTime;
+      if (elapsed >= PROXY_WARMUP_BUDGET_MS) break;
+    }
+    if (this.proxyWarmupCursor >= this.proxyWarmupQueue.length) {
+      this.proxyWarmupQueue = [];
+      this.proxyWarmupCursor = 0;
+    }
   }
 
   getEntriesForFrame(frameVisibility) {
@@ -190,7 +224,7 @@ export class RWRenderQueue {
       seen.add(entry);
       visibleEntries.push(entry);
     }
-    for (const entry of this.entries) {
+    for (const entry of this.persistentOverlayEntries) {
       if (!isPersistentOverlayEntry(entry) || seen.has(entry)) continue;
       seen.add(entry);
       visibleEntries.push(entry);
@@ -200,7 +234,25 @@ export class RWRenderQueue {
 
   prepareFrame(camera, frameVisibility = null) {
     if (this.dirty) this.rebuild();
-    if (camera?.projectionMatrix && camera?.matrixWorldInverse) {
+    this.warmupProxies();
+    const useFrameVisibility = frameVisibility?.computed === true;
+    const knownCameraPos = Number.isFinite(this.lastPrepareCameraPos.x)
+      && Number.isFinite(this.lastPrepareCameraPos.y)
+      && Number.isFinite(this.lastPrepareCameraPos.z);
+    const knownCameraQuat = Number.isFinite(this.lastPrepareCameraQuat.x)
+      && Number.isFinite(this.lastPrepareCameraQuat.y)
+      && Number.isFinite(this.lastPrepareCameraQuat.z)
+      && Number.isFinite(this.lastPrepareCameraQuat.w);
+    const visibilityVersion = useFrameVisibility ? (Number(frameVisibility?.version) || 0) : -1;
+    const canReusePreparedFrame = useFrameVisibility
+      && !this.dirty
+      && this.lastPreparedVisibilityVersion === visibilityVersion
+      && knownCameraPos
+      && knownCameraQuat
+      && camera?.position?.distanceToSquared?.(this.lastPrepareCameraPos) <= QUEUE_PREPARE_POSITION_EPSILON_SQ
+      && Math.abs(camera?.quaternion?.dot?.(this.lastPrepareCameraQuat) ?? 0) >= QUEUE_PREPARE_ROTATION_DOT;
+    if (canReusePreparedFrame) return;
+    if (!useFrameVisibility && camera?.projectionMatrix && camera?.matrixWorldInverse) {
       this.tempProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       this.tempFrustum.setFromProjectionMatrix(this.tempProjScreenMatrix);
     }
@@ -213,6 +265,8 @@ export class RWRenderQueue {
     this.frameBuckets.transparent = [];
     this.frameBuckets.additive = [];
     this.frameBuckets.overlay = [];
+    const previousOpaqueEntries = this.activeOpaqueEntries;
+    const previousTransparentEntries = this.activeTransparentEntries;
     this.activeOpaqueEntries = [];
     this.activeTransparentEntries = [];
     this.debugStats.opaqueCount = 0;
@@ -224,12 +278,14 @@ export class RWRenderQueue {
     this.debugStats.alphaBuildingCount = 0;
     this.debugStats.alphaEntityCount = 0;
     this.debugStats.alphaUnderwaterCount = 0;
-    for (const entry of this.entries) {
+    for (const entry of previousOpaqueEntries) {
+      if (entry?.proxy) entry.proxy.visible = false;
+    }
+    for (const entry of previousTransparentEntries) {
       if (entry.proxy) entry.proxy.visible = false;
     }
 
     const sourceEntries = this.getEntriesForFrame(frameVisibility);
-    const useFrameVisibility = frameVisibility?.computed === true;
     for (const entry of sourceEntries) {
       const { mesh } = entry;
       if (!isVisibleInWorld(mesh, this.root)) continue;
@@ -299,6 +355,9 @@ export class RWRenderQueue {
       this.syncProxy(entry, proxy);
       entry.proxyBucket = entry.bucket;
     }
+    this.lastPreparedVisibilityVersion = visibilityVersion;
+    if (camera?.position) this.lastPrepareCameraPos.copy(camera.position);
+    if (camera?.quaternion) this.lastPrepareCameraQuat.copy(camera.quaternion);
   }
 
   ensureProxy(entry) {

@@ -20,6 +20,7 @@ import { WaterBuilder } from '../world/builders/WaterBuilder.js';
 import { WorldBuilder } from '../world/builders/WorldBuilder.js';
 import { createWorldContext } from '../world/WorldContext.js';
 import { normalizePath, stripExtension } from '../modelinfo/ResourceLocator.js';
+import { buildWorldLoaderSnapshot } from './WorldSnapshot.js';
 
 const DEFAULT_DAT_PATH = 'data/gta.dat';
 const DEFAULT_OBJECT_DAT_PATH = 'data/object.dat';
@@ -168,6 +169,11 @@ export class WorldLoader {
         defaultResources,
       },
     };
+  }
+
+  async buildSnapshot(options = {}) {
+    const loadResult = await this.load(options);
+    return buildWorldLoaderSnapshot(loadResult);
   }
 
   resolveByPath(kind, pathHint, options = {}) {

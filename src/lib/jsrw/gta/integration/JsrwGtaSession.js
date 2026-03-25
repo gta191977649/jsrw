@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { formatConsoleArg } from '../../../console.js';
 import { createDefaultTimecycleState } from '../../core/TimecycleState.js';
-import { resetFrameVisibilityResult } from '../core/FrameVisibility.js';
+import { createFrameVisibilityResult, resetFrameVisibilityResult } from '../core/FrameVisibility.js';
 import { resetChunkOcclusionState } from '../core/Occlusion.js';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from '../../utils/gtaTransforms.js';
 import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE } from '../loaders/SectionLoader.js';
@@ -26,6 +26,7 @@ import {
 import { cloneRwMaterialDescriptor as cloneRWMaterialDescriptor } from '../../core/material/RwMaterialDescriptor.js';
 import { createJsrwRenderer } from '../../integration/createJsrwRenderer.js';
 import { buildTrafficLightCoronaEmitters } from '../../renderer/corona/TrafficLights.js';
+import { StreamingWorkerClient } from '../../workers/index.js';
 import {
   applyGlobalBackfaceCulling,
   applyWireframe,
@@ -176,6 +177,50 @@ function createRenderMetrics() {
   };
 }
 
+function cloneRenderMetrics(metrics = null) {
+  return {
+    ...createRenderMetrics(),
+    ...(metrics || {}),
+  };
+}
+
+function scheduleNextTask(callback) {
+  if (typeof globalThis.setTimeout === 'function') {
+    globalThis.setTimeout(callback, 0);
+    return;
+  }
+  Promise.resolve().then(callback);
+}
+
+function cloneStreamingCamera(camera) {
+  if (!camera?.isPerspectiveCamera) return camera || null;
+  const snapshot = new THREE.PerspectiveCamera(camera.fov, camera.aspect, camera.near, camera.far);
+  snapshot.position.copy(camera.position);
+  snapshot.quaternion.copy(camera.quaternion);
+  snapshot.scale.copy(camera.scale);
+  snapshot.updateMatrixWorld(true);
+  snapshot.updateProjectionMatrix();
+  return snapshot;
+}
+
+function buildStreamingPlannerSnapshot(chunkLookup) {
+  if (!(chunkLookup instanceof Map) || chunkLookup.size === 0) return [];
+  const chunks = [];
+  for (const chunk of chunkLookup.values()) {
+    if (!chunk?.key || !chunk.center || !chunk.boundingBox) continue;
+    const boundsMin = chunk.boundingBox.min;
+    const boundsMax = chunk.boundingBox.max;
+    chunks.push({
+      key: chunk.key,
+      center: [Number(chunk.center.x) || 0, Number(chunk.center.y) || 0, Number(chunk.center.z) || 0],
+      radius: Math.max(WORLD_CHUNK_SIZE, Number(chunk.boundingSphere?.radius) || 0),
+      boundsMin: [Number(boundsMin?.x) || 0, Number(boundsMin?.y) || 0, Number(boundsMin?.z) || 0],
+      boundsMax: [Number(boundsMax?.x) || 0, Number(boundsMax?.y) || 0, Number(boundsMax?.z) || 0],
+    });
+  }
+  return chunks;
+}
+
 function hasFiniteVector3(vector) {
   return Number.isFinite(vector?.x) && Number.isFinite(vector?.y) && Number.isFinite(vector?.z);
 }
@@ -255,6 +300,14 @@ export class JsrwGtaSession {
     this.rendererSession = options.rendererSession || createJsrwRenderer(options);
     this.streamingRuntime = new WorldStreamingRuntime({ rendererSession: this.rendererSession });
     this.frameComposer = new FrameComposer({ rendererSession: this.rendererSession });
+    this.streamingFrontVisibility = createFrameVisibilityResult();
+    this.streamingBackVisibility = createFrameVisibilityResult();
+    this.streamingFrontMetrics = createRenderMetrics();
+    this.streamingTaskActive = false;
+    this.streamingQueuedContext = null;
+    this.streamingGeneration = 0;
+    this.streamingPlannerClient = new StreamingWorkerClient();
+    this.streamingPlannerReady = false;
   }
 
   getRendererSession() {
@@ -281,17 +334,94 @@ export class JsrwGtaSession {
     return timecycleInfo.current;
   }
 
-  updateStreaming(context = {}) {
-    const startTime = globalThis.performance?.now?.() ?? Date.now();
-    const result = this.streamingRuntime.update(context);
-    const endTime = globalThis.performance?.now?.() ?? Date.now();
-    if (context?.renderMetricsRef?.current) {
-      context.renderMetricsRef.current = {
-        ...context.renderMetricsRef.current,
-        streamingCpuMs: Math.max(0, endTime - startTime),
-      };
+  syncStreamingFrontBuffer(context = {}) {
+    if (context?.frameVisibilityRef) context.frameVisibilityRef.current = this.streamingFrontVisibility;
+    if (context?.renderMetricsRef) context.renderMetricsRef.current = this.streamingFrontMetrics;
+  }
+
+  queueStreamingUpdate(context = {}) {
+    this.streamingQueuedContext = context;
+    if (this.streamingTaskActive) return;
+    this.streamingTaskActive = true;
+    scheduleNextTask(() => {
+      this.runQueuedStreamingUpdate();
+    });
+  }
+
+  async requestStreamingPlan(context = {}) {
+    if (!this.streamingPlannerClient || !this.streamingPlannerReady) return null;
+    const cameraSnapshot = cloneStreamingCamera(context.camera);
+    if (!cameraSnapshot?.projectionMatrix || !cameraSnapshot?.matrixWorldInverse) return null;
+    const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(
+      cameraSnapshot.projectionMatrix,
+      cameraSnapshot.matrixWorldInverse,
+    );
+    try {
+      return await this.streamingPlannerClient.plan({
+        camera: {
+          position: [
+            Number(cameraSnapshot.position.x) || 0,
+            Number(cameraSnapshot.position.y) || 0,
+            Number(cameraSnapshot.position.z) || 0,
+          ],
+        },
+        renderDistance: Number(context?.uiStateRef?.current?.renderingDistance) || 0,
+        priorityDistance: Number(context?.uiStateRef?.current?.drawDistance) || 0,
+        chunkActiveMargin: CHUNK_ACTIVE_MARGIN,
+        projScreenMatrix: Array.from(projScreenMatrix.elements),
+      });
+    } catch {
+      return null;
     }
-    return result;
+  }
+
+  async runQueuedStreamingUpdate() {
+    const context = this.streamingQueuedContext;
+    this.streamingQueuedContext = null;
+    if (!context) {
+      this.streamingTaskActive = false;
+      return;
+    }
+
+    const generation = this.streamingGeneration;
+    const backVisibility = this.streamingBackVisibility;
+    const backMetrics = cloneRenderMetrics(this.streamingFrontMetrics);
+    const cameraSnapshot = cloneStreamingCamera(context.camera);
+    const workerPlan = await this.requestStreamingPlan(context);
+    if (generation !== this.streamingGeneration) {
+      this.streamingTaskActive = false;
+      return;
+    }
+    resetFrameVisibilityResult(backVisibility);
+    this.streamingRuntime.update({
+      ...context,
+      camera: cameraSnapshot,
+      workerPlan,
+      frameVisibilityRef: { current: backVisibility },
+      renderMetricsRef: { current: backMetrics },
+    });
+
+    if (generation === this.streamingGeneration && backVisibility.computed === true) {
+      this.streamingBackVisibility = this.streamingFrontVisibility;
+      this.streamingFrontVisibility = backVisibility;
+      this.streamingFrontMetrics = backMetrics;
+      if (context?.frameVisibilityRef) context.frameVisibilityRef.current = this.streamingFrontVisibility;
+      if (context?.renderMetricsRef) context.renderMetricsRef.current = this.streamingFrontMetrics;
+    }
+
+    if (this.streamingQueuedContext) {
+      scheduleNextTask(() => {
+        this.runQueuedStreamingUpdate();
+      });
+      return;
+    }
+    this.streamingTaskActive = false;
+  }
+
+  updateStreaming(context = {}) {
+    this.syncStreamingFrontBuffer(context);
+    this.queueStreamingUpdate(context);
+    return this.streamingFrontVisibility;
   }
 
   renderFrame(context = {}) {
@@ -334,6 +464,14 @@ export class JsrwGtaSession {
       pushConsoleLine,
     } = context;
 
+    this.streamingGeneration += 1;
+    this.streamingQueuedContext = null;
+    this.streamingFrontVisibility = createFrameVisibilityResult();
+    this.streamingBackVisibility = createFrameVisibilityResult();
+    this.streamingFrontMetrics = createRenderMetrics();
+    this.streamingPlannerReady = false;
+    this.streamingPlannerClient?.reset?.();
+
     if (selectedInstanceHighlightRef?.current?.parent) {
       selectedInstanceHighlightRef.current.parent.remove(selectedInstanceHighlightRef.current);
     }
@@ -363,7 +501,7 @@ export class JsrwGtaSession {
     if (renderChunksRef) renderChunksRef.current = [];
     if (renderChunkLookupRef) renderChunkLookupRef.current = new Map();
     if (activeRenderChunksRef) activeRenderChunksRef.current = new Set();
-    if (frameVisibilityRef) resetFrameVisibilityResult(frameVisibilityRef.current);
+    if (frameVisibilityRef) frameVisibilityRef.current = this.streamingFrontVisibility;
     if (chunkOcclusionStateRef) resetChunkOcclusionState(chunkOcclusionStateRef.current);
     if (worldGameVersionRef) {
       worldGameVersionRef.current = String(uiStateRef?.current?.gameVersion || 'VCS').toUpperCase();
@@ -382,7 +520,7 @@ export class JsrwGtaSession {
 
     if (lastPipelineSelectionSignatureRef) lastPipelineSelectionSignatureRef.current = '';
     if (activeFadeCountRef) activeFadeCountRef.current = 0;
-    if (renderMetricsRef) renderMetricsRef.current = createRenderMetrics();
+    if (renderMetricsRef) renderMetricsRef.current = this.streamingFrontMetrics;
     rwRenderQueueRef?.current?.markDirty?.();
     if (lodUpdateStateRef?.current) {
       lodUpdateStateRef.current.needsRefresh = true;
@@ -398,6 +536,8 @@ export class JsrwGtaSession {
       lodUpdateStateRef.current.lastCameraFar = Number.NaN;
       lodUpdateStateRef.current.residentScanChunks = [];
       lodUpdateStateRef.current.scanCode = 0;
+      lodUpdateStateRef.current.visibilityChunkCursor = 0;
+      lodUpdateStateRef.current.bigBuildingCursor = 0;
     }
     setShowGameIcon?.(false);
     if (renderResourcesReadyRef) renderResourcesReadyRef.current = false;
@@ -1350,6 +1490,12 @@ export class JsrwGtaSession {
       renderChunksRef.current = Array.from(renderChunkMap.values());
       renderChunkLookupRef.current = renderChunkMap;
       activeRenderChunksRef.current = new Set();
+      try {
+        await this.streamingPlannerClient?.initialize?.(buildStreamingPlannerSnapshot(renderChunkMap));
+        this.streamingPlannerReady = true;
+      } catch {
+        this.streamingPlannerReady = false;
+      }
       this.rendererSession.setBackend(activeBackend);
       this.rendererSession.setRoot(worldRoot);
       this.rendererSession.applyToRoot(worldRoot, {
@@ -1379,6 +1525,8 @@ export class JsrwGtaSession {
       lodUpdateStateRef.current.lastCameraChunkZ = Number.NaN;
       lodUpdateStateRef.current.residentScanChunks = [];
       lodUpdateStateRef.current.scanCode = 0;
+      lodUpdateStateRef.current.visibilityChunkCursor = 0;
+      lodUpdateStateRef.current.bigBuildingCursor = 0;
       setBuildProgress?.({ active: false, current: buildTotal, total: buildTotal });
       setStatus?.(`Done. Loaded ${loaded} placements.`);
       setShowGameIcon?.(true);
@@ -1402,6 +1550,11 @@ export class JsrwGtaSession {
   }
 
   dispose() {
+    this.streamingGeneration += 1;
+    this.streamingQueuedContext = null;
+    this.streamingPlannerReady = false;
+    this.streamingPlannerClient?.dispose?.();
+    this.streamingPlannerClient = null;
     this.rendererSession.dispose();
   }
 }

@@ -2,6 +2,7 @@ import { formatConsoleArg } from '../../lib/console.js';
 import { normalizePath } from '../../lib/jsrw/gta/loaders/SectionLoader.js';
 import { buildFileIndex } from '../../lib/jsrw/utils/fileIndex.js';
 import { expandZipArchive } from '../../lib/jsrw/utils/mapArchive.js';
+import { getSharedAssetWorkerClient } from '../../lib/jsrw/workers/index.js';
 
 export function createResourceCacheState() {
   return {
@@ -70,6 +71,7 @@ export function createAppSessionController(options = {}) {
     totalObjectsRef,
     uiStateRef,
     worldGameVersionRef,
+    worldSnapshotRef,
     worldRootRef,
   } = refs;
 
@@ -94,9 +96,21 @@ export function createAppSessionController(options = {}) {
     setResolvedParticleTextures,
   } = callbacks;
 
-  const applyImportedEntries = (entries, options = {}) => {
-    const index = buildFileIndex(entries);
+  const assetWorkerClient = getSharedAssetWorkerClient();
+
+  const normalizeImportedEntries = async (entries) => {
+    try {
+      return await assetWorkerClient.normalizeEntries(entries);
+    } catch {
+      return entries;
+    }
+  };
+
+  const applyImportedEntries = async (entries, options = {}) => {
+    const normalizedEntries = await normalizeImportedEntries(entries);
+    const index = buildFileIndex(normalizedEntries);
     fileIndexRef.current = index;
+    if (worldSnapshotRef) worldSnapshotRef.current = null;
     pushConsoleLine('info', options.consoleMessage || `Map indexed: ${index.count} files`);
     setStats((prev) => ({ ...prev, files: index.count }));
     setShowMapPickerFallback(false);
@@ -109,7 +123,12 @@ export function createAppSessionController(options = {}) {
     setStatus(`Loading ${sourceLabel}...`);
     pushConsoleLine('info', `Reading zip archive: ${sourceLabel}`);
     try {
-      const entries = await expandZipArchive(archiveFile);
+      let entries;
+      try {
+        entries = await assetWorkerClient.expandZipArchive(archiveFile);
+      } catch {
+        entries = await expandZipArchive(archiveFile);
+      }
       return applyImportedEntries(entries, {
         consoleMessage: `Zip indexed: ${sourceLabel} (${entries.length} files)`,
         statusMessage: `Indexed ${entries.length} files from ${sourceLabel}. Click Build World.`,
@@ -121,12 +140,12 @@ export function createAppSessionController(options = {}) {
     }
   };
 
-  const onPickFolder = (event) => {
+  const onPickFolder = async (event) => {
     const input = event.target;
     const files = Array.from(input.files || []);
     input.value = '';
     if (files.length === 0) return;
-    applyImportedEntries(files, {
+    await applyImportedEntries(files, {
       consoleMessage: `Folder indexed: ${files.length} files`,
       statusMessage: `Indexed ${files.length} files. Click Build World.`,
     });
@@ -232,6 +251,7 @@ export function createAppSessionController(options = {}) {
       firstChunkReadyAt: 0,
     };
     setResolvedParticleTextures?.(null);
+    if (worldSnapshotRef) worldSnapshotRef.current = null;
     resourceCacheRef.current = createResourceCacheState();
     gtaSessionRef.current.clearWorld({
       activeBackend,
@@ -271,6 +291,25 @@ export function createAppSessionController(options = {}) {
   };
 
   const rebuildWorld = async () => {
+    const fileIndex = fileIndexRef?.current || null;
+    if (fileIndex) {
+      try {
+        const snapshotEntries = Array.from(fileIndex.byPath?.values?.() || []);
+        worldSnapshotRef.current = await assetWorkerClient.buildWorldSnapshot({
+          entries: snapshotEntries,
+          gameVersion: uiStateRef?.current?.gameVersion || 'VCS',
+          options: {
+            extraImgPaths: ['models/gta3.img'],
+          },
+        });
+        const placementCount = Number(worldSnapshotRef.current?.build?.world?.placementCount) || 0;
+        pushConsoleLine('info', `Asset snapshot cached: ${placementCount} placements`);
+      } catch (error) {
+        if (worldSnapshotRef) worldSnapshotRef.current = null;
+        pushConsoleLine('warn', `Asset snapshot build failed: ${formatConsoleArg(error)}`);
+      }
+    }
+
     await gtaSessionRef.current.buildWorld({
       activeBackend,
       activeRenderChunksRef,
@@ -298,6 +337,7 @@ export function createAppSessionController(options = {}) {
       totalObjectsRef,
       uiStateRef,
       worldGameVersionRef,
+      worldSnapshotRef,
       worldRootRef,
       yieldToBrowser,
       yieldToNextTask,

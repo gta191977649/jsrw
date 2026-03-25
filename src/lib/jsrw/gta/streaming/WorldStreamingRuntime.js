@@ -42,6 +42,10 @@ const CHUNK_CULL_MARGIN_XZ = WORLD_CHUNK_SIZE * 1.0;
 const CHUNK_CULL_MARGIN_Y = WORLD_CHUNK_SIZE * 1.5;
 const RW_FADE_EPSILON = DISTANCE_FADE_DEFAULTS.epsilon;
 const OCCLUSION_CACHE_MS = 120;
+const VISIBILITY_FAR_CHUNK_BUDGET = 48;
+const BIG_BUILDING_OCCLUSION_BUDGET = 48;
+const VISIBILITY_DEFAULT_INTERVAL = 0.02;
+const VISIBILITY_ROTATION_ONLY_INTERVAL = 0.04;
 const FALLBACK_AMBIENT = new THREE.Color(1, 1, 1);
 const FALLBACK_EMISSIVE = new THREE.Color(0, 0, 0);
 
@@ -545,7 +549,8 @@ export class WorldStreamingRuntime {
       || currentCameraChunkX !== lodState.lastCameraChunkX
       || currentCameraChunkZ !== lodState.lastCameraChunkZ;
 
-    if (!knownCameraPos || camera.position.distanceToSquared(lodState.lastCameraPos) > 9) {
+    const cameraMoved = !knownCameraPos || camera.position.distanceToSquared(lodState.lastCameraPos) > 9;
+    if (cameraMoved) {
       lodState.lastCameraPos.copy(camera.position);
       lodState.needsRefresh = true;
       lodState.needsVisibilityRefresh = true;
@@ -564,7 +569,8 @@ export class WorldStreamingRuntime {
       && Number.isFinite(lodState.lastCameraQuat.z)
       && Number.isFinite(lodState.lastCameraQuat.w);
     const cameraQuatDot = knownCameraQuat ? Math.abs(camera.quaternion.dot(lodState.lastCameraQuat)) : 0;
-    if (!knownCameraQuat || cameraQuatDot < 0.99995) {
+    const cameraRotated = !knownCameraQuat || cameraQuatDot < 0.99995;
+    if (cameraRotated) {
       lodState.lastCameraQuat.copy(camera.quaternion);
       lodState.needsRefresh = true;
       lodState.needsVisibilityRefresh = true;
@@ -585,9 +591,25 @@ export class WorldStreamingRuntime {
       lodState.needsVisibilityRefresh = true;
     }
 
+    const workerPlan = context.workerPlan || null;
+    const hasWorkerVisibilityPlan = Boolean(
+      Array.isArray(workerPlan?.candidateChunkKeys)
+      || Array.isArray(workerPlan?.frustumChunkKeys),
+    );
     const needsFadeTick = activeFadeCountRef.current > 0;
     const needsVisibilityRefresh = lodState.needsVisibilityRefresh || lodState.needsRefresh || needsFadeTick;
-    if (!needsVisibilityRefresh || lodUpdateAccumulatorRef.current < 0.02) {
+    const rotationOnlyRefresh = cameraRotated
+      && !cameraMoved
+      && !sectorChanged
+      && !projectionChanged
+      && !configChanged
+      && !needsFadeTick;
+    const requiredVisibilityInterval = hasWorkerVisibilityPlan
+      ? 0
+      : rotationOnlyRefresh
+      ? VISIBILITY_ROTATION_ONLY_INTERVAL
+      : VISIBILITY_DEFAULT_INTERVAL;
+    if (!needsVisibilityRefresh || lodUpdateAccumulatorRef.current < requiredVisibilityInterval) {
       return;
     }
 
@@ -620,23 +642,56 @@ export class WorldStreamingRuntime {
       || !Array.isArray(lodState.residentScanChunks)
       || lodState.residentScanChunks.length === 0;
     const residencyStart = getProfilingTimeNow();
+    const workerCandidateChunks = needsResidencyRefresh && Array.isArray(workerPlan?.candidateChunkKeys)
+      ? workerPlan.candidateChunkKeys
+        .map((key) => renderChunkLookupRef.current?.get?.(key) || null)
+        .filter(Boolean)
+      : null;
     const candidateChunks = needsResidencyRefresh
-      ? this.collectGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef)
+      ? (workerCandidateChunks || this.collectGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef))
       : lodState.residentScanChunks;
     if (needsResidencyRefresh) {
       lodState.residentScanChunks = candidateChunks;
     }
     residencyCpuMs = Math.max(0, getProfilingTimeNow() - residencyStart);
-    candidateChunks.sort((a, b) => {
-      const da = camera.position.distanceToSquared(a.center);
-      const db = camera.position.distanceToSquared(b.center);
-      return da - db;
-    });
+    if (!workerCandidateChunks) {
+      candidateChunks.sort((a, b) => {
+        const da = camera.position.distanceToSquared(a.center);
+        const db = camera.position.distanceToSquared(b.center);
+        return da - db;
+      });
+    }
     const occlusionState = resetChunkOcclusionState(chunkOcclusionStateRef.current);
+    const workerFrustumChunkKeys = Array.isArray(workerPlan?.frustumChunkKeys)
+      ? new Set(workerPlan.frustumChunkKeys)
+      : null;
     const bigBuildingItems = bigBuildingItemsRef.current;
     const previousActiveChunks = activeRenderChunksRef.current;
     const nextActiveChunks = new Set();
     const protectedItems = new Set();
+    const nearRefreshDistanceSq = (drawDistance + WORLD_CHUNK_SIZE) * (drawDistance + WORLD_CHUNK_SIZE);
+    const farChunks = [];
+    for (const chunk of candidateChunks) {
+      if (camera.position.distanceToSquared(chunk.center) > nearRefreshDistanceSq) {
+        farChunks.push(chunk);
+      }
+    }
+    const farChunkRefreshSet = new Set();
+    if (farChunks.length > 0) {
+      if (hasWorkerVisibilityPlan) {
+        for (const chunk of farChunks) farChunkRefreshSet.add(chunk);
+        lodState.visibilityChunkCursor = 0;
+      } else {
+        const farChunkBudget = Math.min(VISIBILITY_FAR_CHUNK_BUDGET, farChunks.length);
+        const startCursor = Math.max(0, Math.floor(Number(lodState.visibilityChunkCursor) || 0)) % farChunks.length;
+        for (let index = 0; index < farChunkBudget; index += 1) {
+          farChunkRefreshSet.add(farChunks[(startCursor + index) % farChunks.length]);
+        }
+        lodState.visibilityChunkCursor = (startCursor + farChunkBudget) % farChunks.length;
+      }
+    } else {
+      lodState.visibilityChunkCursor = 0;
+    }
     let activeChunks = 0;
     let frustumChunks = 0;
     let activeItems = 0;
@@ -644,6 +699,36 @@ export class WorldStreamingRuntime {
     let visibleLod = 0;
     let activeFades = 0;
     let fadeProxyCount = 0;
+
+    const collectExistingItemState = (item) => {
+      if (!item || item.__rwVisibilityScanCode === frameScanCode) return;
+      item.__rwVisibilityScanCode = frameScanCode;
+      visibilityProcessedItems += 1;
+      const nearOpacity = Number(item?.nearState?.fadeAlpha) || 0;
+      const lodOpacity = Number(item?.lodState?.fadeAlpha) || 0;
+      const nearStream = Number(item?.nearState?.streamAlpha) || 0;
+      const lodStream = Number(item?.lodState?.streamAlpha) || 0;
+      if (nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon || nearStream > fadeEpsilon || lodStream > fadeEpsilon) {
+        activeItems += 1;
+      }
+      if (nearOpacity > fadeEpsilon) visibleNear += 1;
+      if (lodOpacity > fadeEpsilon) visibleLod += 1;
+      this.collectRenderSideFrameVisibility(frameVisibility, item, 'near');
+      this.collectRenderSideFrameVisibility(frameVisibility, item, 'lod');
+      if (
+        (nearOpacity > fadeEpsilon && nearOpacity < (1 - fadeEpsilon))
+        || (lodOpacity > fadeEpsilon && lodOpacity < (1 - fadeEpsilon))
+        || (nearStream > fadeEpsilon && nearStream < (1 - fadeEpsilon))
+        || (lodStream > fadeEpsilon && lodStream < (1 - fadeEpsilon))
+      ) {
+        activeFades += 1;
+      }
+      if (nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon || nearStream > fadeEpsilon || lodStream > fadeEpsilon) {
+        protectedItems.add(item);
+      }
+      if (item.nearState?.proxyRoot?.visible) fadeProxyCount += 1;
+      if (item.lodState?.proxyRoot?.visible) fadeProxyCount += 1;
+    };
 
     const processRenderItem = (item, { checkOcclusion = false } = {}) => {
       if (!item || item.__rwVisibilityScanCode === frameScanCode) return;
@@ -859,16 +944,33 @@ export class WorldStreamingRuntime {
     };
 
     for (const chunk of candidateChunks) {
+      const chunkDistanceSq = camera.position.distanceToSquared(chunk.center);
+      const shouldFullyRefreshChunk = chunkDistanceSq <= nearRefreshDistanceSq || farChunkRefreshSet.has(chunk);
+      if (!shouldFullyRefreshChunk) {
+        if (chunk.active) {
+          nextActiveChunks.add(chunk);
+          activeChunks += 1;
+          addVisibleChunk(frameVisibility, chunk);
+          for (const emitter of chunk.coronaEmitters) addCoronaCandidate(frameVisibility, emitter);
+          for (const emitter of chunk.shadowEmitters) addShadowCandidate(frameVisibility, emitter);
+          for (const item of chunk.items) collectExistingItemState(item);
+        }
+        continue;
+      }
       const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
       const bypassCloseRangeChunkFrustum = shouldBypassCloseRangeChunkFrustum(chunk, camera);
       let chunkInFrustum = chunkInRange && !enableOcclusion;
       if (chunkInRange && enableOcclusion && !bypassCloseRangeChunkFrustum) {
-        const frustumStart = getProfilingTimeNow();
-        chunkFrustumTests += 1;
-        chunkInFrustum = chunk.boundingBox?.isBox3
-          ? chunkFrustum.intersectsBox(chunk.boundingBox)
-          : chunkFrustum.intersectsSphere(chunk.boundingSphere);
-        frustumCpuMs += Math.max(0, getProfilingTimeNow() - frustumStart);
+        if (workerFrustumChunkKeys) {
+          chunkInFrustum = workerFrustumChunkKeys.has(chunk.key);
+        } else {
+          const frustumStart = getProfilingTimeNow();
+          chunkFrustumTests += 1;
+          chunkInFrustum = chunk.boundingBox?.isBox3
+            ? chunkFrustum.intersectsBox(chunk.boundingBox)
+            : chunkFrustum.intersectsSphere(chunk.boundingSphere);
+          frustumCpuMs += Math.max(0, getProfilingTimeNow() - frustumStart);
+        }
       } else if (chunkInRange && bypassCloseRangeChunkFrustum) {
         chunkInFrustum = true;
       }
@@ -915,8 +1017,28 @@ export class WorldStreamingRuntime {
       }
     }
 
+    const bigBuildingRefreshSet = new Set();
+    if (bigBuildingItems.length > 0) {
+      if (hasWorkerVisibilityPlan) {
+        for (const item of bigBuildingItems) bigBuildingRefreshSet.add(item);
+        lodState.bigBuildingCursor = 0;
+      } else {
+        const budget = Math.min(BIG_BUILDING_OCCLUSION_BUDGET, bigBuildingItems.length);
+        const startCursor = Math.max(0, Math.floor(Number(lodState.bigBuildingCursor) || 0)) % bigBuildingItems.length;
+        for (let index = 0; index < budget; index += 1) {
+          bigBuildingRefreshSet.add(bigBuildingItems[(startCursor + index) % bigBuildingItems.length]);
+        }
+        lodState.bigBuildingCursor = (startCursor + budget) % bigBuildingItems.length;
+      }
+    } else {
+      lodState.bigBuildingCursor = 0;
+    }
+
     for (const item of bigBuildingItems) {
-      processRenderItem(item, { checkOcclusion: true });
+      const distSq = camera.position.distanceToSquared(item.anchor);
+      const shouldFullyRefreshItem = distSq <= nearRefreshDistanceSq || bigBuildingRefreshSet.has(item);
+      if (shouldFullyRefreshItem) processRenderItem(item, { checkOcclusion: true });
+      else collectExistingItemState(item);
     }
 
     for (const chunk of previousActiveChunks) {
@@ -958,6 +1080,7 @@ export class WorldStreamingRuntime {
       visibilityProcessedItems,
     };
     frameVisibility.computed = true;
+    frameVisibility.version = ((Number(frameVisibility.version) || 0) + 1) >>> 0;
     activeFadeCountRef.current = activeFades;
     lodState.needsRefresh = activeFades > 0;
     lodState.needsVisibilityRefresh = activeFades > 0;

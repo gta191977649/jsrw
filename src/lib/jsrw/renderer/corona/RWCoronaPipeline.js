@@ -23,6 +23,7 @@ const MIN_LOS_INTERVAL_MS = 250;
 const DEFAULT_POINT_LIGHT_INTENSITY = 1.5;
 const MAX_ACTIVE_CORONAS = 96;
 const MAX_ACTIVE_CORONA_LIGHTS = 24;
+const MAX_CORONA_LOS_CHECKS_PER_FRAME = 16;
 const TRAFFIC_LIGHT_MAX_LIGHT_DISTANCE = 90;
 const DEFAULT_MAX_LIGHT_DISTANCE = 140;
 const OFFSCREEN_FADE_MARGIN = 0;
@@ -272,6 +273,7 @@ export class RWCoronaPipeline {
     this.raycaster = new THREE.Raycaster();
     this.cachedOccluderMeshes = null;
     this.occludersDirty = true;
+    this.losBudgetCursor = 0;
     this.renderScene.autoUpdate = true;
     this.renderScene.add(this.spriteRoot);
     this.renderScene.add(this.debugRoot);
@@ -661,6 +663,18 @@ export class RWCoronaPipeline {
       selectedLightEntries.add(item.entry);
       if (selectedLightEntries.size >= lightBudget) break;
     }
+    const losCandidateEntries = candidateEntries.filter((item) => item.entry?.emitter?.losCheck === true);
+    const losRefreshEntries = new Set();
+    if (losCandidateEntries.length > 0) {
+      const losBudget = Math.min(MAX_CORONA_LOS_CHECKS_PER_FRAME, losCandidateEntries.length);
+      const startCursor = Math.max(0, Math.floor(Number(this.losBudgetCursor) || 0)) % losCandidateEntries.length;
+      for (let index = 0; index < losBudget; index += 1) {
+        losRefreshEntries.add(losCandidateEntries[(startCursor + index) % losCandidateEntries.length].entry);
+      }
+      this.losBudgetCursor = (startCursor + losBudget) % losCandidateEntries.length;
+    } else {
+      this.losBudgetCursor = 0;
+    }
 
     for (const item of candidateEntries) {
       const { entry, visibility, distance, drawDistance, withinDrawDistance } = item;
@@ -676,7 +690,9 @@ export class RWCoronaPipeline {
         }
       }
 
-      const losVisible = targetStreamAlpha > 0 ? this.computeLosVisible(entry, camera, timeMs) : true;
+      const losVisible = targetStreamAlpha > 0
+        ? (losRefreshEntries.has(entry) ? this.computeLosVisible(entry, camera, timeMs) : entry.losVisible)
+        : true;
       if (!losVisible) targetStreamAlpha = 0;
 
       const needsScreenTest = entry.sprite && (

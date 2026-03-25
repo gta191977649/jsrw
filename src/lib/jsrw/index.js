@@ -89,6 +89,7 @@ export { RWShadowPipeline as Shadows } from './renderer/shadows/RWShadowPipeline
 
 export { JsrwRendererSession } from './integration/JsrwRendererSession.js';
 export { createJsrwRenderer } from './integration/createJsrwRenderer.js';
+export * from './workers/index.js';
 export { Streaming } from './core/Streaming.js';
 export { World } from './core/World.js';
 export { RendererHost } from './gta/integration/RendererHost.js';
