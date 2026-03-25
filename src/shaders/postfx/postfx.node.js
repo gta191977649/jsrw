@@ -137,6 +137,27 @@ export function createPostFxRadiosityBlurNodeMaterial() {
   return material;
 }
 
+export function createPostFxAccumulationNodeMaterial() {
+  const material = createBasePostFxMaterial();
+  material.userData = {
+    ...(material.userData || {}),
+    rwPostFxUniforms: {
+      uSourceTex: texture(null),
+      uBaseTex: texture(null),
+      uUvOffset: uniform(new THREE.Vector2(0, 0)),
+      uColor: uniform(new THREE.Vector3(1, 1, 1)),
+      uWeight: uniform(0),
+      uFlipY: uniform(0),
+    },
+  };
+  const uniforms = material.userData.rwPostFxUniforms;
+  const sourceSample = uniforms.uSourceTex.sample(getPostFxSampleUv(uniforms, uniforms.uUvOffset)).rgb.mul(uniforms.uColor);
+  const baseSample = uniforms.uBaseTex.sample(getPostFxSampleUv(uniforms)).rgb;
+  material.colorNode = mix(baseSample, sourceSample, uniforms.uWeight);
+  material.opacityNode = 1;
+  return material;
+}
+
 export function configurePostFxCopyUniforms(material, {
   textureValue = null,
   uvOffset = null,
@@ -195,4 +216,24 @@ export function configurePostFxSolidColorUniforms(material, {
   if (!uniforms) return;
   if (color) uniforms.uColor.value.copy(color);
   uniforms.uOpacity.value = opacity;
+}
+
+export function configurePostFxAccumulationUniforms(material, {
+  sourceTextureValue = null,
+  baseTextureValue = null,
+  uvOffset = null,
+  color = null,
+  weight = 0,
+  flipY = 0,
+} = {}) {
+  const uniforms = material?.userData?.rwPostFxUniforms;
+  if (!uniforms) return;
+  uniforms.uSourceTex.value = sourceTextureValue;
+  uniforms.uBaseTex.value = baseTextureValue;
+  if (uvOffset) uniforms.uUvOffset.value.copy(uvOffset);
+  else uniforms.uUvOffset.value.set(0, 0);
+  if (color) uniforms.uColor.value.copy(color);
+  else uniforms.uColor.value.set(1, 1, 1);
+  uniforms.uWeight.value = weight;
+  if (uniforms.uFlipY) uniforms.uFlipY.value = flipY;
 }

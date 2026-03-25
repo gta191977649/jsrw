@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import {
+  configurePostFxAccumulationUniforms,
   configurePostFxCompositeUniforms,
   configurePostFxCopyUniforms,
   configurePostFxRadiosityBlurUniforms,
   configurePostFxSolidColorUniforms,
   configurePostFxThresholdUniforms,
+  createPostFxAccumulationNodeMaterial,
   createPostFxCopyNodeMaterial,
   createPostFxRadiosityBlurNodeMaterial,
   createPostFxRadiosityCompositeNodeMaterial,
@@ -43,11 +45,6 @@ function computeRadiositySize(width, height, divisor = DEFAULT_RADIOSITY_RESOLUT
     width: Math.max(1, Math.round(Math.max(1, width) / safeDivisor)),
     height: Math.max(1, Math.round(Math.max(1, height) / safeDivisor)),
   };
-}
-
-function setMaterialBlendConstant(material, scalar) {
-  const clamped = THREE.MathUtils.clamp(scalar, 0, 1);
-  material.blendColor.setRGB(clamped, clamped, clamped, THREE.LinearSRGBColorSpace);
 }
 
 function getFiniteOrDefault(value, fallback) {
@@ -90,6 +87,7 @@ export class RWPostFxPipeline {
     this.sceneTarget = null;
     this.composeTarget = null;
     this.frontBufferTarget = null;
+    this.blurBlendTarget = null;
     this.radiosityTargetA = null;
     this.radiosityTargetB = null;
     this.blurHistoryTarget = null;
@@ -120,16 +118,9 @@ export class RWPostFxPipeline {
 
     this.radiosityThresholdMaterial = createPostFxRadiosityThresholdNodeMaterial();
 
-    this.accumulationMaterial = createPostFxCopyNodeMaterial();
-    this.accumulationMaterial.transparent = true;
-    this.accumulationMaterial.blending = THREE.CustomBlending;
-    this.accumulationMaterial.blendSrc = THREE.ConstantColorFactor;
-    this.accumulationMaterial.blendDst = THREE.OneMinusConstantColorFactor;
-    this.accumulationMaterial.blendEquation = THREE.AddEquation;
-    this.accumulationMaterial.blendSrcAlpha = THREE.OneFactor;
-    this.accumulationMaterial.blendDstAlpha = THREE.ZeroFactor;
-    this.accumulationMaterial.blendEquationAlpha = THREE.AddEquation;
-    this.accumulationMaterial.blendColor = new THREE.Color(VCS_BLUR_INTENSITY, VCS_BLUR_INTENSITY, VCS_BLUR_INTENSITY);
+    this.accumulationMaterial = createPostFxAccumulationNodeMaterial();
+    this.accumulationMaterial.transparent = false;
+    this.accumulationMaterial.blending = THREE.NormalBlending;
 
     this.additiveMaterial = createPostFxCopyNodeMaterial();
     this.additiveMaterial.transparent = true;
@@ -250,6 +241,12 @@ export class RWPostFxPipeline {
     this.ensureDebugTargets();
   }
 
+  swapComposeTargets() {
+    const previousComposeTarget = this.composeTarget;
+    this.composeTarget = this.blurBlendTarget;
+    this.blurBlendTarget = previousComposeTarget;
+  }
+
   setEnabled(enabled) {
     this.enabled = Boolean(enabled);
     if (!this.enabled) this.resetHistory();
@@ -333,6 +330,7 @@ export class RWPostFxPipeline {
       && this.sceneTarget
       && this.composeTarget
       && this.frontBufferTarget
+      && this.blurBlendTarget
     ) {
       this.ensureOptionalTargets();
       return;
@@ -345,6 +343,7 @@ export class RWPostFxPipeline {
     this.sceneTarget?.dispose();
     this.composeTarget?.dispose();
     this.frontBufferTarget?.dispose();
+    this.blurBlendTarget?.dispose();
     this.radiosityTargetA?.dispose();
     this.radiosityTargetB?.dispose();
     this.blurHistoryTarget?.dispose();
@@ -355,6 +354,7 @@ export class RWPostFxPipeline {
     this.sceneTarget = this.createRenderTarget(nextWidth, nextHeight, { depthBuffer: true, type: FULL_RES_POSTFX_TARGET_TYPE });
     this.composeTarget = this.createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
     this.frontBufferTarget = this.createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
+    this.blurBlendTarget = this.createRenderTarget(nextWidth, nextHeight, { type: FULL_RES_POSTFX_TARGET_TYPE });
     this.radiosityTargetA = null;
     this.radiosityTargetB = null;
     this.blurHistoryTarget = null;
@@ -495,28 +495,22 @@ export class RWPostFxPipeline {
   runBlurStage(renderer) {
     if (!this.runtime.enableBlur) return;
 
-    configurePostFxCopyUniforms(this.accumulationMaterial, {
-      textureValue: this.frontBufferTarget.texture,
-      opacity: 1,
-      flipY: getPostFxFlipYForBackend(this.backend),
-    });
-    setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
-
     const blurOffset = this.runtime.blurOffset;
     const offsets = [
       new THREE.Vector2(blurOffset / this.frontBufferTarget.width, 0),
       new THREE.Vector2(blurOffset / this.frontBufferTarget.width, blurOffset / this.frontBufferTarget.height),
       new THREE.Vector2(0, blurOffset / this.frontBufferTarget.height),
     ];
-    setMaterialBlendConstant(this.accumulationMaterial, this.runtime.blurIntensity);
     for (const offset of offsets) {
-      configurePostFxCopyUniforms(this.accumulationMaterial, {
-        textureValue: this.frontBufferTarget.texture,
+      configurePostFxAccumulationUniforms(this.accumulationMaterial, {
+        sourceTextureValue: this.frontBufferTarget.texture,
+        baseTextureValue: this.composeTarget.texture,
         uvOffset: offset,
-        opacity: 1,
+        weight: this.runtime.blurIntensity,
         flipY: getPostFxFlipYForBackend(this.backend),
       });
-      this.renderFullscreen(renderer, this.composeTarget, this.accumulationMaterial, false);
+      this.renderFullscreen(renderer, this.blurBlendTarget, this.accumulationMaterial, true);
+      this.swapComposeTargets();
     }
 
     if (this.runtime.enableColorFilter) {
@@ -530,13 +524,14 @@ export class RWPostFxPipeline {
     }
 
     if (this.runtime.enableTrails && this.hasHistory) {
-      configurePostFxCopyUniforms(this.accumulationMaterial, {
-        textureValue: this.blurHistoryTarget.texture,
-        opacity: 1,
+      configurePostFxAccumulationUniforms(this.accumulationMaterial, {
+        sourceTextureValue: this.blurHistoryTarget.texture,
+        baseTextureValue: this.composeTarget.texture,
+        weight: this.runtime.historyIntensity,
         flipY: getPostFxFlipYForBackend(this.backend),
       });
-      setMaterialBlendConstant(this.accumulationMaterial, this.runtime.historyIntensity);
-      this.renderFullscreen(renderer, this.composeTarget, this.accumulationMaterial, false);
+      this.renderFullscreen(renderer, this.blurBlendTarget, this.accumulationMaterial, true);
+      this.swapComposeTargets();
     }
   }
 

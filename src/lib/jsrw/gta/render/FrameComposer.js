@@ -115,6 +115,7 @@ export class FrameComposer {
     } = context;
 
     if (!renderer || !scene || !camera) return;
+    const frameStartStats = takeRenderStatsSnapshot(renderer);
 
     const stageWorldStats = { drawCalls: 0, triangles: 0 };
     const stageWaterStats = { drawCalls: 0, triangles: 0 };
@@ -453,6 +454,7 @@ export class FrameComposer {
 
     const rendererRuntimeInfo = rendererHost?.getRuntimeInfo?.() || null;
     const sessionStats = this.rendererSession?.getStats?.() || null;
+    const frameEndStats = takeRenderStatsSnapshot(renderer);
     renderMetricsRef.current = {
       ...renderMetricsRef.current,
       rendererBackend: rendererRuntimeInfo?.backend || String(activeBackend || 'UNKNOWN').toUpperCase(),
@@ -466,8 +468,8 @@ export class FrameComposer {
       transparentQueue: rwRenderQueueRef.current?.debugStats?.transparentCount ?? 0,
       additiveQueue: rwRenderQueueRef.current?.debugStats?.additiveCount ?? 0,
       overlayQueue: rwRenderQueueRef.current?.debugStats?.overlayCount ?? 0,
-      drawCalls: renderer.info?.render?.calls ?? 0,
-      triangles: renderer.info?.render?.triangles ?? 0,
+      drawCalls: Math.max(0, frameEndStats.calls - frameStartStats.calls),
+      triangles: Math.max(0, frameEndStats.triangles - frameStartStats.triangles),
       worldDrawCalls: stageWorldStats.drawCalls,
       worldTriangles: stageWorldStats.triangles,
       waterDrawCalls: stageWaterStats.drawCalls,
