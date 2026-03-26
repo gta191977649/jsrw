@@ -1127,6 +1127,8 @@ export class JsrwGtaSession {
             registerRenderItem(createCEntity({
               isTobj,
               anchor: anchor.clone(),
+              nearDistance: nearDef?.drawDistance ?? null,
+              relatedModelName: placementModelName,
               nearState: createEntityRenderSide({
                 object3D: nearObj,
                 handles: nearInstanced?.handles || [],

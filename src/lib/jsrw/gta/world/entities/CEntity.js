@@ -30,6 +30,11 @@ export function createEntityRenderSide(options = {}) {
   };
 }
 
+function clampUnit(value) {
+  const numeric = Number.isFinite(Number(value)) ? Number(value) : 0;
+  return Math.min(1, Math.max(0, numeric));
+}
+
 export class CEntity {
   constructor(options = {}) {
     this.kind = 'CEntity';
@@ -42,6 +47,8 @@ export class CEntity {
     this.boundsMax = options.boundsMax || null;
     this.boundingBox = options.boundingBox || null;
     this.boundingSphere = options.boundingSphere || null;
+    this.nearDistance = Number.isFinite(options.nearDistance) ? options.nearDistance : null;
+    this.relatedModelName = options.relatedModelName || null;
 
     this.sides = {
       near: options.nearState || createEntityRenderSide(),
@@ -82,6 +89,22 @@ export class CEntity {
 
   getDrawDistance(side) {
     return this.getRenderSideState(side)?.drawDistance ?? null;
+  }
+
+  GetNearDistance(fallback = null) {
+    if (Number.isFinite(this.nearDistance) && this.nearDistance > 0) return this.nearDistance;
+    const nearDrawDistance = this.getDrawDistance('near');
+    if (Number.isFinite(nearDrawDistance) && nearDrawDistance > 0) return nearDrawDistance;
+    return fallback;
+  }
+
+  GetRelatedModel() {
+    if (!this.hasRenderable('near')) return null;
+    return {
+      name: this.relatedModelName || null,
+      GetRwObject: () => this.getRenderObject('near'),
+      m_alpha: Math.round(clampUnit(this.getSideOpacity('near')) * 255),
+    };
   }
 
   hasRenderable(side) {

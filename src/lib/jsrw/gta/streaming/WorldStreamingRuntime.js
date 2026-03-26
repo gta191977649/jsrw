@@ -465,6 +465,7 @@ export class WorldStreamingRuntime {
     const { rwRenderQueueRef } = context;
     if (!sideState) return false;
     const clampedOpacity = clamp01(opacity);
+    const preferObjectFadeOnly = item?.usesSingleRwPath?.() === true && Boolean(sideState.renderObject);
 
     if (clampedOpacity <= RW_FADE_EPSILON) {
       if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty?.();
@@ -490,6 +491,14 @@ export class WorldStreamingRuntime {
       setRenderSideObjectFadeOpacity(sideState, clampedOpacity);
       item?.setSideOpacity?.(side, clampedOpacity);
       sideState.currentOpacity = clampedOpacity;
+      return false;
+    }
+
+    if (preferObjectFadeOnly) {
+      if (this.disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty?.();
+      setRenderSideOriginalVisible(item, side, clampedOpacity > RW_FADE_EPSILON, dirtyBatches);
+      item?.setSideOpacity?.(side, clampedOpacity > RW_FADE_EPSILON ? 1 : 0);
+      sideState.currentOpacity = clampedOpacity > RW_FADE_EPSILON ? 1 : 0;
       return false;
     }
 
@@ -787,21 +796,22 @@ export class WorldStreamingRuntime {
         runtimeContext,
       } = visibilityState;
       const mi = {
-        nearDistance: nearEndDistance,
-        lodDistance: lodEndDistance,
+        GetNearDistance: () => ent?.GetNearDistance?.(nearEndDistance) ?? nearEndDistance,
+        GetLodDistance: () => lodEndDistance,
+        GetRelatedModel: () => ent?.GetRelatedModel?.() ?? null,
       };
-      const nonLOD = hasNear ? ent : null;
+      const nonLOD = mi.GetRelatedModel();
       const nearResult = (() => {
         const targetVisible = hasNear
           && !forceLodOnly
-          && RenderEntityController.isWithinDrawDistance(dist, mi.nearDistance, distanceFadeConfig);
+          && RenderEntityController.isWithinDrawDistance(dist, mi.GetNearDistance(), distanceFadeConfig);
         if (!ent.nearState) return { visible: false, opacity: 0 };
         return {
           visible: targetVisible,
           opacity: RenderEntityController.updateFade(ent.nearState, {
             targetVisible,
             distance: dist,
-            drawDistance: mi.nearDistance,
+            drawDistance: mi.GetNearDistance(),
             dt,
             config: distanceFadeConfig,
             distanceDriven: true,
@@ -810,14 +820,14 @@ export class WorldStreamingRuntime {
       })();
       const lodResult = (() => {
         const targetVisible = hasLod
-          && RenderEntityController.isWithinDrawDistance(dist, mi.lodDistance, distanceFadeConfig);
+          && RenderEntityController.isWithinDrawDistance(dist, mi.GetLodDistance(), distanceFadeConfig);
         if (!ent.lodState) return { visible: false, opacity: 0 };
         return {
           visible: targetVisible,
           opacity: RenderEntityController.updateFade(ent.lodState, {
             targetVisible,
             distance: dist,
-            drawDistance: mi.lodDistance,
+            drawDistance: mi.GetLodDistance(),
             dt,
             config: distanceFadeConfig,
             distanceDriven: true,
@@ -832,6 +842,9 @@ export class WorldStreamingRuntime {
         showLods,
         forceLodOnly,
       });
+      const insideNearDistance = dist < mi.GetNearDistance() && dist < drawDistance;
+      const nonLodFullyVisible = Boolean(nonLOD?.GetRwObject?.()) && Number(nonLOD?.m_alpha) >= 255;
+      const shouldDrawLodBelowNearDistance = insideNearDistance && !(nonLOD == null || nonLodFullyVisible);
 
       if (!targetRwObject) {
         this.applySingleEntitySide(ent, null, 0, dirtyBatches, runtimeContext);
@@ -851,7 +864,7 @@ export class WorldStreamingRuntime {
 
       if (targetRwObject === 'near') {
         nearOpacity = nearResult.opacity;
-        if (hasLod && lodResult.visible && nearOpacity < (1 - fadeEpsilon)) {
+        if (hasLod && lodResult.visible && (shouldDrawLodBelowNearDistance || nearOpacity < (1 - fadeEpsilon))) {
           lodOpacity = Math.max(
             lodResult.opacity,
             previousRwObject === 'lod' || ent?.getSideOpacity?.('lod') > fadeEpsilon ? 1 : 0,
@@ -861,7 +874,7 @@ export class WorldStreamingRuntime {
           ? 'near'
           : (lodOpacity > fadeEpsilon ? 'lod' : 'near');
       } else {
-        lodOpacity = lodResult.opacity;
+        lodOpacity = insideNearDistance && !shouldDrawLodBelowNearDistance ? 0 : lodResult.opacity;
         if (nonLOD && nearResult.visible && lodOpacity < (1 - fadeEpsilon)) {
           nearOpacity = Math.max(
             nearResult.opacity,
