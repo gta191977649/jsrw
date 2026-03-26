@@ -686,6 +686,7 @@ export class WorldStreamingRuntime {
       rwRenderQueueRef,
     } = context;
     if (!camera || !lodUpdateStateRef?.current) return;
+    const streamingStartMs = performance.now();
 
     lodUpdateAccumulatorRef.current += dt;
     const lodState = lodUpdateStateRef.current;
@@ -770,9 +771,11 @@ export class WorldStreamingRuntime {
     // capping scan by the LOD switch distance would skip whole chunks and hide distant LOD meshes.
     const chunkScanDistance = renderingDistance;
     const previousActiveChunks = activeRenderChunksRef.current;
+    const chunkScanStartMs = performance.now();
     const candidateChunks = fullRefresh
       ? this.getCachedGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef, lodState)
       : Array.from(previousActiveChunks);
+    const chunkScanMs = performance.now() - chunkScanStartMs;
     const occlusionState = resetChunkOcclusionState(chunkOcclusionStateRef.current);
     const bigBuildingItems = bigBuildingItemsRef.current;
     const nextActiveChunks = new Set();
@@ -784,8 +787,13 @@ export class WorldStreamingRuntime {
     let visibleNear = 0;
     let visibleLod = 0;
     let activeFades = 0;
+    let visibilityCpuMs = 0;
+    let bigBuildingCpuMs = 0;
+    let opacityCpuMs = 0;
+    let frameVisibilityCpuMs = 0;
 
     const SetupBigBuildingVisibility = (ent, visibilityState) => {
+      const setupBigBuildingStartMs = performance.now();
       const {
         dist,
         hasNear,
@@ -886,11 +894,15 @@ export class WorldStreamingRuntime {
           : (nearOpacity > fadeEpsilon ? 'near' : 'lod');
       }
 
+      const opacityStartMs = performance.now();
       this.applyRenderSideOpacity(ent, 'near', nearOpacity, dirtyBatches, runtimeContext);
       this.applyRenderSideOpacity(ent, 'lod', lodOpacity, dirtyBatches, runtimeContext);
+      opacityCpuMs += performance.now() - opacityStartMs;
 
+      const frameVisibilityStartMs = performance.now();
       if (nearOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, ent, 'near');
       if (lodOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, ent, 'lod');
+      frameVisibilityCpuMs += performance.now() - frameVisibilityStartMs;
 
       const visibility = nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon
         ? VIS_VISIBLE
@@ -906,6 +918,7 @@ export class WorldStreamingRuntime {
       if (nearOpacity > fadeEpsilon) visibleNear += 1;
       if (lodOpacity > fadeEpsilon) visibleLod += 1;
       if (visibility !== VIS_INVISIBLE) protectedItems.add(ent);
+      bigBuildingCpuMs += performance.now() - setupBigBuildingStartMs;
 
       return {
         visibility,
@@ -916,6 +929,7 @@ export class WorldStreamingRuntime {
     };
 
     const SetupEntityVisibility = (ent, { checkOcclusion = false } = {}) => {
+      const setupEntityStartMs = performance.now();
       if (!ent || processedItems.has(ent)) return VIS_INVISIBLE;
       processedItems.add(ent);
 
@@ -975,7 +989,7 @@ export class WorldStreamingRuntime {
       };
 
       if (ent?.usesSingleRwPath?.()) {
-        return SetupBigBuildingVisibility(ent, {
+        const visibility = SetupBigBuildingVisibility(ent, {
           dist,
           hasNear,
           hasLod,
@@ -984,6 +998,8 @@ export class WorldStreamingRuntime {
           fadeEpsilon,
           runtimeContext,
         }).visibility;
+        visibilityCpuMs += performance.now() - setupEntityStartMs;
+        return visibility;
       }
 
       if (pairedItem && showLods && !forceLodOnly) {
@@ -1069,10 +1085,14 @@ export class WorldStreamingRuntime {
       if (nearOpacity > fadeEpsilon) visibleNear += 1;
       if (lodOpacity > fadeEpsilon) visibleLod += 1;
 
+      const opacityStartMs = performance.now();
       this.applyRenderSideOpacity(ent, 'near', nearOpacity, dirtyBatches, runtimeContext);
       this.applyRenderSideOpacity(ent, 'lod', lodOpacity, dirtyBatches, runtimeContext);
+      opacityCpuMs += performance.now() - opacityStartMs;
+      const frameVisibilityStartMs = performance.now();
       this.collectRenderSideFrameVisibility(frameVisibility, ent, 'near');
       this.collectRenderSideFrameVisibility(frameVisibility, ent, 'lod');
+      frameVisibilityCpuMs += performance.now() - frameVisibilityStartMs;
 
       if (
         nearOpacity > fadeEpsilon
@@ -1082,6 +1102,7 @@ export class WorldStreamingRuntime {
       ) {
         protectedItems.add(ent);
       }
+      visibilityCpuMs += performance.now() - setupEntityStartMs;
       return nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon ? VIS_VISIBLE : VIS_INVISIBLE;
     };
 
@@ -1146,9 +1167,11 @@ export class WorldStreamingRuntime {
     }
 
     activeRenderChunksRef.current = nextActiveChunks;
+    const flushStartMs = performance.now();
     for (const batch of dirtyBatches) {
       flushDirtyInstancedBatch(batch);
     }
+    const flushMs = performance.now() - flushStartMs;
 
     renderMetricsRef.current = {
       ...renderMetricsRef.current,
@@ -1160,6 +1183,13 @@ export class WorldStreamingRuntime {
       visibleQueueMeshes: frameVisibility.visibleQueueMeshes.length,
       coronaCandidates: frameVisibility.coronaCandidates.length,
       shadowCandidates: frameVisibility.shadowCandidates.length,
+      streamingCpuMs: performance.now() - streamingStartMs,
+      streamingChunkScanMs: chunkScanMs,
+      streamingVisibilityMs: visibilityCpuMs,
+      streamingBigBuildingMs: bigBuildingCpuMs,
+      streamingOpacityMs: opacityCpuMs,
+      streamingFrameVisibilityMs: frameVisibilityCpuMs,
+      streamingFlushMs: flushMs,
     };
     frameVisibility.computed = true;
     activeFadeCountRef.current = activeFades;

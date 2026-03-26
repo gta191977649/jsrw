@@ -638,6 +638,33 @@ function App() {
     skyCloudsPassInvoked: false,
     skyCloudsPassDrawCalls: 0,
     skyCloudsPassTriangles: 0,
+    streamingCpuMs: 0,
+    streamingChunkScanMs: 0,
+    streamingVisibilityMs: 0,
+    streamingBigBuildingMs: 0,
+    streamingOpacityMs: 0,
+    streamingFrameVisibilityMs: 0,
+    streamingFlushMs: 0,
+    renderQueuePrepareMs: 0,
+    worldOpaqueCpuMs: 0,
+    worldTransparentCpuMs: 0,
+    coronaUpdateCpuMs: 0,
+    shadowUpdateCpuMs: 0,
+    frameComposerCpuMs: 0,
+    frameSkyDomeCpuMs: 0,
+    frameSkyBackdropCpuMs: 0,
+    frameSkyCloudsCpuMs: 0,
+    frameWaterUpdateCpuMs: 0,
+    frameWaterFarCpuMs: 0,
+    frameWaterNearCpuMs: 0,
+    frameWaterWavyCpuMs: 0,
+    frameWaterWakeCpuMs: 0,
+    frameShadowRenderCpuMs: 0,
+    frameCoronaRenderCpuMs: 0,
+    framePostFxCpuMs: 0,
+    frameSunBloomCpuMs: 0,
+    frameSunFinalCpuMs: 0,
+    frameHudCpuMs: 0,
   });
   const selectedObjectRootRef = useRef(null);
   const selectedInstanceHighlightRef = useRef(null);
@@ -2901,6 +2928,37 @@ function App() {
               ImGui.Text(`Transparent Queue: blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
               ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
               ImGui.Text(`Lighting: IDE 2DFX ${statsRef.current.ideEffects} | objects ${statsRef.current.lightObjects} | emitters ${statsRef.current.lightEmitters}`);
+              ImGui.Separator();
+              ImGui.Text(`CPU FrameComposer: ${Number(renderMetrics.frameComposerCpuMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`CPU Streaming: ${Number(renderMetrics.streamingCpuMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Chunk scan: ${Number(renderMetrics.streamingChunkScanMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Entity vis: ${Number(renderMetrics.streamingVisibilityMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Big building vis: ${Number(renderMetrics.streamingBigBuildingMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Opacity apply: ${Number(renderMetrics.streamingOpacityMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  FrameVisibility gather: ${Number(renderMetrics.streamingFrameVisibilityMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Instanced flush: ${Number(renderMetrics.streamingFlushMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`CPU Queue prepare: ${Number(renderMetrics.renderQueuePrepareMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`CPU World opaque pass: ${Number(renderMetrics.worldOpaqueCpuMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`CPU World transparent pass: ${Number(renderMetrics.worldTransparentCpuMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`CPU Corona update: ${Number(renderMetrics.coronaUpdateCpuMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`CPU Shadow update: ${Number(renderMetrics.shadowUpdateCpuMs || 0).toFixed(2)} ms`);
+              ImGui.SetNextItemOpen(false, ImGui.Cond.Once);
+              if (ImGui.CollapsingHeader('FrameComposer Profile')) {
+                ImGui.Text(`Sky dome: ${Number(renderMetrics.frameSkyDomeCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Sky backdrop: ${Number(renderMetrics.frameSkyBackdropCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Sky clouds: ${Number(renderMetrics.frameSkyCloudsCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Water update: ${Number(renderMetrics.frameWaterUpdateCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Water far: ${Number(renderMetrics.frameWaterFarCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Water near: ${Number(renderMetrics.frameWaterNearCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Water wavy: ${Number(renderMetrics.frameWaterWavyCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Water wake: ${Number(renderMetrics.frameWaterWakeCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Shadow render: ${Number(renderMetrics.frameShadowRenderCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Corona render: ${Number(renderMetrics.frameCoronaRenderCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`PostFX: ${Number(renderMetrics.framePostFxCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Sun bloom: ${Number(renderMetrics.frameSunBloomCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`Sun final: ${Number(renderMetrics.frameSunFinalCpuMs || 0).toFixed(2)} ms`);
+                ImGui.Text(`HUD: ${Number(renderMetrics.frameHudCpuMs || 0).toFixed(2)} ms`);
+              }
             }
           } catch (error) {
             pushConsoleLine('error', `Statistics window error: ${formatConsoleArg(error)}`);

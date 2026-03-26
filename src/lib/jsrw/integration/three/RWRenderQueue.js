@@ -123,6 +123,7 @@ export class RWRenderQueue {
       alphaBuildingCount: 0,
       alphaEntityCount: 0,
       alphaUnderwaterCount: 0,
+      prepareCpuMs: 0,
     };
   }
 
@@ -186,6 +187,7 @@ export class RWRenderQueue {
   }
 
   prepareFrame(camera, frameVisibility = null) {
+    const prepareStartMs = performance.now();
     if (this.dirty) this.rebuild();
     if (camera?.projectionMatrix && camera?.matrixWorldInverse) {
       this.tempProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -269,6 +271,7 @@ export class RWRenderQueue {
     overlay.forEach((entry, index) => {
       entry.mesh.renderOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
     });
+    this.debugStats.prepareCpuMs = performance.now() - prepareStartMs;
   }
 
   renderOpaque(renderer, camera, options = {}) {

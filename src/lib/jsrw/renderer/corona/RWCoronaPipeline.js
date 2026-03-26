@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import {
   calcScreenCoorsLikeRw,
-  createRwSpriteMaterial,
   prepareRwSpriteTexture,
 } from '../world/sky/RWSpriteUtils.js';
 import { resolveTrafficLightPhase } from './TrafficLights.js';
@@ -18,10 +17,14 @@ const TMP_RAY_DIR = new THREE.Vector3();
 const TMP_LOOK_TARGET = new THREE.Vector3();
 const TMP_COLOR = new THREE.Color();
 const TMP_CAMERA_FORWARD = new THREE.Vector3();
+const TMP_SCALE = new THREE.Vector3();
+const TMP_QUATERNION = new THREE.Quaternion();
 const DEBUG_HELPER_GEOMETRY = new THREE.BoxGeometry(0.18, 0.18, 0.18);
-const MIN_LOS_INTERVAL_MS = 250;
+const CORONA_QUAD_GEOMETRY = new THREE.PlaneGeometry(1, 1);
+const MIN_LOS_INTERVAL_MS = 2000;
 const DEFAULT_POINT_LIGHT_INTENSITY = 1.5;
 const MAX_ACTIVE_CORONAS = 96;
+const MAX_ACTIVE_CORONA_LIGHTS = 16;
 const OFFSCREEN_FADE_MARGIN = 0;
 
 function clamp01(value) {
@@ -226,6 +229,56 @@ function cameraMatchesTrafficLightFacingRule(camera, emitter) {
   }
 }
 
+function createCoronaBatchMaterial(map, depthTest) {
+  const material = new THREE.MeshBasicMaterial({
+    map,
+    transparent: true,
+    depthTest,
+    depthWrite: false,
+    fog: false,
+    toneMapped: false,
+    vertexColors: true,
+    blending: THREE.CustomBlending,
+  });
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneFactor;
+  material.blendEquation = THREE.AddEquation;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneFactor;
+  material.blendEquationAlpha = THREE.AddEquation;
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+attribute float instanceOpacity;
+attribute float instanceRotation;
+varying float vInstanceOpacity;`,
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `float rwSin = sin(instanceRotation);
+float rwCos = cos(instanceRotation);
+mat2 rwRotation = mat2(rwCos, rwSin, -rwSin, rwCos);
+vec3 transformed = vec3(rwRotation * position.xy, position.z);
+vInstanceOpacity = instanceOpacity;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+varying float vInstanceOpacity;`,
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+diffuseColor.a *= vInstanceOpacity;`,
+      );
+  };
+  material.customProgramCacheKey = () => `rw-corona-batch-${depthTest ? 'depth' : 'nodepth'}`;
+  return material;
+}
+
 export class RWCoronaPipeline {
   constructor(options = {}) {
     this.enabled = options.enabled !== false;
@@ -257,6 +310,7 @@ export class RWCoronaPipeline {
     this.entries = [];
     this.entryByEmitter = new WeakMap();
     this.activeEntries = new Set();
+    this.spriteBatches = new Map();
     this.debugStats = {
       entryCount: 0,
       candidateCount: 0,
@@ -265,7 +319,7 @@ export class RWCoronaPipeline {
     this.raycaster = new THREE.Raycaster();
     this.cachedOccluderMeshes = null;
     this.occludersDirty = true;
-    this.renderScene.autoUpdate = true;
+    this.renderScene.autoUpdate = false;
     this.renderScene.add(this.spriteRoot);
     this.renderScene.add(this.debugRoot);
     this.setRoot(options.root || null);
@@ -326,9 +380,9 @@ export class RWCoronaPipeline {
     this.enabled = Boolean(enabled);
     if (!this.enabled) {
       for (const entry of this.entries) {
-        if (entry.sprite) entry.sprite.visible = false;
         if (entry.light) entry.light.visible = false;
       }
+      this.resetSpriteBatches();
     }
   }
 
@@ -348,10 +402,10 @@ export class RWCoronaPipeline {
 
   setTextureDictionary(textureDictionary) {
     this.textureDictionary = textureDictionary || null;
-    for (const entry of this.entries) {
-      if (entry.sprite?.material) {
-        entry.sprite.material.map = this.resolveTexture(entry.emitter.textureKey);
-        entry.sprite.material.needsUpdate = true;
+    for (const batch of this.spriteBatches.values()) {
+      if (batch?.mesh?.material) {
+        batch.mesh.material.map = this.resolveTexture(batch.textureKey);
+        batch.mesh.material.needsUpdate = true;
       }
     }
   }
@@ -419,31 +473,14 @@ export class RWCoronaPipeline {
       streamAlpha: 0,
       lastLosCheckMs: 0,
       losVisible: true,
-      sprite: null,
       light: null,
       lightTarget: null,
       helperMesh: null,
       helperLine: null,
       lastScreen: null,
+      lightState: null,
+      spriteState: null,
     };
-
-    if (emitter.textureKey) {
-      const sprite = new THREE.Sprite(createRwSpriteMaterial(this.resolveTexture(emitter.textureKey)));
-      sprite.visible = false;
-      sprite.frustumCulled = false;
-      sprite.renderOrder = 90;
-      sprite.layers.disableAll();
-      sprite.layers.enable(0);
-      sprite.material.depthTest = emitter.losCheck !== true;
-      sprite.material.depthWrite = false;
-      sprite.userData = {
-        ...(sprite.userData || {}),
-        rwCoronaAux: true,
-        rwCoronaEmitterId: emitter.id,
-      };
-      this.spriteRoot.add(sprite);
-      entry.sprite = sprite;
-    }
 
     const lightBundle = this.createLightBundle(emitter);
     if (lightBundle?.light) {
@@ -509,6 +546,84 @@ export class RWCoronaPipeline {
     }
 
     return entry;
+  }
+
+  getSpriteBatchKey(textureKey, depthTest) {
+    return `${String(textureKey || '').trim().toLowerCase()}|${depthTest ? '1' : '0'}`;
+  }
+
+  ensureSpriteBatchCapacity(textureKey, depthTest, requiredCount) {
+    const key = this.getSpriteBatchKey(textureKey, depthTest);
+    const targetCount = Math.max(1, Math.floor(Number(requiredCount) || 1));
+    let batch = this.spriteBatches.get(key) || null;
+    if (batch && batch.capacity >= targetCount) {
+      return batch;
+    }
+
+    const nextCapacity = batch
+      ? Math.max(targetCount, batch.capacity * 2)
+      : Math.max(8, targetCount);
+    const geometry = CORONA_QUAD_GEOMETRY.clone();
+    const opacityAttr = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity), 1);
+    opacityAttr.setUsage(THREE.DynamicDrawUsage);
+    const rotationAttr = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity), 1);
+    rotationAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute('instanceOpacity', opacityAttr);
+    geometry.setAttribute('instanceRotation', rotationAttr);
+
+    const material = createCoronaBatchMaterial(this.resolveTexture(textureKey), depthTest);
+    const mesh = new THREE.InstancedMesh(geometry, material, nextCapacity);
+    mesh.count = 0;
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 90;
+    mesh.layers.disableAll();
+    mesh.layers.enable(0);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.userData = {
+      ...(mesh.userData || {}),
+      rwCoronaAux: true,
+      rwCoronaBatch: true,
+      rwCoronaTextureKey: textureKey,
+    };
+    if (mesh.instanceColor) {
+      mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+    }
+
+    if (batch?.mesh) {
+      const prevMesh = batch.mesh;
+      const prevCount = Math.min(batch.capacity, nextCapacity);
+      if (prevMesh.instanceMatrix?.array) {
+        mesh.instanceMatrix.array.set(prevMesh.instanceMatrix.array.subarray(0, prevCount * 16));
+      }
+      if (prevMesh.instanceColor?.array && mesh.instanceColor?.array) {
+        mesh.instanceColor.array.set(prevMesh.instanceColor.array.subarray(0, prevCount * 3));
+      }
+      opacityAttr.array.set(batch.opacityAttr.array.subarray(0, prevCount));
+      rotationAttr.array.set(batch.rotationAttr.array.subarray(0, prevCount));
+      if (prevMesh.parent) prevMesh.parent.remove(prevMesh);
+      prevMesh.geometry?.dispose?.();
+      prevMesh.material?.dispose?.();
+    }
+
+    this.spriteRoot.add(mesh);
+    batch = {
+      key,
+      textureKey,
+      depthTest,
+      mesh,
+      opacityAttr,
+      rotationAttr,
+      capacity: nextCapacity,
+    };
+    this.spriteBatches.set(key, batch);
+    return batch;
+  }
+
+  resetSpriteBatches() {
+    for (const batch of this.spriteBatches.values()) {
+      batch.mesh.count = 0;
+      batch.mesh.visible = false;
+    }
   }
 
   createLightBundle(emitter) {
@@ -596,6 +711,8 @@ export class RWCoronaPipeline {
     const sourceEntries = this.getFrameEntries(runtimeContext?.frameVisibility);
     const candidateEntries = [];
     const nextActiveEntries = new Set();
+    const lightAssignments = [];
+    const spriteAssignments = [];
 
     for (const entry of sourceEntries) {
       const emitter = entry.emitter;
@@ -614,10 +731,6 @@ export class RWCoronaPipeline {
           wantsShow,
         });
       } else {
-        if (entry.sprite) {
-          entry.sprite.visible = false;
-          entry.lastScreen = null;
-        }
         if (entry.light) entry.light.visible = false;
       }
     }
@@ -642,7 +755,7 @@ export class RWCoronaPipeline {
       const losVisible = targetStreamAlpha > 0 ? this.computeLosVisible(entry, camera, timeMs) : true;
       if (!losVisible) targetStreamAlpha = 0;
 
-      const needsScreenTest = entry.sprite && (
+      const needsScreenTest = emitter.textureKey && (
         targetStreamAlpha > 0
         || entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
         || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
@@ -652,8 +765,8 @@ export class RWCoronaPipeline {
         : null;
       let screen = currentScreen;
       let screenVisible = Boolean(screen);
-      if (entry.sprite && !screen) targetStreamAlpha = 0;
-      if (entry.sprite && screen) {
+      if (emitter.textureKey && !screen) targetStreamAlpha = 0;
+      if (emitter.textureKey && screen) {
         const offscreen = (
           screen.x < -OFFSCREEN_FADE_MARGIN
           || screen.x > (this.viewportWidth + OFFSCREEN_FADE_MARGIN)
@@ -664,7 +777,7 @@ export class RWCoronaPipeline {
           targetStreamAlpha = 0;
           screenVisible = false;
         }
-      } else if (entry.sprite) {
+      } else if (emitter.textureKey) {
         screenVisible = false;
       }
 
@@ -676,7 +789,7 @@ export class RWCoronaPipeline {
         config: fadeConfig,
         extraAlpha: 1,
       });
-      if (entry.sprite && screenVisible && screen && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
+      if (emitter.textureKey && screenVisible && screen && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon) {
         entry.lastScreen = {
           x: screen.x,
           y: screen.y,
@@ -685,14 +798,15 @@ export class RWCoronaPipeline {
           spriteW: screen.spriteW,
           spriteH: screen.spriteH,
         };
-      } else if (entry.sprite && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon && entry.lastScreen) {
+      } else if (emitter.textureKey && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon && entry.lastScreen) {
         screen = entry.lastScreen;
       }
 
-      if (entry.sprite) {
+      entry.spriteState = null;
+      entry.lightState = null;
+      if (emitter.textureKey) {
         const visible = this.enabled && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon && screenVisible;
-        entry.sprite.visible = Boolean(visible);
-        if (visible) {
+        if (visible && screen) {
           const color = normalizeEmitterColor(emitter.color);
           const coronaAlpha = clamp01((Number(emitter.alpha) || 255) / 255);
           const trafficLightSettings = runtimeContext?.trafficLights || null;
@@ -700,20 +814,25 @@ export class RWCoronaPipeline {
             ? (spriteBrightness * Math.max(0, Number(trafficLightSettings?.brightnessScale) || 0.7))
             : 1;
           const fogScale = (foggyness * Math.min(screen.z, 40) / 40) + 1;
-          entry.sprite.material.color.setRGB(
-            (color.r * trafficLightColorScale) / fogScale,
-            (color.g * trafficLightColorScale) / fogScale,
-            (color.b * trafficLightColorScale) / fogScale,
-            THREE.SRGBColorSpace,
-          );
-          entry.sprite.material.opacity = clamp01(entry.fadeAlpha * coronaAlpha);
-          entry.sprite.material.rotation = 20 * screen.recipZ;
           const trafficLightSizeScale = emitter.sourceType === 'trafficLight'
             ? spriteSize * Math.max(0.1, Number(trafficLightSettings?.sizeScale) || 1.75)
             : 1;
           const worldSize = Math.max(0.01, Number(emitter.size) || 1) * trafficLightSizeScale * fogScale * 2;
-          entry.sprite.position.copy(toVector3(emitter.position));
-          entry.sprite.scale.set(worldSize, worldSize, 1);
+          entry.spriteState = {
+            textureKey: emitter.textureKey,
+            depthTest: emitter.losCheck !== true,
+            position: toVector3(emitter.position),
+            scale: worldSize,
+            color: {
+              r: (color.r * trafficLightColorScale) / fogScale,
+              g: (color.g * trafficLightColorScale) / fogScale,
+              b: (color.b * trafficLightColorScale) / fogScale,
+            },
+            opacity: clamp01(entry.fadeAlpha * coronaAlpha),
+            rotation: 20 * screen.recipZ,
+            emitterId: emitter.id,
+          };
+          spriteAssignments.push(entry);
         } else if (entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) {
           entry.lastScreen = null;
         }
@@ -729,29 +848,23 @@ export class RWCoronaPipeline {
           && entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon;
         const color = normalizeEmitterColor(emitter.color);
         TMP_COLOR.setRGB(color.r, color.g, color.b, THREE.SRGBColorSpace);
-        entry.light.color.copy(TMP_COLOR);
-        entry.light.visible = visible;
         const brightnessScale = lightDescriptor.colorScale === 'spriteBrightness'
           ? spriteBrightness
           : 1;
-        entry.light.intensity = visible
-          ? (Number(lightDescriptor.intensity) || DEFAULT_POINT_LIGHT_INTENSITY) * brightnessScale * entry.fadeAlpha
-          : 0;
-        entry.light.position.copy(toVector3(emitter.position));
-        if ('distance' in entry.light) {
-          entry.light.distance = Math.max(0, Number(lightDescriptor.range) || 0);
-        }
-        if ('angle' in entry.light) {
-          entry.light.angle = calculateSpotAngle(lightDescriptor.directionAngle);
-        }
-        if ('penumbra' in entry.light) {
-          entry.light.penumbra = clamp01(Number(lightDescriptor.penumbra) || 0);
-        }
-        if (entry.lightTarget) {
-          TMP_DIRECTION.copy(toVector3(emitter.direction, [0, 0, -1])).normalize();
-          TMP_LOOK_TARGET.copy(entry.light.position).addScaledVector(TMP_DIRECTION, Math.max(1, Number(lightDescriptor.range) || 10));
-          entry.lightTarget.position.copy(TMP_LOOK_TARGET);
-          entry.lightTarget.updateMatrixWorld(true);
+        if (visible) {
+          entry.lightState = {
+            distance,
+            color: TMP_COLOR.clone(),
+            intensity: (Number(lightDescriptor.intensity) || DEFAULT_POINT_LIGHT_INTENSITY) * brightnessScale * entry.fadeAlpha,
+            position: toVector3(emitter.position),
+            range: Math.max(0, Number(lightDescriptor.range) || 0),
+            angle: calculateSpotAngle(lightDescriptor.directionAngle),
+            penumbra: clamp01(Number(lightDescriptor.penumbra) || 0),
+            direction: entry.lightTarget ? toVector3(emitter.direction, [0, 0, -1]).normalize() : null,
+          };
+          lightAssignments.push(entry);
+        } else {
+          entry.light.visible = false;
         }
       }
 
@@ -773,19 +886,85 @@ export class RWCoronaPipeline {
       if (
         entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
         || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon
-        || entry.sprite?.visible
         || entry.light?.visible
       ) {
         nextActiveEntries.add(entry);
       }
     }
 
+    lightAssignments.sort((left, right) => left.lightState.distance - right.lightState.distance);
+    const maxActiveLights = Math.max(
+      0,
+      Math.min(
+        Math.floor(Number(runtimeContext?.twoDfx?.maxActiveCoronaLights) || MAX_ACTIVE_CORONA_LIGHTS),
+        lightAssignments.length,
+      ),
+    );
+    for (let index = 0; index < lightAssignments.length; index += 1) {
+      const entry = lightAssignments[index];
+      const lightState = entry.lightState;
+      if (!entry.light || !lightState || index >= maxActiveLights) {
+        if (entry.light) entry.light.visible = false;
+        continue;
+      }
+      entry.light.color.copy(lightState.color);
+      entry.light.visible = true;
+      entry.light.intensity = lightState.intensity;
+      entry.light.position.copy(lightState.position);
+      if ('distance' in entry.light) {
+        entry.light.distance = lightState.range;
+      }
+      if ('angle' in entry.light) {
+        entry.light.angle = lightState.angle;
+      }
+      if ('penumbra' in entry.light) {
+        entry.light.penumbra = lightState.penumbra;
+      }
+      if (entry.lightTarget && lightState.direction) {
+        TMP_LOOK_TARGET.copy(lightState.position).addScaledVector(lightState.direction, Math.max(1, lightState.range || 10));
+        entry.lightTarget.position.copy(TMP_LOOK_TARGET);
+        entry.lightTarget.updateMatrixWorld(true);
+      }
+    }
+
+    this.resetSpriteBatches();
+    const spriteAssignmentsByBatch = new Map();
+    for (const entry of spriteAssignments) {
+      const spriteState = entry.spriteState;
+      if (!spriteState) continue;
+      const batchKey = this.getSpriteBatchKey(spriteState.textureKey, spriteState.depthTest);
+      const batchEntries = spriteAssignmentsByBatch.get(batchKey) || [];
+      batchEntries.push(spriteState);
+      spriteAssignmentsByBatch.set(batchKey, batchEntries);
+    }
+    TMP_QUATERNION.copy(camera.quaternion);
+    for (const [batchKey, batchEntries] of spriteAssignmentsByBatch.entries()) {
+      const firstState = batchEntries[0];
+      const batch = this.ensureSpriteBatchCapacity(firstState.textureKey, firstState.depthTest, batchEntries.length);
+      batch.mesh.visible = batchEntries.length > 0;
+      batch.mesh.count = batchEntries.length;
+      for (let index = 0; index < batchEntries.length; index += 1) {
+        const spriteState = batchEntries[index];
+        TMP_SCALE.set(spriteState.scale, spriteState.scale, 1);
+        TMP_POSITION.copy(spriteState.position);
+        batch.mesh.setMatrixAt(index, new THREE.Matrix4().compose(TMP_POSITION, TMP_QUATERNION, TMP_SCALE));
+        batch.mesh.setColorAt(index, TMP_COLOR.setRGB(
+          spriteState.color.r,
+          spriteState.color.g,
+          spriteState.color.b,
+          THREE.SRGBColorSpace,
+        ));
+        batch.opacityAttr.array[index] = spriteState.opacity;
+        batch.rotationAttr.array[index] = spriteState.rotation;
+      }
+      batch.mesh.instanceMatrix.needsUpdate = true;
+      if (batch.mesh.instanceColor) batch.mesh.instanceColor.needsUpdate = true;
+      batch.opacityAttr.needsUpdate = true;
+      batch.rotationAttr.needsUpdate = true;
+    }
+
     for (const entry of sourceEntries) {
       if (selectedEntries.has(entry)) continue;
-      if (entry.sprite && entry.fadeAlpha <= DISTANCE_FADE_DEFAULTS.epsilon) {
-        entry.sprite.visible = false;
-        entry.lastScreen = null;
-      }
       if (entry.light) entry.light.visible = false;
       if (
         entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
@@ -807,8 +986,6 @@ export class RWCoronaPipeline {
 
   disposeEntries() {
     for (const entry of this.entries) {
-      if (entry.sprite?.parent) entry.sprite.parent.remove(entry.sprite);
-      if (entry.sprite?.material) entry.sprite.material.dispose();
       if (entry.light?.parent) entry.light.parent.remove(entry.light);
       if (entry.lightTarget?.parent) entry.lightTarget.parent.remove(entry.lightTarget);
       if (entry.helperMesh?.parent) entry.helperMesh.parent.remove(entry.helperMesh);
@@ -818,18 +995,26 @@ export class RWCoronaPipeline {
       if (entry.helperLine?.material) entry.helperLine.material.dispose();
       entry.light?.dispose?.();
       entry.lightTarget = null;
-      entry.sprite = null;
       entry.light = null;
       entry.helperMesh = null;
       entry.helperLine = null;
+      entry.lightState = null;
+      entry.spriteState = null;
     }
     this.entries = [];
     this.entryByEmitter = new WeakMap();
     this.activeEntries.clear();
+    this.resetSpriteBatches();
   }
 
   dispose() {
     this.disposeEntries();
+    for (const batch of this.spriteBatches.values()) {
+      if (batch?.mesh?.parent) batch.mesh.parent.remove(batch.mesh);
+      batch?.mesh?.geometry?.dispose?.();
+      batch?.mesh?.material?.dispose?.();
+    }
+    this.spriteBatches.clear();
     if (this.lightRoot.parent) this.lightRoot.parent.remove(this.lightRoot);
     if (this.spriteRoot.parent) this.spriteRoot.parent.remove(this.spriteRoot);
     if (this.debugRoot.parent) this.debugRoot.parent.remove(this.debugRoot);
