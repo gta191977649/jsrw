@@ -43,6 +43,10 @@ const CHUNK_CULL_MARGIN_Y = WORLD_CHUNK_SIZE * 1.5;
 const RW_FADE_EPSILON = DISTANCE_FADE_DEFAULTS.epsilon;
 const FALLBACK_AMBIENT = new THREE.Color(1, 1, 1);
 const FALLBACK_EMISSIVE = new THREE.Color(0, 0, 0);
+const VIS_INVISIBLE = 0;
+const VIS_VISIBLE = 1;
+const VIS_OFFSCREEN = 2;
+const VIS_STREAMME = 3;
 
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
@@ -772,50 +776,174 @@ export class WorldStreamingRuntime {
     let visibleLod = 0;
     let activeFades = 0;
 
-    const processRenderItem = (item, { checkOcclusion = false } = {}) => {
-      if (!item || processedItems.has(item)) return;
-      processedItems.add(item);
+    const SetupBigBuildingVisibility = (ent, visibilityState) => {
+      const {
+        dist,
+        hasNear,
+        hasLod,
+        nearEndDistance,
+        lodEndDistance,
+        fadeEpsilon,
+        runtimeContext,
+      } = visibilityState;
+      const mi = {
+        nearDistance: nearEndDistance,
+        lodDistance: lodEndDistance,
+      };
+      const nonLOD = hasNear ? ent : null;
+      const nearResult = (() => {
+        const targetVisible = hasNear
+          && !forceLodOnly
+          && RenderEntityController.isWithinDrawDistance(dist, mi.nearDistance, distanceFadeConfig);
+        if (!ent.nearState) return { visible: false, opacity: 0 };
+        return {
+          visible: targetVisible,
+          opacity: RenderEntityController.updateFade(ent.nearState, {
+            targetVisible,
+            distance: dist,
+            drawDistance: mi.nearDistance,
+            dt,
+            config: distanceFadeConfig,
+            distanceDriven: true,
+          }),
+        };
+      })();
+      const lodResult = (() => {
+        const targetVisible = hasLod
+          && RenderEntityController.isWithinDrawDistance(dist, mi.lodDistance, distanceFadeConfig);
+        if (!ent.lodState) return { visible: false, opacity: 0 };
+        return {
+          visible: targetVisible,
+          opacity: RenderEntityController.updateFade(ent.lodState, {
+            targetVisible,
+            distance: dist,
+            drawDistance: mi.lodDistance,
+            dt,
+            config: distanceFadeConfig,
+            distanceDriven: true,
+          }),
+        };
+      })();
 
-      const distSq = camera.position.distanceToSquared(item.anchor);
-      const hasNear = hasNearRenderable(item);
-      const hasLod = hasLodRenderable(item);
-      const bypassCloseRangeFrustum = shouldBypassCloseRangeItemFrustum(item, distSq);
+      const previousRwObject = ent?.getActiveSide?.() || null;
+      const targetRwObject = resolveSingleEntityTargetSide(ent, {
+        dist,
+        drawDistance,
+        showLods,
+        forceLodOnly,
+      });
+
+      if (!targetRwObject) {
+        this.applySingleEntitySide(ent, null, 0, dirtyBatches, runtimeContext);
+        ent?.setMode?.('hidden');
+        ent.mode = 'hidden';
+        return {
+          visibility: VIS_INVISIBLE,
+          nearOpacity: 0,
+          lodOpacity: 0,
+          activeSide: null,
+        };
+      }
+
+      let nearOpacity = 0;
+      let lodOpacity = 0;
+      let activeSide = previousRwObject;
+
+      if (targetRwObject === 'near') {
+        nearOpacity = nearResult.opacity;
+        if (hasLod && lodResult.visible && nearOpacity < (1 - fadeEpsilon)) {
+          lodOpacity = Math.max(
+            lodResult.opacity,
+            previousRwObject === 'lod' || ent?.getSideOpacity?.('lod') > fadeEpsilon ? 1 : 0,
+          );
+        }
+        activeSide = nearOpacity >= (1 - fadeEpsilon)
+          ? 'near'
+          : (lodOpacity > fadeEpsilon ? 'lod' : 'near');
+      } else {
+        lodOpacity = lodResult.opacity;
+        if (nonLOD && nearResult.visible && lodOpacity < (1 - fadeEpsilon)) {
+          nearOpacity = Math.max(
+            nearResult.opacity,
+            previousRwObject === 'near' || ent?.getSideOpacity?.('near') > fadeEpsilon ? 1 : 0,
+          );
+        }
+        activeSide = lodOpacity >= (1 - fadeEpsilon)
+          ? 'lod'
+          : (nearOpacity > fadeEpsilon ? 'near' : 'lod');
+      }
+
+      this.applyRenderSideOpacity(ent, 'near', nearOpacity, dirtyBatches, runtimeContext);
+      this.applyRenderSideOpacity(ent, 'lod', lodOpacity, dirtyBatches, runtimeContext);
+
+      if (nearOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, ent, 'near');
+      if (lodOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, ent, 'lod');
+
+      const visibility = nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon
+        ? VIS_VISIBLE
+        : VIS_INVISIBLE;
+      const mode = nearOpacity > fadeEpsilon
+        ? (lodOpacity > fadeEpsilon ? 'near+lod' : 'near')
+        : (lodOpacity > fadeEpsilon ? 'lod' : 'hidden');
+
+      ent?.setMode?.(mode);
+      ent.mode = mode;
+      ent?.setActiveSide?.(activeSide);
+      ent?.setTransition?.(null);
+      if (nearOpacity > fadeEpsilon) visibleNear += 1;
+      if (lodOpacity > fadeEpsilon) visibleLod += 1;
+      if (visibility !== VIS_INVISIBLE) protectedItems.add(ent);
+
+      return {
+        visibility,
+        nearOpacity,
+        lodOpacity,
+        activeSide,
+      };
+    };
+
+    const SetupEntityVisibility = (ent, { checkOcclusion = false } = {}) => {
+      if (!ent || processedItems.has(ent)) return VIS_INVISIBLE;
+      processedItems.add(ent);
+
+      const distSq = camera.position.distanceToSquared(ent.anchor);
+      const hasNear = hasNearRenderable(ent);
+      const hasLod = hasLodRenderable(ent);
+      const bypassCloseRangeFrustum = shouldBypassCloseRangeItemFrustum(ent, distSq);
       const itemInFrustum = !enableOcclusion || bypassCloseRangeFrustum || (
-        isComplexFrustumItem(item)
+        isComplexFrustumItem(ent)
           ? (
-            item.boundingBox?.isBox3
-              ? chunkFrustum.intersectsBox(item.boundingBox)
-              : chunkFrustum.intersectsSphere(item.boundingSphere)
+            ent.boundingBox?.isBox3
+              ? chunkFrustum.intersectsBox(ent.boundingBox)
+              : chunkFrustum.intersectsSphere(ent.boundingSphere)
           )
-          : chunkFrustum.intersectsSphere(item.boundingSphere)
+          : chunkFrustum.intersectsSphere(ent.boundingSphere)
       );
       if (!itemInFrustum) {
-        this.hideRenderItemCompletely(item, dirtyBatches, context);
-        return;
+        this.hideRenderItemCompletely(ent, dirtyBatches, context);
+        return VIS_OFFSCREEN;
       }
-      if (enableOcclusion && checkOcclusion && isChunkOccluded(occlusionState, camera, item)) {
-        this.hideRenderItemCompletely(item, dirtyBatches, context);
-        return;
+      if (enableOcclusion && checkOcclusion && isChunkOccluded(occlusionState, camera, ent)) {
+        this.hideRenderItemCompletely(ent, dirtyBatches, context);
+        return VIS_OFFSCREEN;
       }
 
       activeItems += 1;
-      const tobjAllowed = !item.isTobj || showTobjs;
+      const tobjAllowed = !ent.isTobj || showTobjs;
       const dist = Math.sqrt(distSq);
       if (!tobjAllowed || !RenderEntityController.isWithinDrawDistance(dist, renderingDistance, distanceFadeConfig)) {
-        this.hideRenderItemCompletely(item, dirtyBatches, context);
-        return;
+        this.hideRenderItemCompletely(ent, dirtyBatches, context);
+        return VIS_INVISIBLE;
       }
 
       const pairedItem = hasNear && hasLod;
-      // Unpaired near (no LOD mesh) or near-only: never use the LOD switch slider as IDE fallback —
-      // that was clipping buildings with no paired LOD. Paired crossfade uses nearRangeEnd below.
       const nearConfiguredDistance = resolveRenderableDistance(
-        item?.getDrawDistance?.('near') ?? item.nearState?.drawDistance,
+        ent?.getDrawDistance?.('near') ?? ent.nearState?.drawDistance,
         renderingDistance,
       );
       const nearEndDistance = Math.min(nearConfiguredDistance, renderingDistance);
       const lodEndDistance = Math.min(
-        resolveRenderableDistance(item?.getDrawDistance?.('lod') ?? item.lodState?.drawDistance, renderingDistance),
+        resolveRenderableDistance(ent?.getDrawDistance?.('lod') ?? ent.lodState?.drawDistance, renderingDistance),
         renderingDistance,
       );
 
@@ -833,116 +961,27 @@ export class WorldStreamingRuntime {
         uiStateRef,
       };
 
-      if (item?.usesSingleRwPath?.()) {
-        const resolvedTargetSide = resolveSingleEntityTargetSide(item, {
+      if (ent?.usesSingleRwPath?.()) {
+        return SetupBigBuildingVisibility(ent, {
           dist,
-          drawDistance,
-          showLods,
-          forceLodOnly,
-        });
-        const computeSingleSideOpacity = (side) => {
-          if (side === 'near') {
-            const targetVisible = hasNear
-              && !forceLodOnly
-              && RenderEntityController.isWithinDrawDistance(dist, nearEndDistance, distanceFadeConfig);
-            if (!item.nearState) return { visible: false, opacity: 0 };
-            return {
-              visible: targetVisible,
-              opacity: RenderEntityController.updateFade(item.nearState, {
-                targetVisible,
-                distance: dist,
-                drawDistance: nearEndDistance,
-                dt,
-                config: distanceFadeConfig,
-                distanceDriven: true,
-              }),
-            };
-          }
-          const lodVisible = hasLod
-            && RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig);
-          if (!item.lodState) return { visible: false, opacity: 0 };
-          return {
-            visible: lodVisible,
-            opacity: RenderEntityController.updateFade(item.lodState, {
-              targetVisible: lodVisible,
-              distance: dist,
-              drawDistance: lodEndDistance,
-              dt,
-              config: distanceFadeConfig,
-              distanceDriven: true,
-            }),
-          };
-        };
-
-        const nearResult = computeSingleSideOpacity('near');
-        const lodResult = computeSingleSideOpacity('lod');
-        const previousActiveSide = item?.getActiveSide?.() || null;
-        let activeSide = previousActiveSide;
-
-        if (!resolvedTargetSide) {
-          this.applySingleEntitySide(item, null, 0, dirtyBatches, runtimeContext);
-          item?.setMode?.('hidden');
-          item.mode = 'hidden';
-          return;
-        }
-
-        if (resolvedTargetSide === 'near') {
-          nearShouldShow = nearResult.visible;
-          nearOpacity = nearResult.opacity;
-
-          // Match revc handoff: keep the LOD alive until the non-LOD has fully taken over.
-          if (hasLod && lodResult.visible && nearOpacity < (1 - fadeEpsilon)) {
-            lodShouldShow = true;
-            lodOpacity = Math.max(lodResult.opacity, previousActiveSide === 'lod' || item?.getSideOpacity?.('lod') > fadeEpsilon ? 1 : 0);
-          }
-
-          activeSide = nearOpacity >= (1 - fadeEpsilon)
-            ? 'near'
-            : (lodOpacity > fadeEpsilon ? 'lod' : 'near');
-        } else {
-          lodShouldShow = lodResult.visible;
-          lodOpacity = lodResult.opacity;
-
-          // Symmetric rule for near -> LOD: keep near visible until the LOD fully takes over.
-          if (hasNear && nearResult.visible && lodOpacity < (1 - fadeEpsilon)) {
-            nearShouldShow = true;
-            nearOpacity = Math.max(nearResult.opacity, previousActiveSide === 'near' || item?.getSideOpacity?.('near') > fadeEpsilon ? 1 : 0);
-          }
-
-          activeSide = lodOpacity >= (1 - fadeEpsilon)
-            ? 'lod'
-            : (nearOpacity > fadeEpsilon ? 'near' : 'lod');
-        }
-
-        this.applyRenderSideOpacity(item, 'near', nearOpacity, dirtyBatches, runtimeContext);
-        this.applyRenderSideOpacity(item, 'lod', lodOpacity, dirtyBatches, runtimeContext);
-
-        if (nearOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, item, 'near');
-        if (lodOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, item, 'lod');
-
-        const resolvedMode = nearOpacity > fadeEpsilon
-          ? (lodOpacity > fadeEpsilon ? 'near+lod' : 'near')
-          : (lodOpacity > fadeEpsilon ? 'lod' : 'hidden');
-        item?.setMode?.(resolvedMode);
-        item.mode = resolvedMode;
-        item?.setActiveSide?.(activeSide);
-        item?.setTransition?.(null);
-        if (nearOpacity > fadeEpsilon) visibleNear += 1;
-        if (lodOpacity > fadeEpsilon) visibleLod += 1;
-
-        if (nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon) protectedItems.add(item);
-        return;
+          hasNear,
+          hasLod,
+          nearEndDistance,
+          lodEndDistance,
+          fadeEpsilon,
+          runtimeContext,
+        }).visibility;
       }
 
       if (pairedItem && showLods && !forceLodOnly) {
-        const nearIdeDistance = resolveRenderableDistance(item?.getDrawDistance?.('near') ?? item.nearState?.drawDistance, renderingDistance);
+        const nearIdeDistance = resolveRenderableDistance(ent?.getDrawDistance?.('near') ?? ent.nearState?.drawDistance, renderingDistance);
         const nearRangeEnd = Math.min(drawDistance, nearIdeDistance, renderingDistance);
         const nearCoreRange = dist <= nearRangeEnd;
         const nearFadeRange = RenderEntityController.isWithinDrawDistance(dist, nearRangeEnd, distanceFadeConfig);
         const lodVisibleRange = RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig);
 
-        if (hasNear && item.nearState) {
-          nearOpacity = RenderEntityController.updateFade(item.nearState, {
+        if (hasNear && ent.nearState) {
+          nearOpacity = RenderEntityController.updateFade(ent.nearState, {
             targetVisible: nearFadeRange,
             distance: dist,
             drawDistance: nearRangeEnd,
@@ -951,8 +990,8 @@ export class WorldStreamingRuntime {
             distanceDriven: true,
           });
         }
-        if (hasLod && item.lodState) {
-          lodOpacity = RenderEntityController.updateFade(item.lodState, {
+        if (hasLod && ent.lodState) {
+          lodOpacity = RenderEntityController.updateFade(ent.lodState, {
             targetVisible: lodVisibleRange,
             distance: dist,
             drawDistance: lodEndDistance,
@@ -962,7 +1001,7 @@ export class WorldStreamingRuntime {
           });
         }
 
-        const nearStreamAlpha = item.nearState?.streamAlpha ?? 1;
+        const nearStreamAlpha = ent.nearState?.streamAlpha ?? 1;
         if (nearCoreRange) {
           lodOpacity = lodVisibleRange
             ? clamp01((nearStreamAlpha < (1 - fadeEpsilon) ? 1 : 0) * lodOpacity)
@@ -981,8 +1020,8 @@ export class WorldStreamingRuntime {
             || (showLods && (!hasNear || dist > drawDistance))
           );
 
-        if (hasNear && item.nearState) {
-          nearOpacity = RenderEntityController.updateFade(item.nearState, {
+        if (hasNear && ent.nearState) {
+          nearOpacity = RenderEntityController.updateFade(ent.nearState, {
             targetVisible: nearShouldShow,
             distance: dist,
             drawDistance: nearEndDistance,
@@ -995,8 +1034,8 @@ export class WorldStreamingRuntime {
         lodShouldShow = hasLod
           && RenderEntityController.isWithinDrawDistance(dist, lodEndDistance, distanceFadeConfig)
           && lodShouldShowBase;
-        if (hasLod && item.lodState) {
-          lodOpacity = RenderEntityController.updateFade(item.lodState, {
+        if (hasLod && ent.lodState) {
+          lodOpacity = RenderEntityController.updateFade(ent.lodState, {
             targetVisible: lodShouldShow,
             distance: dist,
             drawDistance: lodEndDistance,
@@ -1007,29 +1046,30 @@ export class WorldStreamingRuntime {
         }
       }
 
-      item?.setMode?.(nearOpacity > fadeEpsilon
+      ent?.setMode?.(nearOpacity > fadeEpsilon
         ? (lodOpacity > fadeEpsilon ? 'near+lod' : 'near')
         : (lodOpacity > fadeEpsilon ? 'lod' : 'hidden'));
-      item.mode = nearOpacity > fadeEpsilon
+      ent.mode = nearOpacity > fadeEpsilon
         ? (lodOpacity > fadeEpsilon ? 'near+lod' : 'near')
         : (lodOpacity > fadeEpsilon ? 'lod' : 'hidden');
 
       if (nearOpacity > fadeEpsilon) visibleNear += 1;
       if (lodOpacity > fadeEpsilon) visibleLod += 1;
 
-      this.applyRenderSideOpacity(item, 'near', nearOpacity, dirtyBatches, runtimeContext);
-      this.applyRenderSideOpacity(item, 'lod', lodOpacity, dirtyBatches, runtimeContext);
-      this.collectRenderSideFrameVisibility(frameVisibility, item, 'near');
-      this.collectRenderSideFrameVisibility(frameVisibility, item, 'lod');
+      this.applyRenderSideOpacity(ent, 'near', nearOpacity, dirtyBatches, runtimeContext);
+      this.applyRenderSideOpacity(ent, 'lod', lodOpacity, dirtyBatches, runtimeContext);
+      this.collectRenderSideFrameVisibility(frameVisibility, ent, 'near');
+      this.collectRenderSideFrameVisibility(frameVisibility, ent, 'lod');
 
       if (
         nearOpacity > fadeEpsilon
         || lodOpacity > fadeEpsilon
-        || (item.nearState?.streamAlpha ?? 0) > fadeEpsilon
-        || (hasLod && (item.lodState?.streamAlpha ?? 0) > fadeEpsilon)
+        || (ent.nearState?.streamAlpha ?? 0) > fadeEpsilon
+        || (hasLod && (ent.lodState?.streamAlpha ?? 0) > fadeEpsilon)
       ) {
-        protectedItems.add(item);
+        protectedItems.add(ent);
       }
+      return nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon ? VIS_VISIBLE : VIS_INVISIBLE;
     };
 
     for (const chunk of candidateChunks) {
@@ -1071,7 +1111,7 @@ export class WorldStreamingRuntime {
       for (const emitter of chunk.coronaEmitters) addCoronaCandidate(frameVisibility, emitter);
       for (const emitter of chunk.shadowEmitters) addShadowCandidate(frameVisibility, emitter);
       for (const item of chunk.items) {
-        processRenderItem(item);
+        SetupEntityVisibility(item);
       }
       if (enableOcclusion) {
         registerChunkOccluder(occlusionState, camera, chunk);
@@ -1079,7 +1119,7 @@ export class WorldStreamingRuntime {
     }
 
     for (const item of bigBuildingItems) {
-      processRenderItem(item, { checkOcclusion: true });
+      SetupEntityVisibility(item, { checkOcclusion: true });
     }
 
     for (const chunk of previousActiveChunks) {
