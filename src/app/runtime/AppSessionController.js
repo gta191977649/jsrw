@@ -29,6 +29,63 @@ export function yieldToNextTask() {
   });
 }
 
+function formatByteRate(bytesPerSecond) {
+  const value = Math.max(0, Number(bytesPerSecond) || 0);
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB/s`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB/s`;
+  return `${Math.round(value)} B/s`;
+}
+
+async function readResponseWithProgress(response, onProgress) {
+  const total = Math.max(0, Number(response.headers.get('content-length')) || 0);
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const buffer = await response.arrayBuffer();
+    onProgress?.({
+      active: true,
+      loaded: buffer.byteLength,
+      total,
+      speedBytesPerSecond: 0,
+      speedLabel: formatByteRate(0),
+      indeterminate: total <= 0,
+    });
+    return buffer;
+  }
+
+  const chunks = [];
+  let loaded = 0;
+  let chunkCount = 0;
+  const startedAt = performance.now();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    chunks.push(value);
+    loaded += value.byteLength;
+    chunkCount += 1;
+    const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
+    const speedBytesPerSecond = loaded / elapsedSeconds;
+    onProgress?.({
+      active: true,
+      loaded,
+      total,
+      speedBytesPerSecond,
+      speedLabel: formatByteRate(speedBytesPerSecond),
+      indeterminate: total <= 0,
+      chunkCount,
+    });
+  }
+
+  const merged = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged.buffer;
+}
+
 export function createAppSessionController(options = {}) {
   const {
     activeBackend,
@@ -92,6 +149,7 @@ export function createAppSessionController(options = {}) {
     pushLoadedFileConsoleEvent,
     resetImguiTextureCache,
     setResolvedParticleTextures,
+    setDefaultMapDownload,
   } = callbacks;
 
   const applyImportedEntries = (entries, options = {}) => {
@@ -143,12 +201,30 @@ export function createAppSessionController(options = {}) {
   const loadDefaultMap = async (sourceUrl, sourceLabel) => {
     setStatus(`Loading ${sourceLabel}...`);
     pushConsoleLine('info', `Fetching default map: ${sourceLabel}`);
+    setDefaultMapDownload?.({
+      active: true,
+      label: sourceLabel,
+      loaded: 0,
+      total: 0,
+      speedBytesPerSecond: 0,
+      speedLabel: formatByteRate(0),
+      indeterminate: true,
+    });
     try {
       const response = await fetch(sourceUrl);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
       }
-      const archiveBuffer = await response.arrayBuffer();
+      const archiveBuffer = await readResponseWithProgress(response, (progress) => {
+        setDefaultMapDownload?.({
+          ...progress,
+          label: sourceLabel,
+        });
+        const percent = progress.total > 0
+          ? `${Math.floor((progress.loaded / Math.max(progress.total, 1)) * 100)}%`
+          : `${Math.round(progress.loaded / 1024)} KB`;
+        setStatus(`Downloading ${sourceLabel}... ${percent} @ ${progress.speedLabel}`);
+      });
       const archiveFile = new File([archiveBuffer], sourceLabel, {
         lastModified: Date.now(),
         type: 'application/zip',
@@ -157,6 +233,16 @@ export function createAppSessionController(options = {}) {
     } catch (error) {
       setStatus(`Failed to load ${sourceLabel}.`);
       pushConsoleLine('error', `Default map load failed: ${sourceLabel} | ${formatConsoleArg(error)}`);
+    } finally {
+      setDefaultMapDownload?.({
+        active: false,
+        label: sourceLabel,
+        loaded: 0,
+        total: 0,
+        speedBytesPerSecond: 0,
+        speedLabel: '',
+        indeterminate: false,
+      });
     }
   };
 

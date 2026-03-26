@@ -218,6 +218,14 @@ function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
 }
 
+function formatByteCount(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${Math.round(bytes)} B`;
+}
+
 function runImguiSlider(ImGui, {
   type = 'float',
   id,
@@ -863,6 +871,15 @@ function App() {
   const [status, setStatus] = useState('Select an extracted GTA folder or zip archive to begin.');
   const [activeBackend, setActiveBackend] = useState('WebGL');
   const [buildProgress, setBuildProgress] = useState({ active: false, current: 0, total: 0 });
+  const [defaultMapDownload, setDefaultMapDownload] = useState({
+    active: false,
+    label: '',
+    loaded: 0,
+    total: 0,
+    speedBytesPerSecond: 0,
+    speedLabel: '',
+    indeterminate: false,
+  });
   const [showGameIcon, setShowGameIcon] = useState(false);
   const [stats, setStats] = useState({
     files: 0,
@@ -892,6 +909,7 @@ function App() {
   const statusRef = useRef(status);
   const statsRef = useRef(stats);
   const buildProgressRef = useRef(buildProgress);
+  const defaultMapDownloadRef = useRef(defaultMapDownload);
   const showGameIconRef = useRef(showGameIcon);
   const consoleLinesRef = useRef(consoleLines);
   const failedModelsRef = useRef(failedModels);
@@ -908,6 +926,10 @@ function App() {
   useEffect(() => {
     buildProgressRef.current = buildProgress;
   }, [buildProgress]);
+
+  useEffect(() => {
+    defaultMapDownloadRef.current = defaultMapDownload;
+  }, [defaultMapDownload]);
 
   useEffect(() => {
     showGameIconRef.current = showGameIcon;
@@ -1097,6 +1119,7 @@ function App() {
       pushLoadedFileConsoleEvent,
       resetImguiTextureCache,
       setResolvedParticleTextures: applyResolvedParticleTextures,
+      setDefaultMapDownload,
     },
   }), [
     activeBackend,
@@ -1106,6 +1129,7 @@ function App() {
     pushLoadedFile,
     pushLoadedFileConsoleEvent,
     resetImguiTextureCache,
+    setDefaultMapDownload,
   ]);
 
   useEffect(() => {
@@ -2385,6 +2409,21 @@ function App() {
             progressFraction,
             new Vec2(-1, 0),
             `${Math.floor(progressFraction * 100)}% (${liveProgress.current}/${progressTotal})`,
+          );
+        }
+        const liveDefaultMapDownload = defaultMapDownloadRef.current;
+        if (liveDefaultMapDownload.active) {
+          const total = Math.max(1, liveDefaultMapDownload.total);
+          const fraction = liveDefaultMapDownload.indeterminate
+            ? 0
+            : clamp01(liveDefaultMapDownload.loaded / total);
+          ImGui.Text(`Downloading ${liveDefaultMapDownload.label || 'map archive'} @ ${liveDefaultMapDownload.speedLabel || '0 B/s'}`);
+          ImGui.ProgressBar(
+            fraction,
+            new Vec2(-1, 0),
+            liveDefaultMapDownload.indeterminate
+              ? `${formatByteCount(liveDefaultMapDownload.loaded)} downloaded`
+              : `${Math.floor(fraction * 100)}% (${formatByteCount(liveDefaultMapDownload.loaded)}/${formatByteCount(liveDefaultMapDownload.total)})`,
           );
         }
 
@@ -3899,6 +3938,29 @@ function App() {
         <button type="button" onClick={rebuildWorld}>Build World</button>
         <button type="button" onClick={clearWorld}>Clear</button>
         <p>{fileSummary}</p>
+        {defaultMapDownload.active ? (
+          <div className="hud-progress">
+            <div className="hud-progress__label">
+              <span>Downloading {defaultMapDownload.label}</span>
+              <span>{defaultMapDownload.speedLabel || '0 B/s'}</span>
+            </div>
+            <div className="hud-progress__bar">
+              <div
+                className="hud-progress__fill"
+                style={{
+                  width: defaultMapDownload.indeterminate
+                    ? '100%'
+                    : `${clamp01(defaultMapDownload.loaded / Math.max(defaultMapDownload.total, 1)) * 100}%`,
+                }}
+              />
+            </div>
+            <p className="hud-progress__meta">
+              {defaultMapDownload.indeterminate
+                ? `${formatByteCount(defaultMapDownload.loaded)} downloaded`
+                : `${formatByteCount(defaultMapDownload.loaded)} / ${formatByteCount(defaultMapDownload.total)}`}
+            </p>
+          </div>
+        ) : null}
         <p>{status}</p>
       </div>
     </div>
