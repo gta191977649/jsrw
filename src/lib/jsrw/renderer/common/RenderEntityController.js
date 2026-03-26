@@ -1,7 +1,6 @@
 import {
   DISTANCE_FADE_DEFAULTS,
   resolveDistanceFadeConfig,
-  approachValue,
   computeDistanceFadeAlpha,
   isDistanceWithinFadeWindow,
 } from '../../gta/core/DistanceFade.js';
@@ -48,10 +47,12 @@ export class RenderEntityController {
     const targetVisible = options.targetVisible === true;
     const distance = Number(options.distance) || 0;
     const drawDistance = Number(options.drawDistance) || 0;
-    const dt = Math.max(0, Number(options.dt) || 0);
     const extraAlpha = Math.max(0, Number.isFinite(Number(options.extraAlpha)) ? Number(options.extraAlpha) : 1);
 
-    entry.streamAlpha = approachValue(Number(entry.streamAlpha) || 0, targetVisible ? 1 : 0, dt * fadeConfig.streamAlphaPerSecond);
+    // Align more closely with revc-style distance fading:
+    // visibility alpha should react immediately to the current target state,
+    // and the actual fade should come from distance-based alpha, not a slow temporal lerp.
+    entry.streamAlpha = targetVisible ? 1 : 0;
     entry.fadeAlpha = Math.max(
       0,
       Math.min(1, entry.streamAlpha * computeDistanceFadeAlpha(distance, drawDistance, fadeConfig) * extraAlpha),

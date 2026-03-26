@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import {
   DISTANCE_FADE_DEFAULTS,
   resolveRenderableDistance,
@@ -19,23 +18,12 @@ import {
 } from '../core/Occlusion.js';
 import RenderEntityController from '../../renderer/common/RenderEntityController.js';
 import {
-  applyDisableVertexColor,
   createThreeMaterialFromRW,
   getRWMaterialDescriptor,
-  prepareTobjInstanceMaterials,
 } from '../../adapters/three/ThreeMaterialAdapter.js';
-import { applyRwIdeFlagsToInstance } from '../../adapters/three/RwIdeFlagsAdapter.js';
 import { cloneRwMaterialDescriptor as cloneRWMaterialDescriptor } from '../../core/material/RwMaterialDescriptor.js';
 import { createRWPipelineMaterialForProfile } from '../../renderer/world/createDefaultPipelineRegistry.js';
-import {
-  applyGlobalBackfaceCulling,
-  applyWireframe,
-  WORLD_CHUNK_SIZE,
-} from '../../utils/worldUtils.js';
-import {
-  createRwPipelineTarget,
-  toThreeColorFromTimecycleValue,
-} from '../integration/sessionHelpers.js';
+import { WORLD_CHUNK_SIZE } from '../../utils/worldUtils.js';
 
 const CHUNK_ACTIVE_MARGIN = 384;
 const CHUNK_CULL_MARGIN_XZ = WORLD_CHUNK_SIZE * 1.0;
@@ -66,17 +54,6 @@ function getCachedQueueMeshes(root) {
   if (!root?.traverse) return [];
   if (Array.isArray(root.userData?.rwQueueMeshes)) return root.userData.rwQueueMeshes;
   return collectQueueMeshes(root);
-}
-
-function disposeObjectMaterialsOnly(root) {
-  if (!root?.traverse) return;
-  root.traverse((node) => {
-    if (!node.isMesh) return;
-    const materials = Array.isArray(node.material) ? node.material : [node.material];
-    for (const material of materials) {
-      material?.dispose?.();
-    }
-  });
 }
 
 function createFadeMaterial(material, geometry) {
@@ -139,6 +116,14 @@ function createFadeMaterial(material, geometry) {
     fadeDescriptor.depthWrite = false;
     fadeDescriptor.alphaRef = 0;
     fadeDescriptor.opacity = 1;
+    const pipelineMaterial = createRWPipelineMaterialForProfile(
+      material.userData?.rwPipelineProfileId,
+      {
+        descriptor: fadeDescriptor,
+        geometry,
+      },
+    );
+    if (pipelineMaterial) return pipelineMaterial;
     return createThreeMaterialFromRW(fadeDescriptor, geometry);
   }
 
@@ -155,22 +140,16 @@ function createFadeMaterial(material, geometry) {
   return cloned;
 }
 
-function setFadeProxyOpacity(proxyRoot, opacity) {
-  const clampedOpacity = clamp01(opacity);
-  const materials = Array.isArray(proxyRoot?.userData?.rwFadeMaterials) ? proxyRoot.userData.rwFadeMaterials : [];
-  for (const material of materials) {
-    if (!material) continue;
-    const descriptor = getRWMaterialDescriptor(material);
-    if (descriptor) descriptor.opacity = clampedOpacity;
-    material.opacity = clampedOpacity;
-    if (material.uniforms?.opacity) {
-      material.uniforms.opacity.value = clampedOpacity;
-    }
-  }
-}
-
 function flushDirtyInstancedBatch(batch) {
   if (!batch?.mesh || !Array.isArray(batch.entries)) return;
+  let requiredVisibleCount = 0;
+  for (const handle of batch.entries) {
+    if (handle?.visible) requiredVisibleCount += 1;
+  }
+  if (typeof batch.ensureCapacity === 'function') {
+    batch.ensureCapacity(requiredVisibleCount);
+  }
+  const opacityAttribute = batch.mesh.geometry?.getAttribute?.('instanceOpacity') || null;
   let activeIndex = 0;
   batch.activeEntries.length = 0;
   for (const handle of batch.entries) {
@@ -179,6 +158,9 @@ function flushDirtyInstancedBatch(batch) {
       continue;
     }
     batch.mesh.setMatrixAt(activeIndex, handle.matrix);
+    if (opacityAttribute?.setX) {
+      opacityAttribute.setX(activeIndex, Number.isFinite(handle.opacity) ? handle.opacity : 1);
+    }
     handle.activeIndex = activeIndex;
     batch.activeEntries.push(handle);
     activeIndex += 1;
@@ -188,8 +170,70 @@ function flushDirtyInstancedBatch(batch) {
   batch.mesh.visible = activeIndex > 0;
   batch.mesh.userData.rwInstanceEntries = batch.activeEntries;
   batch.mesh.instanceMatrix.needsUpdate = true;
+  if (opacityAttribute) opacityAttribute.needsUpdate = true;
   batch.mesh.boundingBox = null;
   batch.mesh.boundingSphere = null;
+}
+
+function updateInstancedBatchFadeMode(batch, rwRenderQueueRef) {
+  const mesh = batch?.mesh;
+  const materials = Array.isArray(mesh?.material) ? mesh.material : [mesh?.material];
+  if (!mesh || materials.length === 0) return;
+  const hasPartialOpacity = batch.activeEntries.some((handle) => {
+    const opacity = Number(handle?.opacity);
+    return Number.isFinite(opacity) && opacity > RW_FADE_EPSILON && opacity < (1 - RW_FADE_EPSILON);
+  });
+  if (batch.hasPartialOpacity === hasPartialOpacity) return;
+  batch.hasPartialOpacity = hasPartialOpacity;
+  for (const material of materials) {
+    if (!material) continue;
+    const descriptor = getRWMaterialDescriptor(material);
+    const baseState = material.userData?.rwInstancedFadeBase || {
+      transparent: Boolean(material.transparent),
+      depthWrite: material.depthWrite !== false,
+      alphaTest: material.alphaTest ?? 0,
+      blending: material.blending,
+      descriptorTransparent: Boolean(descriptor?.transparent),
+      descriptorDepthWrite: descriptor?.depthWrite !== false,
+      descriptorAlphaRef: descriptor?.alphaRef ?? 0,
+      descriptorBlending: descriptor?.blending,
+      descriptorAlphaMode: descriptor?.alphaMode || 'opaque',
+      descriptorRenderBucket: descriptor?.renderBucket || 'opaque',
+    };
+    material.userData = {
+      ...(material.userData || {}),
+      rwInstancedFadeBase: baseState,
+    };
+    if (hasPartialOpacity) {
+      material.transparent = true;
+      material.depthWrite = false;
+      material.alphaTest = 0;
+      material.blending = descriptor?.rwFlags?.additive ? THREE.AdditiveBlending : THREE.NormalBlending;
+      if (descriptor) {
+        descriptor.transparent = true;
+        descriptor.depthWrite = false;
+        descriptor.alphaRef = 0;
+        descriptor.blending = material.blending;
+        descriptor.alphaMode = descriptor.rwFlags?.additive ? 'additive' : 'blend';
+        descriptor.renderBucket = descriptor.rwFlags?.additive ? 'additive' : 'transparent';
+      }
+    } else {
+      material.transparent = baseState.transparent;
+      material.depthWrite = baseState.depthWrite;
+      material.alphaTest = baseState.alphaTest;
+      material.blending = baseState.blending;
+      if (descriptor) {
+        descriptor.transparent = baseState.descriptorTransparent;
+        descriptor.depthWrite = baseState.descriptorDepthWrite;
+        descriptor.alphaRef = baseState.descriptorAlphaRef;
+        descriptor.blending = baseState.descriptorBlending;
+        descriptor.alphaMode = baseState.descriptorAlphaMode;
+        descriptor.renderBucket = baseState.descriptorRenderBucket;
+      }
+    }
+    material.needsUpdate = true;
+  }
+  rwRenderQueueRef?.current?.markDirty?.();
 }
 
 function setInstanceHandlesVisible(handles, visible, dirtyBatches) {
@@ -199,6 +243,21 @@ function setInstanceHandlesVisible(handles, visible, dirtyBatches) {
     if (!handle?.batch?.mesh || handle.visible === visible) continue;
     handle.visible = visible;
     handle.batch.visibleCount += visible ? 1 : -1;
+    dirtyBatches?.add(handle.batch);
+  }
+}
+
+function setInstanceHandlesOpacity(handles, opacity, dirtyBatches) {
+  if (!Array.isArray(handles) || handles.length === 0) return;
+  const clampedOpacity = clamp01(opacity);
+  for (const handle of handles) {
+    if (!handle?.batch?.mesh) continue;
+    const nextVisible = clampedOpacity > RW_FADE_EPSILON;
+    const opacityChanged = Math.abs((Number(handle.opacity) || 0) - clampedOpacity) > RW_FADE_EPSILON;
+    const visibilityChanged = handle.visible !== nextVisible;
+    if (!opacityChanged && !visibilityChanged) continue;
+    handle.opacity = clampedOpacity;
+    handle.visible = nextVisible;
     dirtyBatches?.add(handle.batch);
   }
 }
@@ -227,6 +286,13 @@ function ensureRenderSideObjectFade(sideState) {
       node,
       originalMaterial: node.material,
       fadeMaterials,
+      originalState: sourceMaterials.map((material) => ({
+        transparent: Boolean(material?.transparent),
+        opacity: typeof material?.opacity === 'number' ? material.opacity : 1,
+        depthWrite: material?.depthWrite !== false,
+        alphaTest: material?.alphaTest ?? 0,
+        blending: material?.blending,
+      })),
     });
     node.material = Array.isArray(node.material) ? fadeMaterials : fadeMaterials[0];
   });
@@ -238,14 +304,39 @@ function setRenderSideObjectFadeOpacity(sideState, opacity) {
   const bindings = Array.isArray(sideState?.fadeBindings) ? sideState.fadeBindings : [];
   const clampedOpacity = clamp01(opacity);
   for (const binding of bindings) {
-    for (const material of binding.fadeMaterials) {
+    binding.fadeMaterials.forEach((material, index) => {
+      const originalState = binding.originalState[index] || binding.originalState[0] || null;
+      if (!material) return;
       const descriptor = getRWMaterialDescriptor(material);
-      if (descriptor) descriptor.opacity = clampedOpacity;
+      if (descriptor) {
+        descriptor.opacity = clampedOpacity;
+        descriptor.transparent = true;
+        descriptor.depthWrite = false;
+        descriptor.alphaRef = 0;
+        if (descriptor.rwFlags?.additive) {
+          descriptor.alphaMode = 'additive';
+          descriptor.blending = THREE.AdditiveBlending;
+          descriptor.renderBucket = 'additive';
+        } else {
+          descriptor.alphaMode = 'blend';
+          descriptor.blending = THREE.NormalBlending;
+          descriptor.renderBucket = 'transparent';
+        }
+      }
+      material.transparent = true;
       material.opacity = clampedOpacity;
+      material.depthWrite = false;
+      material.alphaTest = 0;
+      if ((descriptor?.rwFlags?.additive ?? false) || originalState?.blending === THREE.AdditiveBlending) {
+        material.blending = THREE.AdditiveBlending;
+      } else {
+        material.blending = THREE.NormalBlending;
+      }
       if (material.uniforms?.opacity) {
         material.uniforms.opacity.value = clampedOpacity;
       }
-    }
+      material.needsUpdate = true;
+    });
   }
 }
 
@@ -254,9 +345,30 @@ function disposeRenderSideObjectFade(sideState) {
   if (!bindings) return false;
   for (const binding of bindings) {
     binding.node.material = binding.originalMaterial;
-    for (const material of binding.fadeMaterials) {
-      material?.dispose?.();
-    }
+    binding.fadeMaterials.forEach((material, index) => {
+      const originalState = binding.originalState[index] || binding.originalState[0] || null;
+      if (!material || !originalState) return;
+      const descriptor = getRWMaterialDescriptor(material);
+      if (descriptor) {
+        descriptor.opacity = originalState.opacity;
+        descriptor.transparent = originalState.transparent;
+        descriptor.depthWrite = originalState.depthWrite;
+        descriptor.alphaRef = originalState.alphaTest;
+        descriptor.blending = originalState.blending;
+        descriptor.alphaMode = originalState.transparent ? 'blend' : 'opaque';
+        descriptor.renderBucket = originalState.transparent ? 'transparent' : 'opaque';
+      }
+      material.transparent = originalState.transparent;
+      material.opacity = originalState.opacity;
+      material.depthWrite = originalState.depthWrite;
+      material.alphaTest = originalState.alphaTest;
+      material.blending = originalState.blending;
+      if (material.uniforms?.opacity) {
+        material.uniforms.opacity.value = originalState.opacity;
+      }
+      material.needsUpdate = true;
+      material.dispose?.();
+    });
   }
   sideState.fadeBindings = null;
   return true;
@@ -308,102 +420,6 @@ export class WorldStreamingRuntime {
     this.rendererSession = options.rendererSession || null;
   }
 
-  buildRenderSideFadeProxy(item, side, context) {
-    const sideState = side === 'near' ? item?.nearState : item?.lodState;
-    if (!sideState?.template?.traverse || !sideState?.placementMatrix) return null;
-
-    const { uiStateRef, worldGameVersionRef } = context;
-    const proxy = SkeletonUtils.clone(sideState.template);
-    proxy.name = `${side}_fade_proxy`;
-    proxy.applyMatrix4(sideState.placementMatrix);
-    applyWireframe(proxy, uiStateRef.current.wireframe);
-    if (sideState.isTobj) {
-      prepareTobjInstanceMaterials(proxy, uiStateRef.current.disableVertexColor);
-    }
-    applyRwIdeFlagsToInstance(proxy, sideState.ideFlags || 0);
-    applyDisableVertexColor(proxy, uiStateRef.current.disableVertexColor);
-    applyGlobalBackfaceCulling(proxy, uiStateRef.current.disableBackfaceCulling);
-    proxy.visible = false;
-    proxy.userData = {
-      ...(proxy.userData || {}),
-      rwFadeProxy: true,
-      selectableRoot: false,
-      objectDetail: sideState.objectDetail || null,
-      isTobj: Boolean(sideState.isTobj),
-      rwPipelineTarget: createRwPipelineTarget(worldGameVersionRef.current, sideState.isTobj),
-      rwQueueRenderClass: 'building',
-    };
-
-    const fadeMaterials = [];
-    proxy.traverse((node) => {
-      if (!node.isObject3D) return;
-      node.matrixAutoUpdate = false;
-      node.matrixWorldAutoUpdate = false;
-      if (!node.isMesh) return;
-      node.frustumCulled = false;
-      node.raycast = () => {};
-      const sourceMaterials = Array.isArray(node.material) ? node.material : [node.material];
-      const nextMaterials = sourceMaterials.map((material) => {
-        const fadeMaterial = createFadeMaterial(material, node.geometry);
-        if (fadeMaterial) fadeMaterials.push(fadeMaterial);
-        return fadeMaterial;
-      });
-      node.material = Array.isArray(node.material) ? nextMaterials : nextMaterials[0];
-    });
-    proxy.userData.rwFadeMaterials = fadeMaterials;
-    collectQueueMeshes(proxy);
-    proxy.updateMatrixWorld(true);
-    return proxy;
-  }
-
-  disposeRenderSideFadeProxy(sideState) {
-    const proxyRoot = sideState?.proxyRoot;
-    if (!proxyRoot) return false;
-    if (proxyRoot.parent) proxyRoot.parent.remove(proxyRoot);
-    disposeObjectMaterialsOnly(proxyRoot);
-    sideState.proxyRoot = null;
-    sideState.currentOpacity = 0;
-    return true;
-  }
-
-  ensureRenderSideFadeProxy(item, side, context) {
-    const sideState = side === 'near' ? item?.nearState : item?.lodState;
-    if (!sideState) return null;
-    if (sideState.proxyRoot) return sideState.proxyRoot;
-
-    const {
-      activeBackend,
-      uiStateRef,
-      worldGameVersionRef,
-      timecycleStateRef,
-      worldRootRef,
-      rwRenderQueueRef,
-    } = context;
-    const proxy = this.buildRenderSideFadeProxy(item, side, context);
-    if (!proxy) return null;
-    worldRootRef.current.add(proxy);
-    sideState.proxyRoot = proxy;
-    this.rendererSession?.setBackend(activeBackend);
-    this.rendererSession?.applyToObject(proxy, {
-      activeBackend,
-      worldGameVersion: worldGameVersionRef.current,
-      timecycleCurrent: timecycleStateRef.current?.current,
-      ambientColor: timecycleStateRef.current?.current?.values?.ambient
-        ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
-        : FALLBACK_AMBIENT,
-      emissiveColor: timecycleStateRef.current?.current?.values?.ambientBl
-        ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambientBl)
-        : FALLBACK_EMISSIVE,
-      fallbackAmbient: FALLBACK_AMBIENT,
-      fallbackEmissive: FALLBACK_EMISSIVE,
-    });
-    applyWireframe(proxy, uiStateRef.current.wireframe);
-    applyDisableVertexColor(proxy, uiStateRef.current.disableVertexColor);
-    applyGlobalBackfaceCulling(proxy, uiStateRef.current.disableBackfaceCulling);
-    rwRenderQueueRef.current?.markDirty?.();
-    return proxy;
-  }
-
   applyRenderSideOpacity(item, side, opacity, dirtyBatches, context) {
     const sideState = side === 'near' ? item?.nearState : item?.lodState;
     const { rwRenderQueueRef } = context;
@@ -413,37 +429,33 @@ export class WorldStreamingRuntime {
     if (clampedOpacity <= RW_FADE_EPSILON) {
       if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty?.();
       setRenderSideOriginalVisible(item, side, false, dirtyBatches);
-      if (this.disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty?.();
       sideState.currentOpacity = 0;
       return false;
     }
 
     if (clampedOpacity >= (1 - RW_FADE_EPSILON)) {
       if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty?.();
-      if (this.disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty?.();
       setRenderSideOriginalVisible(item, side, true, dirtyBatches);
       sideState.currentOpacity = 1;
       return false;
     }
 
     if (ensureRenderSideObjectFade(sideState)) {
-      if (this.disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty?.();
       sideState.renderObject.visible = true;
       setRenderSideObjectFadeOpacity(sideState, clampedOpacity);
       sideState.currentOpacity = clampedOpacity;
       return false;
     }
 
-    setRenderSideOriginalVisible(item, side, false, dirtyBatches);
-    const proxy = this.ensureRenderSideFadeProxy(item, side, context);
-    if (!proxy) {
-      setRenderSideOriginalVisible(item, side, true, dirtyBatches);
-      sideState.currentOpacity = 1;
+    const handles = side === 'near' ? item?.nearHandles : item?.lodHandles;
+    if (Array.isArray(handles) && handles.length > 0) {
+      setInstanceHandlesOpacity(handles, clampedOpacity, dirtyBatches);
+      sideState.currentOpacity = clampedOpacity;
       return false;
     }
-    setFadeProxyOpacity(proxy, clampedOpacity);
-    proxy.visible = true;
-    sideState.currentOpacity = clampedOpacity;
+
+    setRenderSideOriginalVisible(item, side, clampedOpacity >= 0.5, dirtyBatches);
+    sideState.currentOpacity = clampedOpacity >= 0.5 ? 1 : 0;
     return true;
   }
 
@@ -457,8 +469,6 @@ export class WorldStreamingRuntime {
     let queueDirty = false;
     if (disposeRenderSideObjectFade(item?.nearState)) queueDirty = true;
     if (disposeRenderSideObjectFade(item?.lodState)) queueDirty = true;
-    if (this.disposeRenderSideFadeProxy(item?.nearState)) queueDirty = true;
-    if (this.disposeRenderSideFadeProxy(item?.lodState)) queueDirty = true;
     if (queueDirty) rwRenderQueueRef.current?.markDirty?.();
   }
 
@@ -507,13 +517,6 @@ export class WorldStreamingRuntime {
 
     addVisibleItem(frameVisibility, item);
 
-    if (sideState.proxyRoot?.visible) {
-      for (const mesh of getCachedQueueMeshes(sideState.proxyRoot)) {
-        addVisibleQueueMesh(frameVisibility, mesh);
-      }
-      return;
-    }
-
     if (sideState.renderObject?.visible) {
       for (const mesh of getCachedQueueMeshes(sideState.renderObject)) {
         addVisibleQueueMesh(frameVisibility, mesh);
@@ -561,6 +564,7 @@ export class WorldStreamingRuntime {
     const forceLodOnly = uiStateRef.current.forceLodOnly;
     const showTobjs = uiStateRef.current.showTobjs;
     const enableOcclusion = uiStateRef.current.enableOcclusion === true;
+    const workerPlan = context.workerPlan || null;
 
     const configChanged = (
       lodState.lastDrawDistance !== drawDistance
@@ -631,13 +635,26 @@ export class WorldStreamingRuntime {
     // Always scan out to the camera far clip. Pairing only affects near vs LOD *inside* a chunk;
     // capping scan by the LOD switch distance would skip whole chunks and hide distant LOD meshes.
     const chunkScanDistance = renderingDistance;
-    const candidateChunks = this.collectGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef);
-    candidateChunks.sort((a, b) => {
-      const da = camera.position.distanceToSquared(a.center);
-      const db = camera.position.distanceToSquared(b.center);
-      return da - db;
-    });
+    const workerCandidateChunks = Array.isArray(workerPlan?.candidateChunkKeys)
+      ? workerPlan.candidateChunkKeys
+        .map((key) => renderChunkLookupRef.current?.get?.(key) || null)
+        .filter(Boolean)
+      : null;
+    const candidateChunks = workerCandidateChunks || this.collectGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef);
+    if (!workerCandidateChunks) {
+      candidateChunks.sort((a, b) => {
+        const da = camera.position.distanceToSquared(a.center);
+        const db = camera.position.distanceToSquared(b.center);
+        return da - db;
+      });
+    }
     const occlusionState = resetChunkOcclusionState(chunkOcclusionStateRef.current);
+    const workerFrustumChunkKeys = Array.isArray(workerPlan?.frustumChunkKeys)
+      ? new Set(workerPlan.frustumChunkKeys)
+      : null;
+    const workerVisibleChunkKeys = Array.isArray(workerPlan?.visibleChunkKeys)
+      ? new Set(workerPlan.visibleChunkKeys)
+      : null;
     const bigBuildingItems = bigBuildingItemsRef.current;
     const previousActiveChunks = activeRenderChunksRef.current;
     const nextActiveChunks = new Set();
@@ -824,13 +841,15 @@ export class WorldStreamingRuntime {
       const chunkInRange = camera.position.distanceToSquared(chunk.center) <= chunkActiveDistSq;
       const bypassCloseRangeChunkFrustum = shouldBypassCloseRangeChunkFrustum(chunk, camera);
       const chunkInFrustum = chunkInRange && (
-        !enableOcclusion || (
-        bypassCloseRangeChunkFrustum || (
-        chunk.boundingBox?.isBox3
-          ? chunkFrustum.intersectsBox(chunk.boundingBox)
-          : chunkFrustum.intersectsSphere(chunk.boundingSphere)
-        )
-        )
+        workerFrustumChunkKeys
+          ? workerFrustumChunkKeys.has(chunk.key)
+          : (!enableOcclusion || (
+            bypassCloseRangeChunkFrustum || (
+              chunk.boundingBox?.isBox3
+                ? chunkFrustum.intersectsBox(chunk.boundingBox)
+                : chunkFrustum.intersectsSphere(chunk.boundingSphere)
+            )
+          ))
       );
       if (chunkInRange) frustumChunks += chunkInFrustum ? 1 : 0;
       if (!chunkInFrustum) {
@@ -842,7 +861,16 @@ export class WorldStreamingRuntime {
         }
         continue;
       }
-      if (enableOcclusion && isChunkOccluded(occlusionState, camera, chunk)) {
+      if (enableOcclusion && workerVisibleChunkKeys && !workerVisibleChunkKeys.has(chunk.key)) {
+        if (chunk.active) {
+          chunk.active = false;
+          for (const item of chunk.items) {
+            this.hideRenderItemCompletely(item, dirtyBatches, context);
+          }
+        }
+        continue;
+      }
+      if (enableOcclusion && !workerVisibleChunkKeys && isChunkOccluded(occlusionState, camera, chunk)) {
         if (chunk.active) {
           chunk.active = false;
           for (const item of chunk.items) {
@@ -861,7 +889,7 @@ export class WorldStreamingRuntime {
       for (const item of chunk.items) {
         processRenderItem(item);
       }
-      if (enableOcclusion) {
+      if (enableOcclusion && !workerVisibleChunkKeys) {
         registerChunkOccluder(occlusionState, camera, chunk);
       }
     }
@@ -883,6 +911,7 @@ export class WorldStreamingRuntime {
     activeRenderChunksRef.current = nextActiveChunks;
     for (const batch of dirtyBatches) {
       flushDirtyInstancedBatch(batch);
+      updateInstancedBatchFadeMode(batch, rwRenderQueueRef);
     }
 
     renderMetricsRef.current = {

@@ -268,6 +268,45 @@ export function tuneTransparentMaterial(material) {
   }
 }
 
+export function enableInstancedOpacityMaterial(material) {
+  if (!material || material.userData?.rwInstancedOpacityEnabled) return material;
+  const previousOnBeforeCompile = material.onBeforeCompile;
+  material.onBeforeCompile = (shader, renderer) => {
+    previousOnBeforeCompile?.(shader, renderer);
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+attribute float instanceOpacity;
+varying float rwInstanceOpacity;`,
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+rwInstanceOpacity = instanceOpacity;`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+varying float rwInstanceOpacity;`,
+      )
+      .replace(
+        '#include <alphatest_fragment>',
+        `diffuseColor.a *= rwInstanceOpacity;
+#include <alphatest_fragment>`,
+      );
+  };
+  const previousCacheKey = material.customProgramCacheKey?.bind(material);
+  material.customProgramCacheKey = () => `${previousCacheKey ? previousCacheKey() : ''}|rw-inst-opacity`;
+  material.userData = {
+    ...(material.userData || {}),
+    rwInstancedOpacityEnabled: true,
+  };
+  material.needsUpdate = true;
+  return material;
+}
+
 export function toRWMaterial(material, geometry) {
   return createRWMaterial(material, geometry, {
     alphaMapMode: 'ignore',

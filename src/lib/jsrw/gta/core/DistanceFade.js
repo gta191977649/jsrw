@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 export const DISTANCE_FADE_DEFAULTS = Object.freeze({
   window: 20,
-  streamAlphaPerSecond: 3.2,
+  streamAlphaPerSecond: 7.5,
   epsilon: 0.001,
 });
 

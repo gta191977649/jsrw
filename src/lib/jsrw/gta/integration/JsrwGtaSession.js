@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { formatConsoleArg } from '../../../console.js';
 import { createDefaultTimecycleState } from '../../core/TimecycleState.js';
-import { resetFrameVisibilityResult } from '../core/FrameVisibility.js';
+import { createFrameVisibilityResult, resetFrameVisibilityResult } from '../core/FrameVisibility.js';
 import { resetChunkOcclusionState } from '../core/Occlusion.js';
 import { WORLD_UP, gtaPlacementQuaternionToThree, gtaPositionToThree } from '../../utils/gtaTransforms.js';
 import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE } from '../loaders/SectionLoader.js';
@@ -10,10 +10,12 @@ import { sampleTimecyc, VCS_WEATHER_NAMES } from '../../utils/Timecycle.js';
 import { buildLodMapping, isLodModel } from '../../utils/lod.js';
 import { Streaming } from '../../core/Streaming.js';
 import { WorldStreamingRuntime } from '../streaming/WorldStreamingRuntime.js';
+import { StreamingPlannerClient } from '../streaming/StreamingPlannerClient.js';
 import { FrameComposer } from '../render/FrameComposer.js';
 import {
   applyDisableVertexColor,
   createThreeMaterialFromRW,
+  enableInstancedOpacityMaterial,
   getRWMaterialDescriptor,
   prepareTobjInstanceMaterials,
   toRWMaterial,
@@ -135,6 +137,87 @@ function createRenderMetrics() {
   };
 }
 
+function cloneRenderMetrics(metrics = null) {
+  return {
+    ...createRenderMetrics(),
+    ...(metrics || {}),
+  };
+}
+
+function scheduleNextTask(callback) {
+  if (typeof globalThis.setTimeout === 'function') {
+    globalThis.setTimeout(callback, 0);
+    return;
+  }
+  Promise.resolve().then(callback);
+}
+
+function cloneStreamingCamera(camera) {
+  if (!camera?.isPerspectiveCamera) return camera || null;
+  const snapshot = new THREE.PerspectiveCamera(camera.fov, camera.aspect, camera.near, camera.far);
+  snapshot.position.copy(camera.position);
+  snapshot.quaternion.copy(camera.quaternion);
+  snapshot.scale.copy(camera.scale);
+  snapshot.updateMatrixWorld(true);
+  snapshot.updateProjectionMatrix();
+  return snapshot;
+}
+
+function ensureInstancedBatchCapacity(batch, requiredCount) {
+  const mesh = batch?.mesh;
+  if (!mesh?.isInstancedMesh || !Number.isFinite(requiredCount) || requiredCount <= 0) return;
+  const currentCapacity = Number(mesh.instanceMatrix?.count) || 0;
+  if (currentCapacity >= requiredCount) return;
+
+  const nextCapacity = Math.max(requiredCount, currentCapacity > 0 ? currentCapacity * 2 : 16);
+  const nextMatrix = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity * 16), 16);
+  nextMatrix.setUsage(THREE.DynamicDrawUsage);
+  if (mesh.instanceMatrix?.array?.length > 0) {
+    nextMatrix.array.set(mesh.instanceMatrix.array);
+  }
+  mesh.instanceMatrix = nextMatrix;
+
+  const geometry = mesh.geometry;
+  if (geometry?.isBufferGeometry) {
+    const currentOpacity = geometry.getAttribute('instanceOpacity');
+    const nextOpacity = new THREE.InstancedBufferAttribute(new Float32Array(nextCapacity), 1);
+    nextOpacity.setUsage(THREE.DynamicDrawUsage);
+    if (currentOpacity?.array?.length > 0) {
+      nextOpacity.array.set(currentOpacity.array.subarray(0, Math.min(currentOpacity.array.length, nextOpacity.array.length)));
+    } else {
+      nextOpacity.array.fill(1);
+    }
+    geometry.setAttribute('instanceOpacity', nextOpacity);
+  }
+}
+
+function buildStreamingPlannerSnapshot(chunkLookup) {
+  if (!(chunkLookup instanceof Map) || chunkLookup.size === 0) return [];
+  const chunks = [];
+  for (const chunk of chunkLookup.values()) {
+    if (!chunk?.key || !chunk.center || !chunk.boundingBox) continue;
+    const boundsMin = chunk.boundingBox.min;
+    const boundsMax = chunk.boundingBox.max;
+    chunks.push({
+      key: chunk.key,
+      center: [Number(chunk.center.x) || 0, Number(chunk.center.y) || 0, Number(chunk.center.z) || 0],
+      radius: Math.max(WORLD_CHUNK_SIZE, Number(chunk.boundingSphere?.radius) || 0),
+      boundsMin: [Number(boundsMin?.x) || 0, Number(boundsMin?.y) || 0, Number(boundsMin?.z) || 0],
+      boundsMax: [Number(boundsMax?.x) || 0, Number(boundsMax?.y) || 0, Number(boundsMax?.z) || 0],
+    });
+  }
+  return chunks;
+}
+
+function buildStreamingPlannerCamera(camera) {
+  if (!camera?.projectionMatrix || !camera?.matrixWorldInverse || !camera?.position) return null;
+  const projScreenMatrix = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  return {
+    position: [Number(camera.position.x) || 0, Number(camera.position.y) || 0, Number(camera.position.z) || 0],
+    projScreenMatrix: projScreenMatrix.elements.slice(),
+  };
+}
+
 function hasFiniteVector3(vector) {
   return Number.isFinite(vector?.x) && Number.isFinite(vector?.y) && Number.isFinite(vector?.z);
 }
@@ -214,6 +297,15 @@ export class JsrwGtaSession {
     this.rendererSession = options.rendererSession || createJsrwRenderer(options);
     this.streamingRuntime = new WorldStreamingRuntime({ rendererSession: this.rendererSession });
     this.frameComposer = new FrameComposer({ rendererSession: this.rendererSession });
+    this.streamingFrontVisibility = createFrameVisibilityResult();
+    this.streamingBackVisibility = createFrameVisibilityResult();
+    this.streamingFrontMetrics = createRenderMetrics();
+    this.streamingTaskActive = false;
+    this.streamingQueuedContext = null;
+    this.streamingGeneration = 0;
+    this.streamingPlannerClient = new StreamingPlannerClient();
+    this.streamingPlannerReady = false;
+    this.lastWorkerPlan = null;
   }
 
   getRendererSession() {
@@ -241,11 +333,100 @@ export class JsrwGtaSession {
   }
 
   updateStreaming(context = {}) {
-    return this.streamingRuntime.update(context);
+    this.streamingRuntime.update({
+      ...context,
+      workerPlan: this.lastWorkerPlan,
+      frameVisibilityRef: { current: this.streamingFrontVisibility },
+      renderMetricsRef: { current: this.streamingFrontMetrics },
+    });
+    this.syncStreamingFrontBuffer(context);
+    this.queueStreamingUpdate(context);
+    return this.streamingFrontVisibility;
   }
 
   renderFrame(context = {}) {
     return this.frameComposer.render(context);
+  }
+
+  syncStreamingFrontBuffer(context = {}) {
+    if (context?.frameVisibilityRef) context.frameVisibilityRef.current = this.streamingFrontVisibility;
+    if (context?.renderMetricsRef) context.renderMetricsRef.current = this.streamingFrontMetrics;
+  }
+
+  queueStreamingUpdate(context = {}) {
+    this.streamingQueuedContext = context;
+    if (this.streamingTaskActive) return;
+    this.streamingTaskActive = true;
+    scheduleNextTask(() => {
+      this.runQueuedStreamingUpdate();
+    });
+  }
+
+  async requestStreamingPlan(context = {}) {
+    if (!this.streamingPlannerClient || !this.streamingPlannerReady) return null;
+    const camera = buildStreamingPlannerCamera(context.camera);
+    if (!camera) return null;
+    try {
+      return await this.streamingPlannerClient.plan({
+        camera,
+        renderDistance: Number(context?.effectiveFarClip) || Number(context?.uiStateRef?.current?.renderingDistance) || 0,
+        priorityDistance: Number(context?.uiStateRef?.current?.drawDistance) || 0,
+        chunkActiveMargin: CHUNK_ACTIVE_MARGIN,
+        enableOcclusion: context?.uiStateRef?.current?.enableOcclusion === true,
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async runQueuedStreamingUpdate() {
+    while (true) {
+      const context = this.streamingQueuedContext;
+      this.streamingQueuedContext = null;
+      if (!context) {
+        this.streamingTaskActive = false;
+        return;
+      }
+
+      const generation = this.streamingGeneration;
+      const cameraSnapshot = cloneStreamingCamera(context.camera);
+      const workerPlan = await this.requestStreamingPlan(context);
+      if (generation !== this.streamingGeneration) {
+        this.streamingTaskActive = false;
+        return;
+      }
+
+      // If a newer camera/update request arrived while the worker was planning,
+      // drop this stale result instead of applying visible state late.
+      if (this.streamingQueuedContext) {
+        continue;
+      }
+
+      const backVisibility = this.streamingBackVisibility;
+      const backMetrics = cloneRenderMetrics(this.streamingFrontMetrics);
+      resetFrameVisibilityResult(backVisibility);
+      this.streamingRuntime.update({
+        ...context,
+        camera: cameraSnapshot,
+        workerPlan,
+        frameVisibilityRef: { current: backVisibility },
+        renderMetricsRef: { current: backMetrics },
+      });
+
+      if (generation === this.streamingGeneration && backVisibility.computed === true) {
+        this.lastWorkerPlan = workerPlan;
+        this.streamingBackVisibility = this.streamingFrontVisibility;
+        this.streamingFrontVisibility = backVisibility;
+        this.streamingFrontMetrics = backMetrics;
+        if (context?.frameVisibilityRef) context.frameVisibilityRef.current = this.streamingFrontVisibility;
+        if (context?.renderMetricsRef) context.renderMetricsRef.current = this.streamingFrontMetrics;
+      }
+
+      if (!this.streamingQueuedContext) {
+        this.streamingTaskActive = false;
+        return;
+      }
+    }
   }
 
   clearWorld(context = {}) {
@@ -284,6 +465,15 @@ export class JsrwGtaSession {
       pushConsoleLine,
     } = context;
 
+    this.streamingGeneration += 1;
+    this.streamingQueuedContext = null;
+    this.streamingFrontVisibility = createFrameVisibilityResult();
+    this.streamingBackVisibility = createFrameVisibilityResult();
+    this.streamingFrontMetrics = createRenderMetrics();
+    this.streamingPlannerReady = false;
+    this.lastWorkerPlan = null;
+    this.streamingPlannerClient?.reset?.();
+
     if (selectedInstanceHighlightRef?.current?.parent) {
       selectedInstanceHighlightRef.current.parent.remove(selectedInstanceHighlightRef.current);
     }
@@ -313,7 +503,7 @@ export class JsrwGtaSession {
     if (renderChunksRef) renderChunksRef.current = [];
     if (renderChunkLookupRef) renderChunkLookupRef.current = new Map();
     if (activeRenderChunksRef) activeRenderChunksRef.current = new Set();
-    if (frameVisibilityRef) resetFrameVisibilityResult(frameVisibilityRef.current);
+    if (frameVisibilityRef) frameVisibilityRef.current = this.streamingFrontVisibility;
     if (chunkOcclusionStateRef) resetChunkOcclusionState(chunkOcclusionStateRef.current);
     if (worldGameVersionRef) {
       worldGameVersionRef.current = String(uiStateRef?.current?.gameVersion || 'VCS').toUpperCase();
@@ -332,7 +522,7 @@ export class JsrwGtaSession {
 
     if (lastPipelineSelectionSignatureRef) lastPipelineSelectionSignatureRef.current = '';
     if (activeFadeCountRef) activeFadeCountRef.current = 0;
-    if (renderMetricsRef) renderMetricsRef.current = createRenderMetrics();
+    if (renderMetricsRef) renderMetricsRef.current = this.streamingFrontMetrics;
     rwRenderQueueRef?.current?.markDirty?.();
     if (lodUpdateStateRef?.current) {
       lodUpdateStateRef.current.needsRefresh = true;
@@ -923,9 +1113,15 @@ export class JsrwGtaSession {
         if (instancedBatchMap.has(batchKey)) return instancedBatchMap.get(batchKey);
         const rwMaterial = getRWMaterialDescriptor(descriptor.material);
         const material = createThreeMaterialFromRW(cloneRWMaterialDescriptor(rwMaterial), descriptor.geometry);
-        const mesh = new THREE.InstancedMesh(descriptor.geometry, material, 1);
+        const geometry = descriptor.geometry.clone();
+        geometry.setAttribute(
+          'instanceOpacity',
+          new THREE.InstancedBufferAttribute(new Float32Array(16).fill(1), 1),
+        );
+        const mesh = new THREE.InstancedMesh(geometry, material, 16);
         mesh.count = 0;
         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        mesh.geometry.getAttribute('instanceOpacity')?.setUsage?.(THREE.DynamicDrawUsage);
         mesh.frustumCulled = false;
         mesh.matrixAutoUpdate = false;
         mesh.matrixWorldAutoUpdate = false;
@@ -951,6 +1147,10 @@ export class JsrwGtaSession {
           fallbackAmbient: FALLBACK_AMBIENT,
           fallbackEmissive: FALLBACK_EMISSIVE,
         });
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const batchMaterial of materials) {
+          enableInstancedOpacityMaterial(batchMaterial);
+        }
         rwRenderQueueRef.current?.markDirty?.();
         const batch = {
           key: batchKey,
@@ -958,6 +1158,9 @@ export class JsrwGtaSession {
           entries: [],
           visibleCount: 0,
           activeEntries: [],
+          ensureCapacity(requiredCount) {
+            ensureInstancedBatchCapacity(this, requiredCount);
+          },
         };
         instancedBatchMap.set(batchKey, batch);
         return batch;
@@ -1038,6 +1241,7 @@ export class JsrwGtaSession {
               index: -1,
               activeIndex: -1,
               matrix,
+              opacity: 1,
               placementMatrix: worldMatrix.clone(),
               visible: false,
               objectDetail,
@@ -1294,6 +1498,15 @@ export class JsrwGtaSession {
       renderChunksRef.current = Array.from(renderChunkMap.values());
       renderChunkLookupRef.current = renderChunkMap;
       activeRenderChunksRef.current = new Set();
+      this.streamingPlannerReady = false;
+      try {
+        await this.streamingPlannerClient.init({
+          chunks: buildStreamingPlannerSnapshot(renderChunkMap),
+        });
+        this.streamingPlannerReady = true;
+      } catch {
+        this.streamingPlannerReady = false;
+      }
       this.rendererSession.setBackend(activeBackend);
       this.rendererSession.setRoot(worldRoot);
       this.rendererSession.applyToRoot(worldRoot, {
