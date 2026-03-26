@@ -808,6 +808,7 @@ function App() {
     lastCameraFov: Number.NaN,
     lastCameraNear: Number.NaN,
     lastCameraFar: Number.NaN,
+    chunkScanCache: null,
   });
 
   const uiStateRef = useRef({

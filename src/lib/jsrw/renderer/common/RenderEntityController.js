@@ -50,6 +50,16 @@ export class RenderEntityController {
     const drawDistance = Number(options.drawDistance) || 0;
     const dt = Math.max(0, Number(options.dt) || 0);
     const extraAlpha = Math.max(0, Number.isFinite(Number(options.extraAlpha)) ? Number(options.extraAlpha) : 1);
+    const distanceDriven = options.distanceDriven === true;
+
+    if (distanceDriven) {
+      entry.streamAlpha = targetVisible ? 1 : 0;
+      entry.fadeAlpha = Math.max(
+        0,
+        Math.min(1, (targetVisible ? computeDistanceFadeAlpha(distance, drawDistance, fadeConfig) : 0) * extraAlpha),
+      );
+      return entry.fadeAlpha;
+    }
 
     entry.streamAlpha = approachValue(Number(entry.streamAlpha) || 0, targetVisible ? 1 : 0, dt * fadeConfig.streamAlphaPerSecond);
     entry.fadeAlpha = Math.max(

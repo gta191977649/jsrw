@@ -26,6 +26,7 @@ import {
 import { cloneRwMaterialDescriptor as cloneRWMaterialDescriptor } from '../../core/material/RwMaterialDescriptor.js';
 import { createJsrwRenderer } from '../../integration/createJsrwRenderer.js';
 import { buildTrafficLightCoronaEmitters } from '../../renderer/corona/TrafficLights.js';
+import { createCEntity, createEntityRenderSide } from '../world/entities/CEntity.js';
 import {
   applyGlobalBackfaceCulling,
   applyWireframe,
@@ -79,11 +80,11 @@ function hasRenderableObject(object3D, handles) {
 
 function classifyBigBuildingItem(item) {
   if (!item) return false;
-  const hasNear = hasRenderableObject(item.nearObj, item.nearHandles);
-  const hasLod = hasRenderableObject(item.lodObj, item.lodHandles);
+  const hasNear = item?.hasRenderable?.('near') ?? hasRenderableObject(item.nearObj, item.nearHandles);
+  const hasLod = item?.hasRenderable?.('lod') ?? hasRenderableObject(item.lodObj, item.lodHandles);
   const farDistance = Math.max(
-    Number.isFinite(item.nearDrawDistance) ? item.nearDrawDistance : 0,
-    Number.isFinite(item.lodDrawDistance) ? item.lodDrawDistance : 0,
+    Number.isFinite(item?.getDrawDistance?.('near')) ? item.getDrawDistance('near') : (Number.isFinite(item.nearDrawDistance) ? item.nearDrawDistance : 0),
+    Number.isFinite(item?.getDrawDistance?.('lod')) ? item.getDrawDistance('lod') : (Number.isFinite(item.lodDrawDistance) ? item.lodDrawDistance : 0),
   );
   if (item.isTobj) {
     return farDistance >= BIG_BUILDING_MIN_LOD_DISTANCE || hasLod;
@@ -342,6 +343,7 @@ export class JsrwGtaSession {
       lodUpdateStateRef.current.lastCameraFov = Number.NaN;
       lodUpdateStateRef.current.lastCameraNear = Number.NaN;
       lodUpdateStateRef.current.lastCameraFar = Number.NaN;
+      lodUpdateStateRef.current.chunkScanCache = null;
     }
     setShowGameIcon?.(false);
     if (renderResourcesReadyRef) renderResourcesReadyRef.current = false;
@@ -958,38 +960,18 @@ export class JsrwGtaSession {
           entries: [],
           visibleCount: 0,
           activeEntries: [],
+          dirtyHandles: [],
         };
         instancedBatchMap.set(batchKey, batch);
         return batch;
       };
 
-      const buildRenderSideState = (obj, handles, drawDistanceValue, defaultIsTobj) => {
-        const firstHandle = Array.isArray(handles) && handles.length > 0 ? handles[0] : null;
-        const placementMatrix = obj?.userData?.placementMatrix || firstHandle?.placementMatrix || null;
-        const hasRenderable = Boolean(obj || firstHandle);
-        return {
-          hasRenderable,
-          streamAlpha: 0,
-          fadeAlpha: 0,
-          currentOpacity: 0,
-          renderObject: obj || null,
-          fadeBindings: null,
-          proxyRoot: null,
-          template: obj?.userData?.fadeTemplate || firstHandle?.selectionTemplate || null,
-          placementMatrix: placementMatrix?.clone?.() || null,
-          ideFlags: obj?.userData?.rwIdeFlags ?? firstHandle?.ideFlags ?? 0,
-          isTobj: Boolean(obj?.userData?.isTobj ?? firstHandle?.isTobj ?? defaultIsTobj),
-          objectDetail: obj?.userData?.objectDetail || firstHandle?.objectDetail || null,
-          drawDistance: Number.isFinite(drawDistanceValue) ? drawDistanceValue : null,
-        };
-      };
-
       const registerRenderItem = (item) => {
         const boundsBox = new THREE.Box3();
-        expandBoundsWithObject(boundsBox, item.nearObj);
-        expandBoundsWithObject(boundsBox, item.lodObj);
-        expandBoundsWithHandles(boundsBox, item.nearHandles);
-        expandBoundsWithHandles(boundsBox, item.lodHandles);
+        expandBoundsWithObject(boundsBox, item.getRenderObject('near'));
+        expandBoundsWithObject(boundsBox, item.getRenderObject('lod'));
+        expandBoundsWithHandles(boundsBox, item.getRenderHandles('near'));
+        expandBoundsWithHandles(boundsBox, item.getRenderHandles('lod'));
         if (boundsBox.isEmpty()) {
           boundsBox.setFromCenterAndSize(
             item.anchor.clone(),
@@ -1037,6 +1019,7 @@ export class JsrwGtaSession {
               batch,
               index: -1,
               activeIndex: -1,
+              dirtyQueued: false,
               matrix,
               placementMatrix: worldMatrix.clone(),
               visible: false,
@@ -1141,19 +1124,22 @@ export class JsrwGtaSession {
             lodObj = await buildPlacementObject(lodPlacement, lodIndex, 'lod', placementAnchors[lodIndex]);
           }
           if (nearObj || lodObj || nearInstanced) {
-            registerRenderItem({
+            registerRenderItem(createCEntity({
               isTobj,
               anchor: anchor.clone(),
-              nearObj,
-              lodObj,
-              nearHandles: nearInstanced?.handles || [],
-              lodHandles: [],
-              nearDrawDistance: Number.isFinite(nearDef?.drawDistance) ? nearDef.drawDistance : null,
-              lodDrawDistance: Number.isFinite(lodDef?.drawDistance) ? lodDef.drawDistance : null,
-              nearState: buildRenderSideState(nearObj, nearInstanced?.handles || [], nearDef?.drawDistance, isTobj),
-              lodState: buildRenderSideState(lodObj, [], lodDef?.drawDistance ?? null, false),
+              nearState: createEntityRenderSide({
+                object3D: nearObj,
+                handles: nearInstanced?.handles || [],
+                drawDistance: nearDef?.drawDistance,
+                isTobj,
+              }),
+              lodState: createEntityRenderSide({
+                object3D: lodObj,
+                handles: [],
+                drawDistance: lodDef?.drawDistance ?? null,
+              }),
               mode: 'hidden',
-            });
+            }));
           }
         }));
         completed += batch.length;
@@ -1174,19 +1160,18 @@ export class JsrwGtaSession {
           const nearInstanced = await tryBuildInstancedHandles(placement, index, standaloneRenderKind, anchor);
           const nearObj = nearInstanced ? null : await buildPlacementObject(placement, index, standaloneRenderKind, anchor);
           if (nearObj || nearInstanced) {
-            registerRenderItem({
+            registerRenderItem(createCEntity({
               isTobj,
               anchor: anchor.clone(),
-              nearObj,
-              lodObj: null,
-              nearHandles: nearInstanced?.handles || [],
-              lodHandles: [],
-              nearDrawDistance: Number.isFinite(lodDef?.drawDistance) ? lodDef.drawDistance : null,
-              lodDrawDistance: null,
-              nearState: buildRenderSideState(nearObj, nearInstanced?.handles || [], lodDef?.drawDistance, isTobj),
-              lodState: buildRenderSideState(null, [], null, false),
+              nearState: createEntityRenderSide({
+                object3D: nearObj,
+                handles: nearInstanced?.handles || [],
+                drawDistance: lodDef?.drawDistance,
+                isTobj,
+              }),
+              lodState: createEntityRenderSide(),
               mode: 'hidden',
-            });
+            }));
           }
         }));
       }
@@ -1317,6 +1302,7 @@ export class JsrwGtaSession {
       lodUpdateStateRef.current.needsRefresh = true;
       lodUpdateStateRef.current.lastCameraPos.set(Number.NaN, Number.NaN, Number.NaN);
       lodUpdateStateRef.current.lastCameraQuat.set(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+      lodUpdateStateRef.current.chunkScanCache = null;
       setBuildProgress?.({ active: false, current: buildTotal, total: buildTotal });
       setStatus?.(`Done. Loaded ${loaded} placements.`);
       setShowGameIcon?.(true);
