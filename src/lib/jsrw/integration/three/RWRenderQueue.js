@@ -35,9 +35,9 @@ function getRenderClassOrder(renderClass) {
   return RENDER_CLASS_ORDER[renderClass] ?? RENDER_CLASS_ORDER.entity;
 }
 
-function setProxyDefaultLayer(object) {
+function setProxyBucketLayer(object, bucket) {
   object.layers.disableAll();
-  object.layers.enable(0);
+  object.layers.enable(BUCKET_LAYERS[bucket] ?? 0);
 }
 
 function getMeshBucket(mesh) {
@@ -212,6 +212,12 @@ export class RWRenderQueue {
     this.frameBuckets.transparent = [];
     this.frameBuckets.additive = [];
     this.frameBuckets.overlay = [];
+    for (const entry of this.activeOpaqueEntries) {
+      if (entry?.proxy) entry.proxy.visible = false;
+    }
+    for (const entry of this.activeTransparentEntries) {
+      if (entry?.proxy) entry.proxy.visible = false;
+    }
     this.activeOpaqueEntries = [];
     this.activeTransparentEntries = [];
     this.debugStats.opaqueCount = 0;
@@ -222,10 +228,6 @@ export class RWRenderQueue {
     this.debugStats.alphaBuildingCount = 0;
     this.debugStats.alphaEntityCount = 0;
     this.debugStats.alphaUnderwaterCount = 0;
-    for (const entry of this.entries) {
-      if (entry.proxy) entry.proxy.visible = false;
-    }
-
     const sourceEntries = this.getEntriesForFrame(frameVisibility);
     const useFrameVisibility = frameVisibility?.computed === true;
     for (const entry of sourceEntries) {
@@ -290,7 +292,19 @@ export class RWRenderQueue {
       entry.proxyBucket = entry.bucket;
     }
 
-    for (const entry of [...transparent, ...additive, ...overlay]) {
+    for (const entry of transparent) {
+      const proxy = this.ensureProxy(entry);
+      proxy.visible = true;
+      this.syncProxy(entry, proxy);
+      entry.proxyBucket = entry.bucket;
+    }
+    for (const entry of additive) {
+      const proxy = this.ensureProxy(entry);
+      proxy.visible = true;
+      this.syncProxy(entry, proxy);
+      entry.proxyBucket = entry.bucket;
+    }
+    for (const entry of overlay) {
       const proxy = this.ensureProxy(entry);
       proxy.visible = true;
       this.syncProxy(entry, proxy);
@@ -311,7 +325,7 @@ export class RWRenderQueue {
     // Frame visibility is already resolved upstream; letting Three frustum-cull
     // queue proxies again causes near-camera props to disappear spuriously.
     proxy.frustumCulled = false;
-    setProxyDefaultLayer(proxy);
+    setProxyBucketLayer(proxy, entry.bucket);
     proxy.userData = {
       ...(source.userData || {}),
       rwQueueProxy: true,
@@ -335,7 +349,7 @@ export class RWRenderQueue {
     proxy.matrixAutoUpdate = false;
     proxy.matrixWorldAutoUpdate = false;
     proxy.frustumCulled = false;
-    setProxyDefaultLayer(proxy);
+    setProxyBucketLayer(proxy, entry.bucket);
     proxy.userData.rwQueueBucket = entry.bucket;
     if (source.isInstancedMesh && proxy.isInstancedMesh) {
       proxy.count = source.count;
@@ -351,25 +365,24 @@ export class RWRenderQueue {
     if (!renderer || !camera || this.activeOpaqueEntries.length === 0) return;
     const allowedBuckets = new Set(Array.isArray(options.allowedBuckets) ? options.allowedBuckets : ['opaque', 'cutout']);
     this.opaqueScene.fog = options.fog || null;
-    const activeEntries = new Set(this.activeOpaqueEntries);
-    for (const entry of this.entries) {
-      if (!entry.proxy) continue;
-      if (entry.bucket !== 'opaque' && entry.bucket !== 'cutout') continue;
-      entry.proxy.visible = activeEntries.has(entry) && allowedBuckets.has(entry.proxyBucket);
+    this.pushCameraBucketMask(camera, allowedBuckets);
+    try {
+      renderer.render(this.opaqueScene, camera);
+    } finally {
+      this.popCameraBucketMask(camera);
     }
-    renderer.render(this.opaqueScene, camera);
   }
 
   renderTransparent(renderer, camera, options = {}) {
     if (!renderer || !camera || this.activeTransparentEntries.length === 0) return;
     const allowedBuckets = new Set(Array.isArray(options.allowedBuckets) ? options.allowedBuckets : ['transparent', 'additive', 'overlay']);
     this.transparentScene.fog = options.fog || null;
-    const activeEntries = new Set(this.activeTransparentEntries);
-    for (const entry of this.entries) {
-      if (!entry.proxy) continue;
-      entry.proxy.visible = activeEntries.has(entry) && allowedBuckets.has(entry.proxyBucket);
+    this.pushCameraBucketMask(camera, allowedBuckets);
+    try {
+      renderer.render(this.transparentScene, camera);
+    } finally {
+      this.popCameraBucketMask(camera);
     }
-    renderer.render(this.transparentScene, camera);
   }
 
   pushCameraBucketMask(camera, allowedBuckets) {
