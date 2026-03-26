@@ -451,8 +451,8 @@ export class RWShadowPipeline {
         `#include <map_fragment>
         float rwShadowMask = diffuseColor.a;
         #ifdef USE_MAP
-          float rwShadowLuma = max(texelColor.r, max(texelColor.g, texelColor.b));
-          rwShadowMask *= max(texelColor.a, rwShadowLuma);
+          float rwShadowLuma = max(sampledDiffuseColor.r, max(sampledDiffuseColor.g, sampledDiffuseColor.b));
+          rwShadowMask *= max(sampledDiffuseColor.a, rwShadowLuma);
         #endif
         diffuseColor.rgb = diffuse * rwShadowMask;
         diffuseColor.a = rwShadowMask;`,

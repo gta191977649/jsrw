@@ -285,13 +285,6 @@ export class RWRenderQueue {
     overlay.forEach((entry, index) => {
       entry.mesh.renderOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
     });
-    for (const entry of this.activeOpaqueEntries) {
-      const proxy = this.ensureProxy(entry);
-      proxy.visible = true;
-      this.syncProxy(entry, proxy);
-      entry.proxyBucket = entry.bucket;
-    }
-
     for (const entry of transparent) {
       const proxy = this.ensureProxy(entry);
       proxy.visible = true;
@@ -364,10 +357,11 @@ export class RWRenderQueue {
   renderOpaque(renderer, camera, options = {}) {
     if (!renderer || !camera || this.activeOpaqueEntries.length === 0) return;
     const allowedBuckets = new Set(Array.isArray(options.allowedBuckets) ? options.allowedBuckets : ['opaque', 'cutout']);
-    this.opaqueScene.fog = options.fog || null;
+    const sourceScene = options.scene || this.root?.parent || null;
+    if (!sourceScene?.isScene) return;
     this.pushCameraBucketMask(camera, allowedBuckets);
     try {
-      renderer.render(this.opaqueScene, camera);
+      renderer.render(sourceScene, camera);
     } finally {
       this.popCameraBucketMask(camera);
     }
@@ -385,10 +379,11 @@ export class RWRenderQueue {
     }
   }
 
-  pushCameraBucketMask(camera, allowedBuckets) {
+  pushCameraBucketMask(camera, allowedBuckets, options = {}) {
     if (!camera) return;
     this.cameraMaskStack.push(camera.layers.mask);
     camera.layers.disableAll();
+    if (options.preserveDefaultLayer === true) camera.layers.enable(0);
     for (const bucket of allowedBuckets) {
       const layer = BUCKET_LAYERS[bucket];
       if (Number.isInteger(layer)) camera.layers.enable(layer);

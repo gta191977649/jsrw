@@ -288,6 +288,7 @@ export class FrameComposer {
             rwRenderQueue?.renderOpaque?.(renderer, camera, {
               allowedBuckets: ['opaque', 'cutout'],
               fog: scene.fog || null,
+              scene,
             });
             accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaque);
           }
@@ -373,6 +374,7 @@ export class FrameComposer {
           rwRenderQueue?.renderOpaque?.(renderer, camera, {
             allowedBuckets: opaqueBuckets,
             fog: scene.fog || null,
+            scene,
           });
           accumulateRenderStatsDelta(renderer, stageWorldStats, beforeOpaque);
         }
