@@ -332,6 +332,7 @@ export class FrameComposer {
             rwRenderQueue?.renderTransparent?.(renderer, camera, {
               allowedBuckets: transparentBuckets,
               fog: scene.fog || null,
+              scene,
             });
             accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparent);
           }
@@ -388,6 +389,7 @@ export class FrameComposer {
           rwRenderQueue?.renderTransparent?.(renderer, camera, {
             allowedBuckets: transparentSceneBuckets,
             fog: scene.fog || null,
+            scene,
           });
           accumulateRenderStatsDelta(renderer, stageWorldStats, beforeTransparent);
         }

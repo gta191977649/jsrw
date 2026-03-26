@@ -925,7 +925,7 @@ export class JsrwGtaSession {
         if (instancedBatchMap.has(batchKey)) return instancedBatchMap.get(batchKey);
         const rwMaterial = getRWMaterialDescriptor(descriptor.material);
         const material = createThreeMaterialFromRW(cloneRWMaterialDescriptor(rwMaterial), descriptor.geometry);
-        const mesh = new THREE.InstancedMesh(descriptor.geometry, material, 1);
+        const mesh = new THREE.InstancedMesh(descriptor.geometry, material, 4);
         mesh.count = 0;
         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         mesh.frustumCulled = false;
@@ -964,6 +964,23 @@ export class JsrwGtaSession {
         };
         instancedBatchMap.set(batchKey, batch);
         return batch;
+      };
+
+      const ensureInstancedBatchCapacity = (batch, requiredCount) => {
+        const mesh = batch?.mesh;
+        if (!mesh?.isInstancedMesh) return;
+        const currentCapacity = Math.floor((mesh.instanceMatrix?.array?.length || 0) / 16);
+        if (requiredCount <= currentCapacity) return;
+
+        const nextCapacity = Math.max(requiredCount, Math.max(4, currentCapacity * 2));
+        const nextArray = new Float32Array(nextCapacity * 16);
+        if (mesh.instanceMatrix?.array) {
+          nextArray.set(mesh.instanceMatrix.array.subarray(0, currentCapacity * 16));
+        }
+        const nextMatrix = new THREE.InstancedBufferAttribute(nextArray, 16);
+        nextMatrix.setUsage(THREE.DynamicDrawUsage);
+        nextMatrix.needsUpdate = true;
+        mesh.instanceMatrix = nextMatrix;
       };
 
       const registerRenderItem = (item) => {
@@ -1011,6 +1028,7 @@ export class JsrwGtaSession {
           const objectDetail = buildObjectDetail(ide, placement, lodKind, model);
           model.meshDescriptors.forEach((descriptor, descriptorIndex) => {
             const batch = ensureInstancedBatch(model, lodKind, ide, descriptorIndex, descriptor);
+            ensureInstancedBatchCapacity(batch, batch.entries.length + 1);
             const matrix = worldMatrix.clone().multiply(descriptor.localMatrix);
             if (!descriptor.geometry.boundingBox) {
               descriptor.geometry.computeBoundingBox();
