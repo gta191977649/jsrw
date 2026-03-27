@@ -44,21 +44,9 @@ function findActorMotionEntry(definition, actor) {
 }
 
 function mapCutsceneTimeToActorTime(definition, actor, timeSeconds) {
-  const motionRange = definition?.motionRangeSeconds || definition?.metadata?.motionRangeSeconds || null;
-  const motionEntry = actor?.motionEntry || null;
-  const hasStructuredMotionEntries = Array.isArray(definition?.motionEntries)
-    && definition.motionEntries.some((entry) => typeof entry?.actorName === 'string');
   const clipDuration = Number(actor?.clip?.duration) || Number(actor?.clipBundle?.clip?.duration) || 0;
-  if (!motionRange || motionEntry?.enabled === false || (hasStructuredMotionEntries && !motionEntry)) {
-    if (clipDuration > 0) return THREE.MathUtils.clamp(timeSeconds, 0, clipDuration);
-    return Math.max(0, timeSeconds);
-  }
-  const start = Math.max(0, Number(motionRange.start) || 0);
-  const end = Math.max(start, Number(motionRange.end) || start);
-  const rangedTime = start + Math.max(0, timeSeconds);
-  const clamped = THREE.MathUtils.clamp(rangedTime, start, end);
-  if (clipDuration > 0) return THREE.MathUtils.clamp(clamped, 0, clipDuration);
-  return clamped;
+  if (clipDuration > 0) return THREE.MathUtils.clamp(timeSeconds, 0, clipDuration);
+  return Math.max(0, timeSeconds);
 }
 
 function findPackageAssetRecord(fileIndex, name, extension) {
