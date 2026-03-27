@@ -77,6 +77,18 @@ export function disposeWorld(root) {
   root.clear();
 }
 
+export function normalizeTraversalRoots(rootOrRoots) {
+  const source = Array.isArray(rootOrRoots) ? rootOrRoots : [rootOrRoots];
+  const roots = [];
+  const seen = new Set();
+  for (const root of source) {
+    if (!root?.isObject3D || seen.has(root)) continue;
+    seen.add(root);
+    roots.push(root);
+  }
+  return roots;
+}
+
 function normalizeAssetKeyPart(value = '') {
   const normalized = String(value || '')
     .trim()

@@ -93,6 +93,8 @@ export class FrameComposer {
       worldGameVersionRef,
       uiStateRef,
       worldRootRef,
+      worldOpaqueRootRef,
+      worldOpaqueSceneRef,
       rwRenderQueueRef,
       renderMetricsRef,
       renderResourcesReadyRef,
@@ -136,17 +138,25 @@ export class FrameComposer {
 
     if (grid) grid.visible = uiStateRef.current.showGrid;
     if (axes) axes.visible = uiStateRef.current.showAxes;
+    const worldRoot = worldRootRef.current;
+    const worldOpaqueRoot = worldOpaqueRootRef?.current || null;
+    const worldOpaqueScene = worldOpaqueSceneRef?.current || null;
+    const traversalRoots = [worldRoot, worldOpaqueRoot].filter((root) => root?.isObject3D);
+
     if (lastWireframeRef.current !== uiStateRef.current.wireframe) {
       applyWireframe(worldRootRef.current, uiStateRef.current.wireframe);
+      if (worldOpaqueRoot) applyWireframe(worldOpaqueRoot, uiStateRef.current.wireframe);
       this.rendererSession?.getWaterRuntime?.()?.setWireframe(uiStateRef.current.wireframe);
       lastWireframeRef.current = uiStateRef.current.wireframe;
     }
     if (lastDisableVertexColorRef.current !== uiStateRef.current.disableVertexColor) {
       applyDisableVertexColor(worldRootRef.current, uiStateRef.current.disableVertexColor);
+      if (worldOpaqueRoot) applyDisableVertexColor(worldOpaqueRoot, uiStateRef.current.disableVertexColor);
       lastDisableVertexColorRef.current = uiStateRef.current.disableVertexColor;
     }
     if (lastDisableBackfaceCullingRef.current !== uiStateRef.current.disableBackfaceCulling) {
       applyGlobalBackfaceCulling(worldRootRef.current, uiStateRef.current.disableBackfaceCulling);
+      if (worldOpaqueRoot) applyGlobalBackfaceCulling(worldOpaqueRoot, uiStateRef.current.disableBackfaceCulling);
       lastDisableBackfaceCullingRef.current = uiStateRef.current.disableBackfaceCulling;
     }
     if (lastRenderWaterRef.current !== uiStateRef.current.renderWater) {
@@ -170,9 +180,14 @@ export class FrameComposer {
     );
     if (pipelineSelectionSignature !== lastPipelineSelectionSignatureRef.current) {
       this.rendererSession?.applyToRoot(worldRootRef.current, pipelineRuntimeContext);
+      if (worldOpaqueRoot) this.rendererSession?.applyToRoot(worldOpaqueRoot, pipelineRuntimeContext);
+      this.rendererSession?.setRoot?.(worldRoot, { traversalRoots });
       applyWireframe(worldRootRef.current, uiStateRef.current.wireframe);
+      if (worldOpaqueRoot) applyWireframe(worldOpaqueRoot, uiStateRef.current.wireframe);
       applyDisableVertexColor(worldRootRef.current, uiStateRef.current.disableVertexColor);
+      if (worldOpaqueRoot) applyDisableVertexColor(worldOpaqueRoot, uiStateRef.current.disableVertexColor);
       applyGlobalBackfaceCulling(worldRootRef.current, uiStateRef.current.disableBackfaceCulling);
+      if (worldOpaqueRoot) applyGlobalBackfaceCulling(worldOpaqueRoot, uiStateRef.current.disableBackfaceCulling);
       lastPipelineSelectionSignatureRef.current = pipelineSelectionSignature;
       rwRenderQueueRef.current?.markDirty?.();
       this.rendererSession?.getCoronaRuntime?.()?.markOccludersDirty?.();
@@ -194,6 +209,10 @@ export class FrameComposer {
     const coronaRuntime = this.rendererSession?.getCoronaRuntime?.();
     const shadowRuntime = this.rendererSession?.getShadowRuntime?.();
     const frameVisibility = frameVisibilityRef.current;
+    if (worldOpaqueScene?.isScene) {
+      worldOpaqueScene.background = null;
+      worldOpaqueScene.fog = scene.fog || null;
+    }
 
     coronaRuntime?.setEnabled(render2dfxEnabled);
     shadowRuntime?.setEnabled(render2dfxEnabled && uiStateRef.current.shadows.enabled);
@@ -324,6 +343,13 @@ export class FrameComposer {
           waterUpdateCpuMs += endCpuProfile(detailedProfileEnabled, waterUpdateStartMs);
 
           if (renderStages.sceneOpaque) {
+            if (worldOpaqueScene?.isScene && worldOpaqueRoot?.children?.length > 0) {
+              const beforeStaticOpaque = takeRenderStatsSnapshot(renderer);
+              const staticOpaqueCpuStartMs = beginCpuProfile(profileEnabled);
+              renderer.render(worldOpaqueScene, camera);
+              worldOpaqueCpuMs += endCpuProfile(profileEnabled, staticOpaqueCpuStartMs);
+              accumulateRenderStatsDelta(renderer, stageWorldStats, beforeStaticOpaque);
+            }
             waterStage = 'renderSceneOpaque';
             const beforeOpaque = takeRenderStatsSnapshot(renderer);
             const opaqueCpuStartMs = beginCpuProfile(profileEnabled);
@@ -438,6 +464,13 @@ export class FrameComposer {
         const opaqueBuckets = sceneBuckets.filter((bucket) => bucket === 'opaque' || bucket === 'cutout');
         const transparentSceneBuckets = sceneBuckets.filter((bucket) => bucket !== 'opaque' && bucket !== 'cutout');
         if (opaqueBuckets.length > 0) {
+          if (worldOpaqueScene?.isScene && worldOpaqueRoot?.children?.length > 0) {
+            const beforeStaticOpaque = takeRenderStatsSnapshot(renderer);
+            const staticOpaqueCpuStartMs = beginCpuProfile(profileEnabled);
+            renderer.render(worldOpaqueScene, camera);
+            worldOpaqueCpuMs += endCpuProfile(profileEnabled, staticOpaqueCpuStartMs);
+            accumulateRenderStatsDelta(renderer, stageWorldStats, beforeStaticOpaque);
+          }
           const beforeOpaque = takeRenderStatsSnapshot(renderer);
           const opaqueCpuStartMs = beginCpuProfile(profileEnabled);
           rwRenderQueue?.renderOpaque?.(renderer, camera, {

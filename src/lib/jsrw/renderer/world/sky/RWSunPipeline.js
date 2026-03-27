@@ -9,6 +9,7 @@ import {
   rwScreenFromNdc,
   setRwSpriteScreenPosition,
 } from './RWSpriteUtils.js';
+import { normalizeTraversalRoots } from '../../../utils/worldUtils.js';
 
 const SCREEN_HIDDEN = 1_000_000;
 const TMP_NDC = new THREE.Vector3();
@@ -449,18 +450,21 @@ export class RWSunPipeline {
   }
 
   computeWorldOcclusion(camera, worldRoot) {
-    if (!worldRoot) return false;
+    const roots = normalizeTraversalRoots(worldRoot);
+    if (roots.length === 0) return false;
     TMP_CAMERA_DIR.copy(this.sunDirection).normalize();
     if (TMP_CAMERA_DIR.lengthSq() <= 0.0001) return false;
     this.occlusionRaycaster.layers.enableAll();
     this.occlusionRaycaster.set(camera.position, TMP_CAMERA_DIR);
     this.occlusionRaycaster.camera = camera;
     this.occlusionRaycaster.far = camera.far;
-    const hits = this.occlusionRaycaster.intersectObject(worldRoot, true);
-    for (const hit of hits) {
-      const object = hit?.object;
-      if (shouldIgnoreOcclusionHit(object, worldRoot)) continue;
-      return true;
+    for (const root of roots) {
+      const hits = this.occlusionRaycaster.intersectObject(root, true);
+      for (const hit of hits) {
+        const object = hit?.object;
+        if (shouldIgnoreOcclusionHit(object, root)) continue;
+        return true;
+      }
     }
     return false;
   }

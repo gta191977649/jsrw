@@ -128,6 +128,7 @@ export function createAppSessionController(options = {}) {
     uiStateRef,
     worldGameVersionRef,
     worldRootRef,
+    worldOpaqueRootRef,
   } = refs;
 
   const {
@@ -353,6 +354,7 @@ export function createAppSessionController(options = {}) {
       uiStateRef,
       worldGameVersionRef,
       worldRootRef,
+      worldOpaqueRootRef,
     });
   };
 
@@ -385,6 +387,7 @@ export function createAppSessionController(options = {}) {
       uiStateRef,
       worldGameVersionRef,
       worldRootRef,
+      worldOpaqueRootRef,
       yieldToBrowser,
       yieldToNextTask,
       onParticleTexturesResolved: setResolvedParticleTextures,

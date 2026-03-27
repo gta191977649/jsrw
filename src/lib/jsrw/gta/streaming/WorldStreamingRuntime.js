@@ -482,6 +482,7 @@ export class WorldStreamingRuntime {
     if (!sideState) return false;
     const clampedOpacity = clamp01(opacity);
     const preferObjectFadeOnly = item?.usesSingleRwPath?.() === true && Boolean(sideState.renderObject);
+    const skipInlineObjectFade = sideState.renderObject?.userData?.rwSplitOpaqueScene === true;
 
     if (clampedOpacity <= RW_FADE_EPSILON) {
       if (disposeRenderSideObjectFade(sideState)) rwRenderQueueRef.current?.markDirty?.();
@@ -501,7 +502,7 @@ export class WorldStreamingRuntime {
       return false;
     }
 
-    if (ensureRenderSideObjectFade(sideState)) {
+    if (!skipInlineObjectFade && ensureRenderSideObjectFade(sideState)) {
       if (this.disposeRenderSideFadeProxy(sideState)) rwRenderQueueRef.current?.markDirty?.();
       sideState.renderObject.visible = true;
       setRenderSideObjectFadeOpacity(sideState, clampedOpacity);
@@ -1141,6 +1142,7 @@ export class WorldStreamingRuntime {
         if (chunk.active) {
           chunk.active = false;
           if (chunk.group) chunk.group.visible = false;
+          if (chunk.opaqueGroup) chunk.opaqueGroup.visible = false;
           for (const item of chunk.items) {
             this.hideRenderItemCompletely(item, dirtyBatches, context);
           }
@@ -1151,6 +1153,7 @@ export class WorldStreamingRuntime {
         if (chunk.active) {
           chunk.active = false;
           if (chunk.group) chunk.group.visible = false;
+          if (chunk.opaqueGroup) chunk.opaqueGroup.visible = false;
           for (const item of chunk.items) {
             this.hideRenderItemCompletely(item, dirtyBatches, context);
           }
@@ -1160,6 +1163,7 @@ export class WorldStreamingRuntime {
 
       chunk.active = true;
       if (chunk.group) chunk.group.visible = true;
+      if (chunk.opaqueGroup) chunk.opaqueGroup.visible = true;
       nextActiveChunks.add(chunk);
       activeChunks += 1;
       addVisibleChunk(frameVisibility, chunk);
@@ -1182,6 +1186,7 @@ export class WorldStreamingRuntime {
       if (!chunk?.active) continue;
       chunk.active = false;
       if (chunk.group) chunk.group.visible = false;
+      if (chunk.opaqueGroup) chunk.opaqueGroup.visible = false;
       for (const item of chunk.items) {
         if (protectedItems.has(item)) continue;
         this.hideRenderItemCompletely(item, dirtyBatches, context);

@@ -5,6 +5,7 @@ import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapt
 import {
   DISTANCE_FADE_DEFAULTS,
 } from '../../gta/core/DistanceFade.js';
+import { normalizeTraversalRoots } from '../../utils/worldUtils.js';
 import RenderEntityController from '../common/RenderEntityController.js';
 
 const TMP_POSITION = new THREE.Vector3();
@@ -282,8 +283,14 @@ export class RWShadowPipeline {
   }
 
   setRoot(root) {
-    if (this.root === root) return this.root;
-    this.root = root || null;
+    const nextRoots = normalizeTraversalRoots(root);
+    const nextRoot = nextRoots[0] || null;
+    const sameRoots = Array.isArray(this.roots)
+      && this.roots.length === nextRoots.length
+      && this.roots.every((entry, index) => entry === nextRoots[index]);
+    if (sameRoots && this.root === nextRoot) return this.root;
+    this.roots = nextRoots;
+    this.root = nextRoot;
     this.sceneMeshesDirty = true;
     this.cachedSceneMeshes = null;
     return this.root;
@@ -367,58 +374,61 @@ export class RWShadowPipeline {
   }
 
   getSceneMeshes() {
-    if (!this.root) return [];
+    if (!Array.isArray(this.roots) || this.roots.length === 0) return [];
     if (!this.sceneMeshesDirty && Array.isArray(this.cachedSceneMeshes)) return this.cachedSceneMeshes;
-    this.root.updateMatrixWorld(true);
     const meshes = [];
-    this.root.traverse((object) => {
-      if (!object?.isMesh || !object.geometry) return;
-      let current = object;
-      while (current) {
-        if (current.userData?.rwShadowAux || current.userData?.rwCoronaAux || current.userData?.rwQueueProxy) return;
-        current = current.parent;
-      }
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      let castsProjection = false;
-      for (const material of materials) {
-        const bucket = getRWMaterialDescriptor(material)?.renderBucket || 'opaque';
-        if (bucket === 'opaque' || bucket === 'cutout') {
-          castsProjection = true;
-          break;
+    for (const root of this.roots) {
+      root.updateMatrixWorld(true);
+      root.traverse((object) => {
+        if (!object?.isMesh || !object.geometry) return;
+        let current = object;
+        while (current) {
+          if (current.userData?.rwShadowAux || current.userData?.rwCoronaAux || current.userData?.rwQueueProxy) return;
+          if (current === root) break;
+          current = current.parent;
         }
-      }
-      if (!castsProjection) return;
-      const geometry = object.geometry;
-      if (!geometry.boundingBox) geometry.computeBoundingBox();
-      const positionAttribute = geometry.getAttribute?.('position');
-      if (!geometry.boundingBox || !positionAttribute || positionAttribute.count < 3) return;
-      const baseEntry = {
-        object,
-        geometry,
-        positionAttribute,
-        indexAttribute: geometry.getIndex?.() || null,
-      };
-      if (object.isInstancedMesh === true) {
-        const instanceCount = Math.max(0, Number(object.count) || 0);
-        for (let instanceIndex = 0; instanceIndex < instanceCount; instanceIndex += 1) {
-          object.getMatrixAt(instanceIndex, TMP_INSTANCE_MATRIX);
-          TMP_INSTANCE_WORLD_MATRIX.multiplyMatrices(object.matrixWorld, TMP_INSTANCE_MATRIX);
-          meshes.push({
-            ...baseEntry,
-            instanceIndex,
-            matrixWorld: TMP_INSTANCE_WORLD_MATRIX.clone(),
-            worldBox: geometry.boundingBox.clone().applyMatrix4(TMP_INSTANCE_WORLD_MATRIX),
-          });
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        let castsProjection = false;
+        for (const material of materials) {
+          const bucket = getRWMaterialDescriptor(material)?.renderBucket || 'opaque';
+          if (bucket === 'opaque' || bucket === 'cutout') {
+            castsProjection = true;
+            break;
+          }
         }
-        return;
-      }
-      meshes.push({
-        ...baseEntry,
-        instanceIndex: -1,
-        matrixWorld: object.matrixWorld,
-        worldBox: geometry.boundingBox.clone().applyMatrix4(object.matrixWorld),
+        if (!castsProjection) return;
+        const geometry = object.geometry;
+        if (!geometry.boundingBox) geometry.computeBoundingBox();
+        const positionAttribute = geometry.getAttribute?.('position');
+        if (!geometry.boundingBox || !positionAttribute || positionAttribute.count < 3) return;
+        const baseEntry = {
+          object,
+          geometry,
+          positionAttribute,
+          indexAttribute: geometry.getIndex?.() || null,
+        };
+        if (object.isInstancedMesh === true) {
+          const instanceCount = Math.max(0, Number(object.count) || 0);
+          for (let instanceIndex = 0; instanceIndex < instanceCount; instanceIndex += 1) {
+            object.getMatrixAt(instanceIndex, TMP_INSTANCE_MATRIX);
+            TMP_INSTANCE_WORLD_MATRIX.multiplyMatrices(object.matrixWorld, TMP_INSTANCE_MATRIX);
+            meshes.push({
+              ...baseEntry,
+              instanceIndex,
+              matrixWorld: TMP_INSTANCE_WORLD_MATRIX.clone(),
+              worldBox: geometry.boundingBox.clone().applyMatrix4(TMP_INSTANCE_WORLD_MATRIX),
+            });
+          }
+          return;
+        }
+        meshes.push({
+          ...baseEntry,
+          instanceIndex: -1,
+          matrixWorld: object.matrixWorld,
+          worldBox: geometry.boundingBox.clone().applyMatrix4(object.matrixWorld),
+        });
       });
-    });
+    }
     this.cachedSceneMeshes = meshes;
     this.sceneMeshesDirty = false;
     return meshes;

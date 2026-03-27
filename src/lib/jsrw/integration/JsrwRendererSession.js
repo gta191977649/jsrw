@@ -35,10 +35,13 @@ export class JsrwRendererSession {
     return this.pipelineController;
   }
 
-  setRoot(root) {
+  setRoot(root, options = {}) {
+    const traversalRoots = Array.isArray(options?.traversalRoots)
+      ? options.traversalRoots
+      : [root];
     this.pipelineController.setRoot(root);
-    this.coronaRuntime?.setRoot?.(root);
-    this.shadowRuntime?.setRoot?.(root);
+    this.coronaRuntime?.setRoot?.(traversalRoots);
+    this.shadowRuntime?.setRoot?.(traversalRoots);
     if (!this.renderQueue) {
       this.renderQueue = new RWRenderQueue(root);
     } else {
@@ -115,7 +118,7 @@ export class JsrwRendererSession {
     this.coronaRuntime?.dispose();
     this.coronaRuntime = new CoronaRuntime({
       ...options,
-      root: options?.root || this.pipelineController.root || null,
+      root: options?.root || [this.pipelineController.root].filter(Boolean),
       backend: this.backend,
     });
     return this.coronaRuntime;
@@ -129,7 +132,7 @@ export class JsrwRendererSession {
     this.shadowRuntime?.dispose();
     this.shadowRuntime = new ShadowRuntime({
       ...options,
-      root: options?.root || this.pipelineController.root || null,
+      root: options?.root || [this.pipelineController.root].filter(Boolean),
       backend: this.backend,
     });
     return this.shadowRuntime;
@@ -143,7 +146,7 @@ export class JsrwRendererSession {
     if (this.shadowRuntime === runtime) return this.shadowRuntime;
     this.disposeShadowRuntime();
     this.shadowRuntime = runtime || null;
-    this.shadowRuntime?.setRoot?.(this.pipelineController.root || null);
+    this.shadowRuntime?.setRoot?.([this.pipelineController.root].filter(Boolean));
     return this.shadowRuntime;
   }
 
@@ -156,7 +159,7 @@ export class JsrwRendererSession {
     if (this.coronaRuntime === runtime) return this.coronaRuntime;
     this.disposeCoronaRuntime();
     this.coronaRuntime = runtime || null;
-    this.coronaRuntime?.setRoot?.(this.pipelineController.root || null);
+    this.coronaRuntime?.setRoot?.([this.pipelineController.root].filter(Boolean));
     return this.coronaRuntime;
   }
 

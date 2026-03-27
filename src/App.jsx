@@ -40,6 +40,7 @@ import {
 import { prepareRwSpriteTexture } from './lib/jsrw/renderer/world/sky/RWSpriteUtils.js';
 import {
   disposeWorld,
+  normalizeTraversalRoots,
   WORLD_CHUNK_SIZE,
 } from './lib/jsrw/utils/worldUtils.js';
 import { WINDOW_DEFS } from './ui/windows';
@@ -604,6 +605,11 @@ function App() {
   const sunLightRef = useRef(null);
   const hemiLightRef = useRef(null);
   const worldRootRef = useRef(new THREE.Group());
+  const worldOpaqueSceneRef = useRef(new THREE.Scene());
+  const worldOpaqueRootRef = useRef(new THREE.Group());
+  const worldOpaqueSunLightRef = useRef(null);
+  const worldOpaqueSunTargetRef = useRef(null);
+  const worldOpaqueHemiLightRef = useRef(null);
   const rwRenderQueueRef = useRef(null);
   const gtaSessionRef = useRef(createJsrwGtaSession());
   const jsrwSessionRef = useRef(gtaSessionRef.current.getRendererSession());
@@ -1089,6 +1095,11 @@ function App() {
     imguiTextureListRef.current = [];
   }, []);
 
+  const getWorldTraversalRoots = useCallback(() => normalizeTraversalRoots([
+    worldRootRef.current,
+    worldOpaqueRootRef.current,
+  ]), []);
+
   const {
     clearWorld,
     loadDefaultMap,
@@ -1133,6 +1144,7 @@ function App() {
       uiStateRef,
       worldGameVersionRef,
       worldRootRef,
+      worldOpaqueRootRef,
     },
     setters: {
       setBuildProgress,
@@ -1387,6 +1399,12 @@ function App() {
     const hemi = new THREE.HemisphereLight(0xffffff, 0x677582, 0.8);
     const sun = new THREE.DirectionalLight(0xffffff, 0.8);
     sun.position.set(400, 250, 500);
+    const opaqueHemi = hemi.clone();
+    const opaqueSun = sun.clone();
+    const opaqueSunTarget = new THREE.Object3D();
+    opaqueSun.target = opaqueSunTarget;
+    const worldOpaqueScene = worldOpaqueSceneRef.current;
+    const worldOpaqueRoot = worldOpaqueRootRef.current;
 
     const grid = new THREE.GridHelper(5000, 140, 0x334455, 0x6e7f91);
 
@@ -1394,6 +1412,9 @@ function App() {
     axes.visible = false;
 
     scene.add(hemi, sun, sun.target, grid, axes, worldRootRef.current);
+    worldOpaqueScene.clear();
+    worldOpaqueScene.autoUpdate = true;
+    worldOpaqueScene.add(opaqueHemi, opaqueSun, opaqueSunTarget, worldOpaqueRoot);
 
     const textureLoader = new THREE.TextureLoader();
     const iconTextures = {
@@ -1427,12 +1448,15 @@ function App() {
     fluffyHighlightTextureRef.current = fluffyHighlightTexture;
     skyFeatureRef.current = skyFeature;
     const jsrwSession = jsrwSessionRef.current;
-    jsrwSession.setRoot(worldRootRef.current);
+    jsrwSession.setRoot(worldRootRef.current, { traversalRoots: getWorldTraversalRoots() });
     rwRenderQueueRef.current = jsrwSession.getRenderQueue() || jsrwSession.createRenderQueue(worldRootRef.current);
     gridRef.current = grid;
     axesRef.current = axes;
     sunLightRef.current = sun;
     hemiLightRef.current = hemi;
+    worldOpaqueSunLightRef.current = opaqueSun;
+    worldOpaqueSunTargetRef.current = opaqueSunTarget;
+    worldOpaqueHemiLightRef.current = opaqueHemi;
 
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
@@ -1557,8 +1581,8 @@ function App() {
       if (playerModeManager.isTestMode()) return;
       if (imguiCaptureRef.current.mouse) return;
       const cameraObj = cameraRef.current;
-      const worldRoot = worldRootRef.current;
-      if (!cameraObj || !worldRoot) return;
+      const traversalRoots = getWorldTraversalRoots();
+      if (!cameraObj || traversalRoots.length === 0) return;
 
       const rect = container.getBoundingClientRect();
       const nx = ((event.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
@@ -1568,7 +1592,9 @@ function App() {
       const raycaster = raycasterRef.current;
       raycaster.layers.enableAll();
       raycaster.setFromCamera(pointerNdcRef.current, cameraObj);
-      const intersections = raycaster.intersectObject(worldRoot, true);
+      const intersections = traversalRoots
+        .flatMap((root) => raycaster.intersectObject(root, true))
+        .sort((left, right) => left.distance - right.distance);
       for (const hit of intersections) {
         if (hit.object?.isInstancedMesh && Number.isInteger(hit.instanceId)) {
           const entry = hit.object.userData?.rwInstanceEntries?.[hit.instanceId];
@@ -2032,7 +2058,7 @@ function App() {
       }
       const sunState = skyFeature?.finalizeSunFrame({
         camera,
-        worldRoot: worldRootRef.current,
+        worldRoot: getWorldTraversalRoots(),
         timecycleSample: timecycleCurrent,
         settings: { sun: sunSettings },
         dt,
@@ -2078,11 +2104,26 @@ function App() {
         sunLight.target.updateMatrixWorld();
         sunLight.intensity = computeSunLightIntensityFromState(sunState) * sunLightsMult;
       }
+      const opaqueSunLight = worldOpaqueSunLightRef.current;
+      const opaqueSunTarget = worldOpaqueSunTargetRef.current;
+      if (opaqueSunLight && opaqueSunTarget && sunLight) {
+        opaqueSunLight.color.copy(sunLight.color);
+        opaqueSunLight.intensity = sunLight.intensity;
+        opaqueSunLight.position.copy(sunLight.position);
+        opaqueSunTarget.position.copy(sunLight.target.position);
+        opaqueSunTarget.updateMatrixWorld();
+      }
       if (hemiLight) {
         if (timecycleCurrent?.values?.ambient) {
           hemiLight.color.copy(toThreeColorFromTimecycleValue(timecycleCurrent.values.ambient)).multiplyScalar(sunLightsMult);
         }
         hemiLight.intensity = 0.8 * sunLightsMult;
+      }
+      const opaqueHemiLight = worldOpaqueHemiLightRef.current;
+      if (opaqueHemiLight && hemiLight) {
+        opaqueHemiLight.color.copy(hemiLight.color);
+        opaqueHemiLight.groundColor.copy(hemiLight.groundColor);
+        opaqueHemiLight.intensity = hemiLight.intensity;
       }
 
       if (timecycleCurrent?.three?.fogColor?.isColor) {
@@ -2167,6 +2208,8 @@ function App() {
           viewportHeight,
           viewportWidth,
           worldGameVersionRef,
+          worldOpaqueRootRef,
+          worldOpaqueSceneRef,
           worldRootRef,
         });
       } catch (error) {
@@ -3965,10 +4008,13 @@ function App() {
       imguiGlRef.current = null;
       jsrwSession.dispose();
       disposeWorld(worldRoot);
+      disposeWorld(worldOpaqueRoot);
+      worldOpaqueScene.clear();
     };
   }, [
     activeBackend,
     clearWorld,
+    getWorldTraversalRoots,
     isWindowOpen,
     loadDefaultMap,
     openMapPicker,

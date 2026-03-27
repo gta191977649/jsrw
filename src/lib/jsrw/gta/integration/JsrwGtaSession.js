@@ -74,6 +74,37 @@ function collectQueueMeshes(root) {
   return meshes;
 }
 
+function isOpaqueOrCutoutBucket(bucket) {
+  return bucket === 'opaque' || bucket === 'cutout';
+}
+
+function isDedicatedOpaqueSceneCandidate(root) {
+  if (!root?.traverse) return false;
+  let hasMesh = false;
+  let eligible = true;
+  root.traverse((node) => {
+    if (!eligible || !node?.isMesh) return;
+    hasMesh = true;
+    const materials = Array.isArray(node.material) ? node.material : [node.material];
+    for (const material of materials) {
+      const bucket = getRWMaterialDescriptor(material)?.renderBucket || 'opaque';
+      if (!isOpaqueOrCutoutBucket(bucket)) {
+        eligible = false;
+        break;
+      }
+    }
+  });
+  return hasMesh && eligible;
+}
+
+function markDedicatedOpaqueSceneObject(object3D) {
+  if (!object3D?.isObject3D) return;
+  object3D.userData = {
+    ...(object3D.userData || {}),
+    rwSplitOpaqueScene: true,
+  };
+}
+
 function hasRenderableObject(object3D, handles) {
   return Boolean(object3D) || (Array.isArray(handles) && handles.length > 0);
 }
@@ -299,6 +330,7 @@ export class JsrwGtaSession {
       lodUpdateStateRef,
       renderResourcesReadyRef,
       worldRootRef,
+      worldOpaqueRootRef,
       uiStateRef,
       activeBackend,
       resetImguiTextureCache,
@@ -327,8 +359,12 @@ export class JsrwGtaSession {
     resetImguiTextureCache?.();
 
     const worldRoot = worldRootRef?.current;
+    const worldOpaqueRoot = worldOpaqueRootRef?.current;
     if (worldRoot) {
       disposeWorld(worldRoot);
+    }
+    if (worldOpaqueRoot) {
+      disposeWorld(worldOpaqueRoot);
     }
     this.rendererSession.disposeWaterRuntime();
     this.rendererSession.disposeCoronaRuntime();
@@ -347,15 +383,25 @@ export class JsrwGtaSession {
       worldGameVersionRef.current = String(uiStateRef?.current?.gameVersion || 'VCS').toUpperCase();
     }
 
+    const traversalRoots = [worldRoot, worldOpaqueRoot].filter((root) => root?.isObject3D);
     if (worldRoot) {
       this.rendererSession.setBackend(activeBackend || 'WebGL');
-      this.rendererSession.setRoot(worldRoot);
+      this.rendererSession.setRoot(worldRoot, { traversalRoots });
       this.rendererSession.applyToRoot(worldRoot, {
         activeBackend: activeBackend || 'WebGL',
         worldGameVersion: worldGameVersionRef?.current || 'VCS',
         fallbackAmbient: FALLBACK_AMBIENT,
         fallbackEmissive: FALLBACK_EMISSIVE,
       });
+      if (worldOpaqueRoot) {
+        this.rendererSession.applyToRoot(worldOpaqueRoot, {
+          activeBackend: activeBackend || 'WebGL',
+          worldGameVersion: worldGameVersionRef?.current || 'VCS',
+          fallbackAmbient: FALLBACK_AMBIENT,
+          fallbackEmissive: FALLBACK_EMISSIVE,
+        });
+        this.rendererSession.setRoot(worldRoot, { traversalRoots });
+      }
     }
 
     if (lastPipelineSelectionSignatureRef) lastPipelineSelectionSignatureRef.current = '';
@@ -408,6 +454,7 @@ export class JsrwGtaSession {
       totalObjectsRef,
       cameraRef,
       worldRootRef,
+      worldOpaqueRootRef,
       renderItemsRef,
       bigBuildingItemsRef,
       renderChunksRef,
@@ -440,6 +487,7 @@ export class JsrwGtaSession {
     }
 
     const worldRoot = worldRootRef?.current;
+    const worldOpaqueRoot = worldOpaqueRootRef?.current;
     const token = ++buildTokenRef.current;
     const buildGameVersion = String(uiStateRef?.current?.gameVersion || 'VCS').toUpperCase();
     buildActiveRef.current = true;
@@ -728,6 +776,11 @@ export class JsrwGtaSession {
       const placementsWithLights = new Set();
       let instancedItems = 0;
 
+      const attachChunkOpaqueGroup = (chunk) => {
+        if (!worldOpaqueRoot || !chunk?.opaqueGroup || chunk.opaqueGroup.parent) return;
+        worldOpaqueRoot.add(chunk.opaqueGroup);
+      };
+
       const getRenderChunk = (anchor) => {
         const chunkKey = getChunkKeyFromPosition(anchor);
         if (renderChunkMap.has(chunkKey)) return renderChunkMap.get(chunkKey);
@@ -737,6 +790,7 @@ export class JsrwGtaSession {
           cz: Math.floor(anchor.z / WORLD_CHUNK_SIZE),
           center: getChunkCenterFromKey(chunkKey),
           group: new THREE.Group(),
+          opaqueGroup: new THREE.Group(),
           items: [],
           coronaEmitters: [],
           shadowEmitters: [],
@@ -751,10 +805,19 @@ export class JsrwGtaSession {
         chunk.group.visible = false;
         chunk.group.matrixAutoUpdate = false;
         chunk.group.matrixWorldAutoUpdate = false;
+        chunk.opaqueGroup.visible = false;
+        chunk.opaqueGroup.matrixAutoUpdate = false;
+        chunk.opaqueGroup.matrixWorldAutoUpdate = false;
         chunk.group.userData = {
           ...(chunk.group.userData || {}),
           rwWorldChunk: true,
           rwWorldChunkKey: chunkKey,
+        };
+        chunk.opaqueGroup.userData = {
+          ...(chunk.opaqueGroup.userData || {}),
+          rwWorldChunk: true,
+          rwWorldChunkKey: chunkKey,
+          rwSplitOpaqueSceneChunk: true,
         };
         worldRoot.add(chunk.group);
         renderChunkMap.set(chunkKey, chunk);
@@ -975,9 +1038,15 @@ export class JsrwGtaSession {
           isTobj: ide.section === 'tobjs',
           rwQueueRenderClass: 'building',
           rwWorldChunkKey: chunk.key,
+          rwSplitOpaqueScene: Boolean(worldOpaqueRoot),
         };
         applyRwIdeFlagsToInstance(mesh, ide.flags);
-        chunk.group.add(mesh);
+        if (worldOpaqueRoot) {
+          attachChunkOpaqueGroup(chunk);
+          chunk.opaqueGroup.add(mesh);
+        } else {
+          chunk.group.add(mesh);
+        }
         this.rendererSession?.applyToObject(mesh, {
           activeBackend,
           worldGameVersion: buildGameVersion,
@@ -1139,7 +1208,14 @@ export class JsrwGtaSession {
           instance.userData.rwPipelineTarget = createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs');
           instance.userData.rwQueueRenderClass = 'building';
           collectQueueMeshes(instance);
-          getRenderChunk(anchor).group.add(instance);
+          const chunk = getRenderChunk(anchor);
+          if (worldOpaqueRoot && isDedicatedOpaqueSceneCandidate(instance)) {
+            markDedicatedOpaqueSceneObject(instance);
+            attachChunkOpaqueGroup(chunk);
+            chunk.opaqueGroup.add(instance);
+          } else {
+            chunk.group.add(instance);
+          }
           rwRenderQueueRef.current?.markDirty?.();
           loaded += 1;
           return instance;
@@ -1313,9 +1389,10 @@ export class JsrwGtaSession {
       }
       pendingWaterPipeline?.setTexture?.(resolvedParticleTextures?.waterTexture || null);
       onParticleTexturesResolved?.(resolvedParticleTextures);
+      const traversalRoots = [worldRoot, worldOpaqueRoot].filter((root) => root?.isObject3D);
       if (coronaEmitters.length > 0 && particleTextureDictionary) {
         const coronaRuntime = this.rendererSession.createCoronaRuntime({
-          root: worldRoot,
+          root: traversalRoots,
           emitters: coronaEmitters,
           textureDictionary: particleTextureDictionary,
           enableDebugHelpers: true,
@@ -1323,7 +1400,7 @@ export class JsrwGtaSession {
         coronaRuntime.setEnabled(uiStateRef.current.render2dfx);
         coronaRuntime.setDebugShowAll(uiStateRef.current.debug2dfx);
         const shadowRuntime = this.rendererSession.createShadowRuntime({
-          root: worldRoot,
+          root: traversalRoots,
           emitters: coronaEmitters,
           textureDictionary: particleTextureDictionary,
         });
@@ -1339,7 +1416,7 @@ export class JsrwGtaSession {
       renderChunkLookupRef.current = renderChunkMap;
       activeRenderChunksRef.current = new Set();
       this.rendererSession.setBackend(activeBackend);
-      this.rendererSession.setRoot(worldRoot);
+      this.rendererSession.setRoot(worldRoot, { traversalRoots });
       this.rendererSession.applyToRoot(worldRoot, {
         activeBackend,
         worldGameVersion: buildGameVersion,
@@ -1353,9 +1430,30 @@ export class JsrwGtaSession {
         fallbackAmbient: FALLBACK_AMBIENT,
         fallbackEmissive: FALLBACK_EMISSIVE,
       });
+      if (worldOpaqueRoot) {
+        this.rendererSession.applyToRoot(worldOpaqueRoot, {
+          activeBackend,
+          worldGameVersion: buildGameVersion,
+          timecycleCurrent: timecycleStateRef.current?.current,
+          ambientColor: timecycleStateRef.current?.current?.values?.ambient
+            ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambient)
+            : FALLBACK_AMBIENT,
+          emissiveColor: timecycleStateRef.current?.current?.values?.ambientBl
+            ? toThreeColorFromTimecycleValue(timecycleStateRef.current.current.values.ambientBl)
+            : FALLBACK_EMISSIVE,
+          fallbackAmbient: FALLBACK_AMBIENT,
+          fallbackEmissive: FALLBACK_EMISSIVE,
+        });
+        this.rendererSession.setRoot(worldRoot, { traversalRoots });
+      }
       applyWireframe(worldRoot, uiStateRef.current.wireframe);
       applyDisableVertexColor(worldRoot, uiStateRef.current.disableVertexColor);
       applyGlobalBackfaceCulling(worldRoot, uiStateRef.current.disableBackfaceCulling);
+      if (worldOpaqueRoot) {
+        applyWireframe(worldOpaqueRoot, uiStateRef.current.wireframe);
+        applyDisableVertexColor(worldOpaqueRoot, uiStateRef.current.disableVertexColor);
+        applyGlobalBackfaceCulling(worldOpaqueRoot, uiStateRef.current.disableBackfaceCulling);
+      }
       lastPipelineSelectionSignatureRef.current = '';
       rwRenderQueueRef.current?.markDirty();
       lodUpdateStateRef.current.needsRefresh = true;

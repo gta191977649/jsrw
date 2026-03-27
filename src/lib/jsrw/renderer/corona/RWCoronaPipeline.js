@@ -8,6 +8,7 @@ import { getRWMaterialDescriptor } from '../../adapters/three/ThreeMaterialAdapt
 import {
   DISTANCE_FADE_DEFAULTS,
 } from '../../gta/core/DistanceFade.js';
+import { normalizeTraversalRoots } from '../../utils/worldUtils.js';
 import RenderEntityController from '../common/RenderEntityController.js';
 
 const TMP_POSITION = new THREE.Vector3();
@@ -329,11 +330,17 @@ export class RWCoronaPipeline {
   }
 
   setRoot(root) {
-    if (this.root === root) return this.root;
+    const nextRoots = normalizeTraversalRoots(root);
+    const nextAttachmentRoot = nextRoots[0] || null;
+    const sameRoots = Array.isArray(this.roots)
+      && this.roots.length === nextRoots.length
+      && this.roots.every((entry, index) => entry === nextRoots[index]);
+    if (sameRoots && this.root === nextAttachmentRoot) return this.root;
     if (this.lightRoot.parent) {
       this.lightRoot.parent.remove(this.lightRoot);
     }
-    this.root = root || null;
+    this.roots = nextRoots;
+    this.root = nextAttachmentRoot;
     this.occludersDirty = true;
     this.cachedOccluderMeshes = null;
     if (this.root) {
@@ -348,29 +355,32 @@ export class RWCoronaPipeline {
   }
 
   getOccluderMeshes() {
-    if (!this.root) return [];
+    if (!Array.isArray(this.roots) || this.roots.length === 0) return [];
     if (!this.occludersDirty && Array.isArray(this.cachedOccluderMeshes)) return this.cachedOccluderMeshes;
-    this.root.updateMatrixWorld(true);
     const occluders = [];
-    this.root.traverse((object) => {
-      if (!object?.isMesh || !object.geometry) return;
-      let current = object;
-      while (current) {
-        if (current.userData?.rwCoronaAux || current.userData?.rwShadowAux || current.userData?.rwQueueProxy) return;
-        current = current.parent;
-      }
-      const materials = Array.isArray(object.material) ? object.material : [object.material];
-      let blocksLos = false;
-      for (const material of materials) {
-        const bucket = getRWMaterialDescriptor(material)?.renderBucket || 'opaque';
-        if (bucket === 'opaque' || bucket === 'cutout' || bucket === 'transparent') {
-          blocksLos = true;
-          break;
+    for (const root of this.roots) {
+      root.updateMatrixWorld(true);
+      root.traverse((object) => {
+        if (!object?.isMesh || !object.geometry) return;
+        let current = object;
+        while (current) {
+          if (current.userData?.rwCoronaAux || current.userData?.rwShadowAux || current.userData?.rwQueueProxy) return;
+          if (current === root) break;
+          current = current.parent;
         }
-      }
-      if (!blocksLos) return;
-      occluders.push(object);
-    });
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        let blocksLos = false;
+        for (const material of materials) {
+          const bucket = getRWMaterialDescriptor(material)?.renderBucket || 'opaque';
+          if (bucket === 'opaque' || bucket === 'cutout' || bucket === 'transparent') {
+            blocksLos = true;
+            break;
+          }
+        }
+        if (!blocksLos) return;
+        occluders.push(object);
+      });
+    }
     this.cachedOccluderMeshes = occluders;
     this.occludersDirty = false;
     return occluders;
@@ -938,7 +948,7 @@ export class RWCoronaPipeline {
       spriteAssignmentsByBatch.set(batchKey, batchEntries);
     }
     TMP_QUATERNION.copy(camera.quaternion);
-    for (const [batchKey, batchEntries] of spriteAssignmentsByBatch.entries()) {
+    for (const [, batchEntries] of spriteAssignmentsByBatch.entries()) {
       const firstState = batchEntries[0];
       const batch = this.ensureSpriteBatchCapacity(firstState.textureKey, firstState.depthTest, batchEntries.length);
       batch.mesh.visible = batchEntries.length > 0;
