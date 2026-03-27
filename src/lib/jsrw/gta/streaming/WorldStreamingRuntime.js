@@ -9,6 +9,7 @@ import {
   addShadowCandidate,
   addVisibleChunk,
   addVisibleItem,
+  addVisibleQueueEntry,
   addVisibleQueueMesh,
   resetFrameVisibilityResult,
 } from '../core/FrameVisibility.js';
@@ -48,6 +49,14 @@ const VIS_VISIBLE = 1;
 const VIS_OFFSCREEN = 2;
 const VIS_STREAMME = 3;
 
+function beginCpuProfile(enabled) {
+  return enabled ? performance.now() : 0;
+}
+
+function endCpuProfile(enabled, startMs) {
+  return enabled ? (performance.now() - startMs) : 0;
+}
+
 function clamp01(value) {
   return THREE.MathUtils.clamp(value, 0, 1);
 }
@@ -70,6 +79,13 @@ function getCachedQueueMeshes(root) {
   if (!root?.traverse) return [];
   if (Array.isArray(root.userData?.rwQueueMeshes)) return root.userData.rwQueueMeshes;
   return collectQueueMeshes(root);
+}
+
+function addQueueMeshVisibility(result, mesh, distanceSq = null) {
+  if (!mesh) return;
+  addVisibleQueueMesh(result, mesh);
+  const queueEntry = mesh.userData?.rwQueueEntry || null;
+  if (queueEntry) addVisibleQueueEntry(result, queueEntry, distanceSq);
 }
 
 function disposeObjectMaterialsOnly(root) {
@@ -604,7 +620,7 @@ export class WorldStreamingRuntime {
     return chunks;
   }
 
-  collectRenderSideFrameVisibility(frameVisibility, item, side) {
+  collectRenderSideFrameVisibility(frameVisibility, item, side, distanceSq = null) {
     const sideState = side === 'near' ? item?.nearState : item?.lodState;
     if (!frameVisibility || !sideState) return;
     if ((item?.getSideOpacity?.(side) ?? sideState.currentOpacity ?? 0) <= RW_FADE_EPSILON) return;
@@ -613,14 +629,14 @@ export class WorldStreamingRuntime {
 
     if (sideState.proxyRoot?.visible) {
       for (const mesh of getCachedQueueMeshes(sideState.proxyRoot)) {
-        addVisibleQueueMesh(frameVisibility, mesh);
+        addQueueMeshVisibility(frameVisibility, mesh, distanceSq);
       }
       return;
     }
 
     if (sideState.renderObject?.visible) {
       for (const mesh of getCachedQueueMeshes(sideState.renderObject)) {
-        addVisibleQueueMesh(frameVisibility, mesh);
+        addQueueMeshVisibility(frameVisibility, mesh, distanceSq);
       }
     }
 
@@ -628,7 +644,7 @@ export class WorldStreamingRuntime {
     if (!Array.isArray(handles) || handles.length === 0) return;
     for (const handle of handles) {
       if (!handle?.visible || !handle?.batch?.mesh) continue;
-      addVisibleQueueMesh(frameVisibility, handle.batch.mesh);
+      addQueueMeshVisibility(frameVisibility, handle.batch.mesh, distanceSq);
     }
   }
 
@@ -686,7 +702,8 @@ export class WorldStreamingRuntime {
       rwRenderQueueRef,
     } = context;
     if (!camera || !lodUpdateStateRef?.current) return;
-    const streamingStartMs = performance.now();
+    const profileEnabled = context.statsProfilingEnabled === true;
+    const streamingStartMs = beginCpuProfile(profileEnabled);
 
     lodUpdateAccumulatorRef.current += dt;
     const lodState = lodUpdateStateRef.current;
@@ -771,11 +788,11 @@ export class WorldStreamingRuntime {
     // capping scan by the LOD switch distance would skip whole chunks and hide distant LOD meshes.
     const chunkScanDistance = renderingDistance;
     const previousActiveChunks = activeRenderChunksRef.current;
-    const chunkScanStartMs = performance.now();
+    const chunkScanStartMs = beginCpuProfile(profileEnabled);
     const candidateChunks = fullRefresh
       ? this.getCachedGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef, lodState)
       : Array.from(previousActiveChunks);
-    const chunkScanMs = performance.now() - chunkScanStartMs;
+    const chunkScanMs = endCpuProfile(profileEnabled, chunkScanStartMs);
     const occlusionState = resetChunkOcclusionState(chunkOcclusionStateRef.current);
     const bigBuildingItems = bigBuildingItemsRef.current;
     const nextActiveChunks = new Set();
@@ -793,7 +810,7 @@ export class WorldStreamingRuntime {
     let frameVisibilityCpuMs = 0;
 
     const SetupBigBuildingVisibility = (ent, visibilityState) => {
-      const setupBigBuildingStartMs = performance.now();
+      const setupBigBuildingStartMs = beginCpuProfile(profileEnabled);
       const {
         dist,
         hasNear,
@@ -894,15 +911,16 @@ export class WorldStreamingRuntime {
           : (nearOpacity > fadeEpsilon ? 'near' : 'lod');
       }
 
-      const opacityStartMs = performance.now();
+      const opacityStartMs = beginCpuProfile(profileEnabled);
       this.applyRenderSideOpacity(ent, 'near', nearOpacity, dirtyBatches, runtimeContext);
       this.applyRenderSideOpacity(ent, 'lod', lodOpacity, dirtyBatches, runtimeContext);
-      opacityCpuMs += performance.now() - opacityStartMs;
+      opacityCpuMs += endCpuProfile(profileEnabled, opacityStartMs);
 
-      const frameVisibilityStartMs = performance.now();
-      if (nearOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, ent, 'near');
-      if (lodOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, ent, 'lod');
-      frameVisibilityCpuMs += performance.now() - frameVisibilityStartMs;
+      const frameVisibilityStartMs = beginCpuProfile(profileEnabled);
+      const distSq = dist * dist;
+      if (nearOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, ent, 'near', distSq);
+      if (lodOpacity > fadeEpsilon) this.collectRenderSideFrameVisibility(frameVisibility, ent, 'lod', distSq);
+      frameVisibilityCpuMs += endCpuProfile(profileEnabled, frameVisibilityStartMs);
 
       const visibility = nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon
         ? VIS_VISIBLE
@@ -918,7 +936,7 @@ export class WorldStreamingRuntime {
       if (nearOpacity > fadeEpsilon) visibleNear += 1;
       if (lodOpacity > fadeEpsilon) visibleLod += 1;
       if (visibility !== VIS_INVISIBLE) protectedItems.add(ent);
-      bigBuildingCpuMs += performance.now() - setupBigBuildingStartMs;
+      bigBuildingCpuMs += endCpuProfile(profileEnabled, setupBigBuildingStartMs);
 
       return {
         visibility,
@@ -929,7 +947,7 @@ export class WorldStreamingRuntime {
     };
 
     const SetupEntityVisibility = (ent, { checkOcclusion = false } = {}) => {
-      const setupEntityStartMs = performance.now();
+      const setupEntityStartMs = beginCpuProfile(profileEnabled);
       if (!ent || processedItems.has(ent)) return VIS_INVISIBLE;
       processedItems.add(ent);
 
@@ -998,7 +1016,7 @@ export class WorldStreamingRuntime {
           fadeEpsilon,
           runtimeContext,
         }).visibility;
-        visibilityCpuMs += performance.now() - setupEntityStartMs;
+        visibilityCpuMs += endCpuProfile(profileEnabled, setupEntityStartMs);
         return visibility;
       }
 
@@ -1085,14 +1103,14 @@ export class WorldStreamingRuntime {
       if (nearOpacity > fadeEpsilon) visibleNear += 1;
       if (lodOpacity > fadeEpsilon) visibleLod += 1;
 
-      const opacityStartMs = performance.now();
+      const opacityStartMs = beginCpuProfile(profileEnabled);
       this.applyRenderSideOpacity(ent, 'near', nearOpacity, dirtyBatches, runtimeContext);
       this.applyRenderSideOpacity(ent, 'lod', lodOpacity, dirtyBatches, runtimeContext);
-      opacityCpuMs += performance.now() - opacityStartMs;
-      const frameVisibilityStartMs = performance.now();
-      this.collectRenderSideFrameVisibility(frameVisibility, ent, 'near');
-      this.collectRenderSideFrameVisibility(frameVisibility, ent, 'lod');
-      frameVisibilityCpuMs += performance.now() - frameVisibilityStartMs;
+      opacityCpuMs += endCpuProfile(profileEnabled, opacityStartMs);
+      const frameVisibilityStartMs = beginCpuProfile(profileEnabled);
+      this.collectRenderSideFrameVisibility(frameVisibility, ent, 'near', distSq);
+      this.collectRenderSideFrameVisibility(frameVisibility, ent, 'lod', distSq);
+      frameVisibilityCpuMs += endCpuProfile(profileEnabled, frameVisibilityStartMs);
 
       if (
         nearOpacity > fadeEpsilon
@@ -1102,7 +1120,7 @@ export class WorldStreamingRuntime {
       ) {
         protectedItems.add(ent);
       }
-      visibilityCpuMs += performance.now() - setupEntityStartMs;
+      visibilityCpuMs += endCpuProfile(profileEnabled, setupEntityStartMs);
       return nearOpacity > fadeEpsilon || lodOpacity > fadeEpsilon ? VIS_VISIBLE : VIS_INVISIBLE;
     };
 
@@ -1122,6 +1140,7 @@ export class WorldStreamingRuntime {
       if (!chunkInFrustum) {
         if (chunk.active) {
           chunk.active = false;
+          if (chunk.group) chunk.group.visible = false;
           for (const item of chunk.items) {
             this.hideRenderItemCompletely(item, dirtyBatches, context);
           }
@@ -1131,6 +1150,7 @@ export class WorldStreamingRuntime {
       if (enableOcclusion && isChunkOccluded(occlusionState, camera, chunk)) {
         if (chunk.active) {
           chunk.active = false;
+          if (chunk.group) chunk.group.visible = false;
           for (const item of chunk.items) {
             this.hideRenderItemCompletely(item, dirtyBatches, context);
           }
@@ -1139,6 +1159,7 @@ export class WorldStreamingRuntime {
       }
 
       chunk.active = true;
+      if (chunk.group) chunk.group.visible = true;
       nextActiveChunks.add(chunk);
       activeChunks += 1;
       addVisibleChunk(frameVisibility, chunk);
@@ -1160,6 +1181,7 @@ export class WorldStreamingRuntime {
       if (nextActiveChunks.has(chunk)) continue;
       if (!chunk?.active) continue;
       chunk.active = false;
+      if (chunk.group) chunk.group.visible = false;
       for (const item of chunk.items) {
         if (protectedItems.has(item)) continue;
         this.hideRenderItemCompletely(item, dirtyBatches, context);
@@ -1167,31 +1189,39 @@ export class WorldStreamingRuntime {
     }
 
     activeRenderChunksRef.current = nextActiveChunks;
-    const flushStartMs = performance.now();
+    const flushStartMs = beginCpuProfile(profileEnabled);
     for (const batch of dirtyBatches) {
       flushDirtyInstancedBatch(batch);
     }
-    const flushMs = performance.now() - flushStartMs;
+    const flushMs = endCpuProfile(profileEnabled, flushStartMs);
 
-    renderMetricsRef.current = {
-      ...renderMetricsRef.current,
-      activeChunks,
-      frustumChunks,
-      activeItems,
-      visibleNear,
-      visibleLod,
-      visibleQueueMeshes: frameVisibility.visibleQueueMeshes.length,
-      coronaCandidates: frameVisibility.coronaCandidates.length,
-      shadowCandidates: frameVisibility.shadowCandidates.length,
-      streamingCpuMs: performance.now() - streamingStartMs,
-      streamingChunkScanMs: chunkScanMs,
-      streamingVisibilityMs: visibilityCpuMs,
-      streamingBigBuildingMs: bigBuildingCpuMs,
-      streamingOpacityMs: opacityCpuMs,
-      streamingFrameVisibilityMs: frameVisibilityCpuMs,
-      streamingFlushMs: flushMs,
-    };
+    const metrics = renderMetricsRef.current;
+    metrics.activeChunks = activeChunks;
+    metrics.frustumChunks = frustumChunks;
+    metrics.activeItems = activeItems;
+    metrics.visibleNear = visibleNear;
+    metrics.visibleLod = visibleLod;
+    metrics.visibleQueueMeshes = frameVisibility.visibleQueueMeshes.length;
+    metrics.coronaCandidates = frameVisibility.coronaCandidates.length;
+    metrics.shadowCandidates = frameVisibility.shadowCandidates.length;
+    metrics.streamingCpuMs = endCpuProfile(profileEnabled, streamingStartMs);
+    metrics.streamingChunkScanMs = chunkScanMs;
+    metrics.streamingVisibilityMs = visibilityCpuMs;
+    metrics.streamingBigBuildingMs = bigBuildingCpuMs;
+    metrics.streamingOpacityMs = opacityCpuMs;
+    metrics.streamingFrameVisibilityMs = frameVisibilityCpuMs;
+    metrics.streamingFlushMs = flushMs;
+    frameVisibility.queueSignature = ((frameVisibility._queueHash >>> 0) ^ (frameVisibility._queueCount >>> 0)) >>> 0;
+    if (
+      frameVisibility.queueSignature !== frameVisibility.lastQueueSignature
+      || frameVisibility._queueCount !== frameVisibility.lastQueueCount
+    ) {
+      frameVisibility.queueVersion = (Number(frameVisibility.queueVersion) || 0) + 1;
+      frameVisibility.lastQueueSignature = frameVisibility.queueSignature;
+      frameVisibility.lastQueueCount = frameVisibility._queueCount;
+    }
     frameVisibility.computed = true;
+    frameVisibility.version = (Number(frameVisibility.version) || 0) + 1;
     activeFadeCountRef.current = activeFades;
     lodState.needsRefresh = activeFades > 0;
   }

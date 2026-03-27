@@ -8,6 +8,8 @@ const BUCKET_LAYERS = {
   additive: 4,
   overlay: 5,
 };
+const PREPARE_REUSE_POSITION_EPSILON_SQ = 0.25;
+const PREPARE_REUSE_QUATERNION_DOT = 0.99985;
 
 const RENDER_CLASS_ORDER = {
   building: 0,
@@ -99,10 +101,14 @@ export class RWRenderQueue {
   constructor(root) {
     this.root = root;
     this.entries = [];
+    this.persistentOverlayEntries = [];
     this.entryByMesh = new WeakMap();
     this.tempProjScreenMatrix = new THREE.Matrix4();
     this.tempFrustum = new THREE.Frustum();
     this.tempSphere = new THREE.Sphere();
+    this.lastPreparedCameraPosition = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
+    this.lastPreparedCameraQuaternion = new THREE.Quaternion(Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+    this.lastPreparedQueueVersion = -1;
     this.frameBuckets = {
       opaque: [],
       cutout: [],
@@ -124,6 +130,9 @@ export class RWRenderQueue {
       alphaEntityCount: 0,
       alphaUnderwaterCount: 0,
       prepareCpuMs: 0,
+      prepareReuseHitMs: 0,
+      prepareBucketBindMs: 0,
+      prepareTransparentOrderApplyMs: 0,
     };
   }
 
@@ -139,9 +148,11 @@ export class RWRenderQueue {
   rebuild(root = this.root) {
     this.root = root;
     this.entries = [];
+    this.persistentOverlayEntries = [];
     this.entryByMesh = new WeakMap();
     this.activeOpaqueEntries = [];
     this.activeTransparentEntries = [];
+    this.lastPreparedQueueVersion = -1;
     if (!root) {
       this.dirty = false;
       return;
@@ -159,9 +170,17 @@ export class RWRenderQueue {
         renderClassOrder: getRenderClassOrder(renderClass),
         sortBias: 0,
         distanceSq: Number.POSITIVE_INFINITY,
+        isTransparentBucket: bucket === 'transparent' || bucket === 'additive' || bucket === 'overlay',
       };
       this.entries.push(entry);
       this.entryByMesh.set(node, entry);
+      setMeshBucketLayer(node, bucket);
+      if (node.renderOrder !== entry.baseOrder) node.renderOrder = entry.baseOrder;
+      node.userData = {
+        ...(node.userData || {}),
+        rwQueueEntry: entry,
+      };
+      if (isPersistentOverlayEntry(entry)) this.persistentOverlayEntries.push(entry);
     });
 
     this.dirty = false;
@@ -169,6 +188,18 @@ export class RWRenderQueue {
 
   getEntriesForFrame(frameVisibility) {
     if (frameVisibility?.computed !== true) return this.entries;
+    const directEntries = Array.isArray(frameVisibility?.visibleQueueEntries) ? frameVisibility.visibleQueueEntries : [];
+    if (directEntries.length > 0) {
+      if (this.persistentOverlayEntries.length === 0) return directEntries;
+      const visibleEntries = directEntries.slice();
+      const seen = new Set(visibleEntries);
+      for (const entry of this.persistentOverlayEntries) {
+        if (seen.has(entry)) continue;
+        seen.add(entry);
+        visibleEntries.push(entry);
+      }
+      return visibleEntries;
+    }
     const meshes = Array.isArray(frameVisibility?.visibleQueueMeshes) ? frameVisibility.visibleQueueMeshes : [];
     const visibleEntries = [];
     const seen = new Set();
@@ -178,25 +209,50 @@ export class RWRenderQueue {
       seen.add(entry);
       visibleEntries.push(entry);
     }
-    for (const entry of this.entries) {
-      if (!isPersistentOverlayEntry(entry) || seen.has(entry)) continue;
+    for (const entry of this.persistentOverlayEntries) {
+      if (seen.has(entry)) continue;
       seen.add(entry);
       visibleEntries.push(entry);
     }
     return visibleEntries;
   }
 
-  prepareFrame(camera, frameVisibility = null) {
-    const prepareStartMs = performance.now();
+  canReusePreparedFrame(camera, frameVisibility) {
+    if (this.dirty || frameVisibility?.computed !== true || !camera) return false;
+    const queueVersion = Number.isFinite(Number(frameVisibility?.queueVersion))
+      ? Number(frameVisibility.queueVersion)
+      : Number(frameVisibility?.version);
+    if (!Number.isFinite(queueVersion) || queueVersion !== this.lastPreparedQueueVersion) {
+      return false;
+    }
+    if (!Number.isFinite(this.lastPreparedCameraPosition.x) || !Number.isFinite(this.lastPreparedCameraQuaternion.w)) {
+      return false;
+    }
+    if (camera.position.distanceToSquared(this.lastPreparedCameraPosition) > PREPARE_REUSE_POSITION_EPSILON_SQ) {
+      return false;
+    }
+    if (Math.abs(camera.quaternion.dot(this.lastPreparedCameraQuaternion)) < PREPARE_REUSE_QUATERNION_DOT) {
+      return false;
+    }
+    return true;
+  }
+
+  prepareFrame(camera, frameVisibility = null, options = {}) {
+    const profileEnabled = options.profileEnabled === true;
+    const prepareStartMs = profileEnabled ? performance.now() : 0;
     if (this.dirty) this.rebuild();
+    if (this.canReusePreparedFrame(camera, frameVisibility)) {
+      this.debugStats.prepareReuseHitMs = profileEnabled ? (performance.now() - prepareStartMs) : 0;
+      this.debugStats.prepareBucketBindMs = 0;
+      this.debugStats.prepareTransparentOrderApplyMs = 0;
+      this.debugStats.prepareCpuMs = profileEnabled ? (performance.now() - prepareStartMs) : 0;
+      return;
+    }
     if (camera?.projectionMatrix && camera?.matrixWorldInverse) {
       this.tempProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       this.tempFrustum.setFromProjectionMatrix(this.tempProjScreenMatrix);
     }
 
-    const transparent = [];
-    const additive = [];
-    const overlay = [];
     this.frameBuckets.opaque = [];
     this.frameBuckets.cutout = [];
     this.frameBuckets.transparent = [];
@@ -212,66 +268,134 @@ export class RWRenderQueue {
     this.debugStats.alphaBuildingCount = 0;
     this.debugStats.alphaEntityCount = 0;
     this.debugStats.alphaUnderwaterCount = 0;
-    const sourceEntries = this.getEntriesForFrame(frameVisibility);
+    this.debugStats.prepareReuseHitMs = 0;
     const useFrameVisibility = frameVisibility?.computed === true;
-    for (const entry of sourceEntries) {
-      const { mesh } = entry;
-      if (!isVisibleInWorld(mesh, this.root)) continue;
-      if (!useFrameVisibility && camera && mesh.frustumCulled !== false && mesh.geometry) {
-        if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
-        if (mesh.geometry.boundingSphere) {
-          this.tempSphere.copy(mesh.geometry.boundingSphere).applyMatrix4(mesh.matrixWorld);
-          if (!this.tempFrustum.intersectsSphere(this.tempSphere)) continue;
-        }
-      }
+    const hasPreparedFrameBuckets = useFrameVisibility && (
+      (Array.isArray(frameVisibility?.visibleQueueEntries) && frameVisibility.visibleQueueEntries.length > 0)
+      || (
+        Array.isArray(frameVisibility?.queueBuckets?.opaque) && frameVisibility.queueBuckets.opaque.length > 0
+      )
+      || (
+        Array.isArray(frameVisibility?.queueBuckets?.cutout) && frameVisibility.queueBuckets.cutout.length > 0
+      )
+      || (
+        Array.isArray(frameVisibility?.queueBuckets?.transparent) && frameVisibility.queueBuckets.transparent.length > 0
+      )
+      || (
+        Array.isArray(frameVisibility?.queueBuckets?.additive) && frameVisibility.queueBuckets.additive.length > 0
+      )
+      || (
+        Array.isArray(frameVisibility?.queueBuckets?.overlay) && frameVisibility.queueBuckets.overlay.length > 0
+      )
+    );
+    let transparent = [];
+    let additive = [];
+    let overlay = [];
 
-      if (this.frameBuckets[entry.bucket]) this.frameBuckets[entry.bucket].push(entry);
-      if (entry.bucket === 'opaque') this.debugStats.opaqueCount += 1;
-      else if (entry.bucket === 'cutout') this.debugStats.cutoutCount += 1;
-      else if (entry.bucket === 'transparent') this.debugStats.transparentCount += 1;
-      else if (entry.bucket === 'additive') this.debugStats.additiveCount += 1;
-      else if (entry.bucket === 'overlay') this.debugStats.overlayCount += 1;
-      if (entry.bucket === 'transparent' || entry.bucket === 'additive' || entry.bucket === 'overlay') {
+    const bucketBindStartMs = profileEnabled ? performance.now() : 0;
+    if (hasPreparedFrameBuckets && frameVisibility?.queueBuckets) {
+      this.frameBuckets.opaque = Array.isArray(frameVisibility.queueBuckets.opaque) ? frameVisibility.queueBuckets.opaque : [];
+      this.frameBuckets.cutout = Array.isArray(frameVisibility.queueBuckets.cutout) ? frameVisibility.queueBuckets.cutout : [];
+      this.frameBuckets.transparent = Array.isArray(frameVisibility.queueBuckets.transparent) ? frameVisibility.queueBuckets.transparent : [];
+      this.frameBuckets.additive = Array.isArray(frameVisibility.queueBuckets.additive) ? frameVisibility.queueBuckets.additive : [];
+      this.frameBuckets.overlay = Array.isArray(frameVisibility.queueBuckets.overlay) ? frameVisibility.queueBuckets.overlay : [];
+      this.activeOpaqueEntries = this.frameBuckets.opaque.length || this.frameBuckets.cutout.length
+        ? [...this.frameBuckets.opaque, ...this.frameBuckets.cutout]
+        : [];
+      transparent = this.frameBuckets.transparent;
+      additive = this.frameBuckets.additive;
+      overlay = this.frameBuckets.overlay;
+      this.activeTransparentEntries = transparent.length || additive.length || overlay.length
+        ? [...transparent, ...additive, ...overlay]
+        : [];
+      this.debugStats.opaqueCount = this.frameBuckets.opaque.length;
+      this.debugStats.cutoutCount = this.frameBuckets.cutout.length;
+      this.debugStats.transparentCount = transparent.length;
+      this.debugStats.additiveCount = additive.length;
+      this.debugStats.overlayCount = overlay.length;
+      for (const entry of this.activeTransparentEntries) {
         if (entry.renderClass === 'building') this.debugStats.alphaBuildingCount += 1;
         else if (entry.renderClass === 'underwater') this.debugStats.alphaUnderwaterCount += 1;
         else this.debugStats.alphaEntityCount += 1;
       }
-      setMeshBucketLayer(mesh, entry.bucket);
-      if (entry.bucket === 'transparent' || entry.bucket === 'additive' || entry.bucket === 'overlay') {
-        const worldMatrix = mesh.matrixWorld.elements;
+    } else {
+      const sourceEntries = this.getEntriesForFrame(frameVisibility);
+      for (const entry of sourceEntries) {
+        const { mesh } = entry;
+        if (!isVisibleInWorld(mesh, this.root)) continue;
+        if (camera && mesh.frustumCulled !== false && mesh.geometry) {
+          if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+          if (mesh.geometry.boundingSphere) {
+            this.tempSphere.copy(mesh.geometry.boundingSphere).applyMatrix4(mesh.matrixWorld);
+            if (!this.tempFrustum.intersectsSphere(this.tempSphere)) continue;
+          }
+        }
+
+        if (this.frameBuckets[entry.bucket]) this.frameBuckets[entry.bucket].push(entry);
+        if (entry.bucket === 'opaque') this.debugStats.opaqueCount += 1;
+        else if (entry.bucket === 'cutout') this.debugStats.cutoutCount += 1;
+        else if (entry.bucket === 'transparent') this.debugStats.transparentCount += 1;
+        else if (entry.bucket === 'additive') this.debugStats.additiveCount += 1;
+        else if (entry.bucket === 'overlay') this.debugStats.overlayCount += 1;
+        if (entry.isTransparentBucket) {
+          if (entry.renderClass === 'building') this.debugStats.alphaBuildingCount += 1;
+          else if (entry.renderClass === 'underwater') this.debugStats.alphaUnderwaterCount += 1;
+          else this.debugStats.alphaEntityCount += 1;
+          this.activeTransparentEntries.push(entry);
+          if (entry.bucket === 'transparent') transparent.push(entry);
+          else if (entry.bucket === 'additive') additive.push(entry);
+          else overlay.push(entry);
+        } else {
+          this.activeOpaqueEntries.push(entry);
+        }
+      }
+    }
+    this.debugStats.prepareBucketBindMs = profileEnabled ? (performance.now() - bucketBindStartMs) : 0;
+
+    const transparentOrderStartMs = profileEnabled ? performance.now() : 0;
+    for (const entry of this.activeOpaqueEntries) {
+      entry.distanceSq = Number.POSITIVE_INFINITY;
+      if (entry.mesh.renderOrder !== entry.baseOrder) entry.mesh.renderOrder = entry.baseOrder;
+    }
+    if (!hasPreparedFrameBuckets) {
+      for (const entry of this.activeTransparentEntries) {
+        const worldMatrix = entry.mesh.matrixWorld.elements;
         const dx = camera.position.x - worldMatrix[12];
         const dy = camera.position.y - worldMatrix[13];
         const dz = camera.position.z - worldMatrix[14];
         entry.distanceSq = (dx * dx) + (dy * dy) + (dz * dz) + entry.sortBias;
-        this.activeTransparentEntries.push(entry);
-        if (entry.bucket === 'transparent') transparent.push(entry);
-        else if (entry.bucket === 'additive') additive.push(entry);
-        else overlay.push(entry);
-      } else {
-        entry.distanceSq = Number.POSITIVE_INFINITY;
-        mesh.renderOrder = entry.baseOrder;
-        this.activeOpaqueEntries.push(entry);
       }
+
+      const farToNear = (a, b) => {
+        if (a.renderClassOrder !== b.renderClassOrder) return a.renderClassOrder - b.renderClassOrder;
+        return b.distanceSq - a.distanceSq;
+      };
+      transparent.sort(farToNear);
+      additive.sort(farToNear);
+      overlay.sort(farToNear);
     }
 
-    const farToNear = (a, b) => {
-      if (a.renderClassOrder !== b.renderClassOrder) return a.renderClassOrder - b.renderClassOrder;
-      return b.distanceSq - a.distanceSq;
-    };
-    transparent.sort(farToNear);
-    additive.sort(farToNear);
-    overlay.sort(farToNear);
-
     transparent.forEach((entry, index) => {
-      entry.mesh.renderOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
+      const nextOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
+      if (entry.mesh.renderOrder !== nextOrder) entry.mesh.renderOrder = nextOrder;
     });
     additive.forEach((entry, index) => {
-      entry.mesh.renderOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
+      const nextOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
+      if (entry.mesh.renderOrder !== nextOrder) entry.mesh.renderOrder = nextOrder;
     });
     overlay.forEach((entry, index) => {
-      entry.mesh.renderOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
+      const nextOrder = entry.baseOrder + (entry.renderClassOrder * 10000) + index;
+      if (entry.mesh.renderOrder !== nextOrder) entry.mesh.renderOrder = nextOrder;
     });
-    this.debugStats.prepareCpuMs = performance.now() - prepareStartMs;
+    if (frameVisibility?.computed === true) {
+      this.lastPreparedQueueVersion = Number.isFinite(Number(frameVisibility.queueVersion))
+        ? Number(frameVisibility.queueVersion)
+        : (Number(frameVisibility.version) || 0);
+      this.lastPreparedCameraPosition.copy(camera.position);
+      this.lastPreparedCameraQuaternion.copy(camera.quaternion);
+    }
+    this.debugStats.prepareTransparentOrderApplyMs = profileEnabled ? (performance.now() - transparentOrderStartMs) : 0;
+    this.debugStats.prepareCpuMs = profileEnabled ? (performance.now() - prepareStartMs) : 0;
   }
 
   renderOpaque(renderer, camera, options = {}) {

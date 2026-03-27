@@ -736,6 +736,7 @@ export class JsrwGtaSession {
           cx: Math.floor(anchor.x / WORLD_CHUNK_SIZE),
           cz: Math.floor(anchor.z / WORLD_CHUNK_SIZE),
           center: getChunkCenterFromKey(chunkKey),
+          group: new THREE.Group(),
           items: [],
           coronaEmitters: [],
           shadowEmitters: [],
@@ -747,6 +748,15 @@ export class JsrwGtaSession {
           boundingBox: new THREE.Box3(),
           boundingSphere: new THREE.Sphere(),
         };
+        chunk.group.visible = false;
+        chunk.group.matrixAutoUpdate = false;
+        chunk.group.matrixWorldAutoUpdate = false;
+        chunk.group.userData = {
+          ...(chunk.group.userData || {}),
+          rwWorldChunk: true,
+          rwWorldChunkKey: chunkKey,
+        };
+        worldRoot.add(chunk.group);
         renderChunkMap.set(chunkKey, chunk);
         return chunk;
       };
@@ -947,8 +957,8 @@ export class JsrwGtaSession {
         });
       };
 
-      const ensureInstancedBatch = (model, lodKind, ide, descriptorIndex, descriptor) => {
-        const batchKey = `${model.key}|${lodKind}|${descriptorIndex}|${ide.flags | 0}`;
+      const ensureInstancedBatch = (chunk, model, lodKind, ide, descriptorIndex, descriptor) => {
+        const batchKey = `${chunk.key}|${model.key}|${lodKind}|${descriptorIndex}|${ide.flags | 0}`;
         if (instancedBatchMap.has(batchKey)) return instancedBatchMap.get(batchKey);
         const rwMaterial = getRWMaterialDescriptor(descriptor.material);
         const material = createThreeMaterialFromRW(cloneRWMaterialDescriptor(rwMaterial), descriptor.geometry);
@@ -964,9 +974,10 @@ export class JsrwGtaSession {
           rwPipelineTarget: createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs'),
           isTobj: ide.section === 'tobjs',
           rwQueueRenderClass: 'building',
+          rwWorldChunkKey: chunk.key,
         };
         applyRwIdeFlagsToInstance(mesh, ide.flags);
-        worldRoot.add(mesh);
+        chunk.group.add(mesh);
         this.rendererSession?.applyToObject(mesh, {
           activeBackend,
           worldGameVersion: buildGameVersion,
@@ -1050,11 +1061,12 @@ export class JsrwGtaSession {
           const model = await getModelTemplate(ide.modelName, ide.txdName);
           if (!canUseInstancing(model, ide)) return null;
           const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
+          const chunk = getRenderChunk(anchor);
           maybeRegisterPlacementEmitters(placement, placementIndex, worldMatrix, ide, model, lodKind);
           const handles = [];
           const objectDetail = buildObjectDetail(ide, placement, lodKind, model);
           model.meshDescriptors.forEach((descriptor, descriptorIndex) => {
-            const batch = ensureInstancedBatch(model, lodKind, ide, descriptorIndex, descriptor);
+            const batch = ensureInstancedBatch(chunk, model, lodKind, ide, descriptorIndex, descriptor);
             ensureInstancedBatchCapacity(batch, batch.entries.length + 1);
             const matrix = worldMatrix.clone().multiply(descriptor.localMatrix);
             if (!descriptor.geometry.boundingBox) {
@@ -1127,7 +1139,7 @@ export class JsrwGtaSession {
           instance.userData.rwPipelineTarget = createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs');
           instance.userData.rwQueueRenderClass = 'building';
           collectQueueMeshes(instance);
-          worldRoot.add(instance);
+          getRenderChunk(anchor).group.add(instance);
           rwRenderQueueRef.current?.markDirty?.();
           loaded += 1;
           return instance;

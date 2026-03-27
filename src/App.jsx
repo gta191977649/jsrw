@@ -646,6 +646,9 @@ function App() {
     streamingFrameVisibilityMs: 0,
     streamingFlushMs: 0,
     renderQueuePrepareMs: 0,
+    renderQueuePrepareReuseHitMs: 0,
+    renderQueuePrepareBucketBindMs: 0,
+    renderQueuePrepareTransparentOrderApplyMs: 0,
     worldOpaqueCpuMs: 0,
     worldTransparentCpuMs: 0,
     coronaUpdateCpuMs: 0,
@@ -699,6 +702,8 @@ function App() {
   const statsWindowSizeRef = useRef({ x: 0, y: 0 });
   const statsGraphRectMinRef = useRef({ x: 0, y: 0 });
   const statsGraphRectMaxRef = useRef({ x: 0, y: 0 });
+  const statsProfilingEnabledRef = useRef(false);
+  const frameComposerProfileOpenRef = useRef(false);
   const lodUpdateAccumulatorRef = useRef(0);
   const activeFadeCountRef = useRef(0);
   const lookStateRef = useRef({
@@ -2094,6 +2099,8 @@ function App() {
         scene.fog = null;
       }
       scene.background = null;
+      const statsProfilingEnabled = isWindowOpen('statistics');
+      statsProfilingEnabledRef.current = statsProfilingEnabled;
 
       gtaSessionRef.current.updateStreaming({
         activeBackend,
@@ -2112,6 +2119,7 @@ function App() {
         renderChunkLookupRef,
         renderMetricsRef,
         rwRenderQueueRef,
+        statsProfilingEnabled,
         timecycleStateRef,
         uiStateRef,
         worldGameVersionRef,
@@ -2151,6 +2159,8 @@ function App() {
           skyCloudScene: skyCloudSceneRef.current,
           skyFeature,
           skyScene: skySceneRef.current,
+          statsDetailedProfilingEnabled: statsProfilingEnabled && frameComposerProfileOpenRef.current,
+          statsProfilingEnabled,
           timecycleCurrent,
           timeMs: time,
           uiStateRef,
@@ -2938,12 +2948,17 @@ function App() {
               ImGui.Text(`  FrameVisibility gather: ${Number(renderMetrics.streamingFrameVisibilityMs || 0).toFixed(2)} ms`);
               ImGui.Text(`  Instanced flush: ${Number(renderMetrics.streamingFlushMs || 0).toFixed(2)} ms`);
               ImGui.Text(`CPU Queue prepare: ${Number(renderMetrics.renderQueuePrepareMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Reuse hit: ${Number(renderMetrics.renderQueuePrepareReuseHitMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Bucket bind: ${Number(renderMetrics.renderQueuePrepareBucketBindMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Transparent order apply: ${Number(renderMetrics.renderQueuePrepareTransparentOrderApplyMs || 0).toFixed(2)} ms`);
               ImGui.Text(`CPU World opaque pass: ${Number(renderMetrics.worldOpaqueCpuMs || 0).toFixed(2)} ms`);
               ImGui.Text(`CPU World transparent pass: ${Number(renderMetrics.worldTransparentCpuMs || 0).toFixed(2)} ms`);
               ImGui.Text(`CPU Corona update: ${Number(renderMetrics.coronaUpdateCpuMs || 0).toFixed(2)} ms`);
               ImGui.Text(`CPU Shadow update: ${Number(renderMetrics.shadowUpdateCpuMs || 0).toFixed(2)} ms`);
               ImGui.SetNextItemOpen(false, ImGui.Cond.Once);
-              if (ImGui.CollapsingHeader('FrameComposer Profile')) {
+              const frameComposerProfileOpen = ImGui.CollapsingHeader('FrameComposer Profile');
+              frameComposerProfileOpenRef.current = frameComposerProfileOpen;
+              if (frameComposerProfileOpen) {
                 ImGui.Text(`Sky dome: ${Number(renderMetrics.frameSkyDomeCpuMs || 0).toFixed(2)} ms`);
                 ImGui.Text(`Sky backdrop: ${Number(renderMetrics.frameSkyBackdropCpuMs || 0).toFixed(2)} ms`);
                 ImGui.Text(`Sky clouds: ${Number(renderMetrics.frameSkyCloudsCpuMs || 0).toFixed(2)} ms`);
@@ -2968,6 +2983,8 @@ function App() {
             ImGui.PopStyleVar(4);
             ImGui.PopStyleColor(8);
           }
+        } else {
+          frameComposerProfileOpenRef.current = false;
         }
 
         if (isWindowOpen('console')) {
