@@ -685,6 +685,105 @@ export class RWShadowPipeline {
       return false;
     }
 
+    const quad = CORNER_OFFSETS.map((offset) => {
+      TMP_SAMPLE.copy(center)
+        .addScaledVector(TMP_FRONT, offset.front)
+        .addScaledVector(TMP_SIDE, offset.side);
+      return {
+        x: TMP_SAMPLE.x,
+        z: TMP_SAMPLE.z,
+        u: offset.uv[0],
+        v: offset.uv[1],
+      };
+    });
+    const clippedPositions = [];
+    const clippedUvs = [];
+    const pushClippedVertex = (point, uv, up = null) => {
+      const projectionUp = up?.isVector3 ? up : TMP_TRI_NORMAL.set(0, 1, 0);
+      clippedPositions.push(
+        point.x + (projectionUp.x * vertexBias),
+        point.y + (projectionUp.y * vertexBias),
+        point.z + (projectionUp.z * vertexBias),
+      );
+      clippedUvs.push(uv[0], uv[1]);
+    };
+
+    for (const meshEntry of candidateMeshes) {
+      const { object: mesh, positionAttribute, indexAttribute } = meshEntry;
+      const receiverMatrixWorld = meshEntry.matrixWorld || mesh.matrixWorld;
+      const triangleCount = indexAttribute ? indexAttribute.count / 3 : positionAttribute.count / 3;
+      for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
+        const ia = indexAttribute ? indexAttribute.getX((triangleIndex * 3) + 0) : ((triangleIndex * 3) + 0);
+        const ib = indexAttribute ? indexAttribute.getX((triangleIndex * 3) + 1) : ((triangleIndex * 3) + 1);
+        const ic = indexAttribute ? indexAttribute.getX((triangleIndex * 3) + 2) : ((triangleIndex * 3) + 2);
+        TMP_LOCAL_A.fromBufferAttribute(positionAttribute, ia);
+        TMP_LOCAL_B.fromBufferAttribute(positionAttribute, ib);
+        TMP_LOCAL_C.fromBufferAttribute(positionAttribute, ic);
+        TMP_WORLD_A.copy(TMP_LOCAL_A).applyMatrix4(receiverMatrixWorld);
+        TMP_WORLD_B.copy(TMP_LOCAL_B).applyMatrix4(receiverMatrixWorld);
+        TMP_WORLD_C.copy(TMP_LOCAL_C).applyMatrix4(receiverMatrixWorld);
+
+        const triangleMinX = Math.min(TMP_WORLD_A.x, TMP_WORLD_B.x, TMP_WORLD_C.x);
+        const triangleMaxX = Math.max(TMP_WORLD_A.x, TMP_WORLD_B.x, TMP_WORLD_C.x);
+        const triangleMinZ = Math.min(TMP_WORLD_A.z, TMP_WORLD_B.z, TMP_WORLD_C.z);
+        const triangleMaxZ = Math.max(TMP_WORLD_A.z, TMP_WORLD_B.z, TMP_WORLD_C.z);
+        const triangleMinY = Math.min(TMP_WORLD_A.y, TMP_WORLD_B.y, TMP_WORLD_C.y);
+        const triangleMaxY = Math.max(TMP_WORLD_A.y, TMP_WORLD_B.y, TMP_WORLD_C.y);
+        if (
+          !overlapRange(minX, maxX, triangleMinX, triangleMaxX)
+          || !overlapRange(minZ, maxZ, triangleMinZ, triangleMaxZ)
+          || !overlapRange(center.y - maxDistance, center.y, triangleMinY, triangleMaxY)
+        ) {
+          continue;
+        }
+
+        TMP_TRI_NORMAL.copy(TMP_WORLD_B).sub(TMP_WORLD_A);
+        TMP_HIT_NORMAL.copy(TMP_WORLD_C).sub(TMP_WORLD_A);
+        TMP_TRI_NORMAL.cross(TMP_HIT_NORMAL).normalize();
+        if (TMP_TRI_NORMAL.y <= 0.45) continue;
+
+        const clippedPolygon = clipShadowQuadToTriangle(quad, [
+          { x: TMP_WORLD_A.x, y: TMP_WORLD_A.z },
+          { x: TMP_WORLD_B.x, y: TMP_WORLD_B.z },
+          { x: TMP_WORLD_C.x, y: TMP_WORLD_C.z },
+        ]);
+        if (clippedPolygon.length < 3) continue;
+
+        const clippedWorldPoints = clippedPolygon.map((point) => ({
+          point: new THREE.Vector3(
+            point.x,
+            solvePlaneHeight(TMP_TRI_NORMAL, TMP_WORLD_A, point.x, point.z),
+            point.z,
+          ),
+          uv: [point.u, point.v],
+        }));
+
+        for (let index = 1; index < clippedWorldPoints.length - 1; index += 1) {
+          pushClippedVertex(clippedWorldPoints[0].point, clippedWorldPoints[0].uv, TMP_TRI_NORMAL);
+          pushClippedVertex(clippedWorldPoints[index].point, clippedWorldPoints[index].uv, TMP_TRI_NORMAL);
+          pushClippedVertex(clippedWorldPoints[index + 1].point, clippedWorldPoints[index + 1].uv, TMP_TRI_NORMAL);
+        }
+      }
+    }
+
+    if (clippedPositions.length >= 9) {
+      const geometry = entry.shadowMesh.geometry;
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(clippedPositions, 3));
+      geometry.setAttribute('uv', new THREE.Float32BufferAttribute(clippedUvs, 2));
+      geometry.computeVertexNormals();
+      geometry.computeBoundingSphere();
+      if (!geometry.boundingSphere) {
+        this.logFailure(entry, 'missing-ground-clipped-bounding-sphere', {
+          center: { x: center.x, y: center.y, z: center.z },
+        });
+        return false;
+      }
+      entry.projected = true;
+      entry.lastProjectionKey = this.getProjectionKey(entry, shadowDebug);
+      entry.lastFallbackCornerCount = 0;
+      return true;
+    }
+
     TMP_RAY_ORIGIN.copy(center);
     TMP_RAY_ORIGIN.y = center.y + 0.25;
     this.raycaster.set(TMP_RAY_ORIGIN, TMP_RAY_DIR);
