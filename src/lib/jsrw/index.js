@@ -1,4 +1,5 @@
 export { DFFLoader } from './DFFLoader.js';
+export { IFPLoader } from './IFPLoader.js';
 export { TXDLoader } from './TXDLoader.js';
 export { DffLoader } from './rw/DffLoader.js';
 export { TxdLoader } from './rw/TxdLoader.js';
@@ -86,6 +87,12 @@ export {
 export { WaterRuntime } from './renderer/water/WaterRuntime.js';
 export { RWWaterPipeline, RWWaterPipeline as WaterLevel } from './renderer/water/RWWaterPipeline.js';
 export { RWShadowPipeline as Shadows } from './renderer/shadows/RWShadowPipeline.js';
+export { HudPipeline } from './renderer/hud/HudPipeline.js';
+export { HudRuntime } from './renderer/hud/HudRuntime.js';
+export { createIfpAnimationClip, sampleRootMotion } from './animation/ifp/IfpClipFactory.js';
+export { inspectSkeletonHierarchy, findAttachmentTarget } from './animation/skeleton/SkeletonInspector.js';
+export { CutsceneAttachmentRuntime } from './animation/runtime/CutsceneAttachmentRuntime.js';
+export { CutsceneActorRuntime } from './animation/runtime/CutsceneActorRuntime.js';
 
 export { JsrwRendererSession } from './integration/JsrwRendererSession.js';
 export { createJsrwRenderer } from './integration/createJsrwRenderer.js';

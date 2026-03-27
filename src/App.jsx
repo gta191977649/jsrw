@@ -21,7 +21,12 @@ import { WORLD_UP } from './lib/jsrw/utils/gtaTransforms.js';
 import { IDE_LIGHT_FLAG, IDE_LIGHT_TYPE, normalizePath } from './lib/jsrw/gta/loaders/SectionLoader.js';
 import { TIMECYCLE_FIELD_GROUPS, VCS_WEATHER_NAMES } from './lib/jsrw/utils/Timecycle.js';
 import { PlayerControllerAdapter } from './lib/playerControllerAdapter';
-import { APP_MODE_EDITOR, APP_MODE_TEST, PlayerModeManager } from './lib/PlayerModeManager';
+import {
+  APP_MODE_CUTSCENE,
+  APP_MODE_EDITOR,
+  APP_MODE_TEST,
+  PlayerModeManager,
+} from './lib/PlayerModeManager';
 import {
   calcScreenCoorsLikeRw,
   cloneRWPipelineSelections,
@@ -37,6 +42,7 @@ import {
   SkyRendererBundle,
   ThreeRendererHost,
 } from './lib/jsrw';
+import { CutsceneManager } from './lib/cutscene/CutsceneManager.js';
 import { prepareRwSpriteTexture } from './lib/jsrw/renderer/world/sky/RWSpriteUtils.js';
 import {
   disposeWorld,
@@ -51,6 +57,7 @@ import {
 } from './lib/selection';
 import saIcon from './assets/sa.png';
 import vcsIcon from './assets/vcs.png';
+import genevaFontUrl from './assets/font/Geneva.ttf?url';
 import vcsDefaultMapUrl from './assets/maps/vcs.zip?url';
 import skyVertexShader from './shaders/sky.vertex.glsl.js';
 import skyFragmentShader from './shaders/sky.fragment.glsl.js';
@@ -588,10 +595,15 @@ function App() {
   const imguiCanvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const zipInputRef = useRef(null);
+  const cutsceneFolderInputRef = useRef(null);
+  const cutsceneZipInputRef = useRef(null);
 
   const rendererRef = useRef(null);
   const sceneRef = useRef(null);
+  const cutsceneSceneRef = useRef(new THREE.Scene());
   const cameraRef = useRef(null);
+  const editorCameraRef = useRef(null);
+  const cutsceneCameraRef = useRef(null);
   const skySceneRef = useRef(null);
   const skyCameraRef = useRef(null);
   const skyMaterialRef = useRef(null);
@@ -605,11 +617,15 @@ function App() {
   const sunLightRef = useRef(null);
   const hemiLightRef = useRef(null);
   const worldRootRef = useRef(new THREE.Group());
+  const cutsceneActorsRootRef = useRef(new THREE.Group());
   const worldOpaqueSceneRef = useRef(new THREE.Scene());
   const worldOpaqueRootRef = useRef(new THREE.Group());
   const worldOpaqueSunLightRef = useRef(null);
   const worldOpaqueSunTargetRef = useRef(null);
   const worldOpaqueHemiLightRef = useRef(null);
+  const cutsceneSunLightRef = useRef(null);
+  const cutsceneSunTargetRef = useRef(null);
+  const cutsceneHemiLightRef = useRef(null);
   const rwRenderQueueRef = useRef(null);
   const gtaSessionRef = useRef(createJsrwGtaSession());
   const jsrwSessionRef = useRef(gtaSessionRef.current.getRendererSession());
@@ -740,6 +756,12 @@ function App() {
   const buildActiveRef = useRef(false);
   const renderResourcesReadyRef = useRef(false);
   const resourceCacheRef = useRef(createResourceCacheState());
+  const cutsceneManagerRef = useRef(new CutsceneManager());
+  const cutsceneCameraSnapshotRef = useRef({
+    position: new THREE.Vector3(),
+    quaternion: new THREE.Quaternion(),
+    fov: 60,
+  });
   const skyParticleTexturesRef = useRef({
     moonTexture: null,
     starTexture: null,
@@ -887,6 +909,14 @@ function App() {
     renderStages: { ...FRAME_STAGE_DEBUG_DEFAULTS },
     pipelineDebug: cloneRWPipelineSelections(RW_PIPELINE_SELECTION_DEFAULTS),
     appMode: APP_MODE_EDITOR,
+    cutscene: {
+      selectedName: '',
+      loop: false,
+      showActorSkeletons: true,
+      attachChildName: '',
+      attachParentName: '',
+      attachTargetKey: '',
+    },
     backendSelection: 'WebGL',
     windows: Object.fromEntries(WINDOW_DEFS.map((item) => [item.key, item.defaultVisible])),
   });
@@ -951,6 +981,7 @@ function App() {
   const [selectedTextureDetail, setSelectedTextureDetail] = useState(null);
   const [showMapPickerFallback, setShowMapPickerFallback] = useState(false);
   const statusRef = useRef(status);
+  const activeBackendRef = useRef(activeBackend);
   const statsRef = useRef(stats);
   const buildProgressRef = useRef(buildProgress);
   const defaultMapDownloadRef = useRef(defaultMapDownload);
@@ -958,6 +989,7 @@ function App() {
   const consoleLinesRef = useRef(consoleLines);
   const failedModelsRef = useRef(failedModels);
   const loadedFilesRef = useRef(loadedFiles);
+  const cutsceneSubtitleRef = useRef(null);
 
   useEffect(() => {
     statusRef.current = status;
@@ -980,6 +1012,7 @@ function App() {
   }, [showGameIcon]);
 
   useEffect(() => {
+    activeBackendRef.current = activeBackend;
     uiStateRef.current.backendSelection = activeBackend;
   }, [activeBackend]);
 
@@ -1182,6 +1215,61 @@ function App() {
     setDefaultMapDownload,
   ]);
 
+  const applyCutsceneLoadResult = useCallback((result, sourceLabel = '') => {
+    const names = Array.isArray(result?.names) ? result.names : [];
+    cutsceneManagerRef.current.deleteCutsceneData();
+    uiStateRef.current.cutscene.selectedName = names[0] || '';
+    cutsceneManagerRef.current.status.selectedName = names[0] || '';
+    cutsceneManagerRef.current.status.availableNames = [...names];
+    cutsceneManagerRef.current.status.lastError = '';
+    const label = sourceLabel || result?.sourceLabel || 'cutscene package';
+    pushConsoleLine('info', `Cutscene package loaded: ${label} (${names.length} scenes)`, 'cutscene');
+    setStatus(`Cutscene package ready: ${names.length} scenes`);
+  }, [pushConsoleLine]);
+
+  const onPickCutsceneFolder = useCallback(async (event) => {
+    const input = event.target;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (files.length === 0) return;
+
+    const sourceLabel = files[0]?.webkitRelativePath?.split('/')?.[0] || 'cutscene folder';
+    try {
+      const result = await cutsceneManagerRef.current.loadFolderFiles(files, { sourceLabel });
+      applyCutsceneLoadResult(result, sourceLabel);
+    } catch (error) {
+      const message = formatConsoleArg(error);
+      cutsceneManagerRef.current.status.lastError = message;
+      pushConsoleLine('error', `Cutscene folder load failed: ${message}`, 'cutscene');
+      setStatus(`Cutscene load failed: ${message}`);
+    }
+  }, [applyCutsceneLoadResult, pushConsoleLine]);
+
+  const onPickCutsceneZip = useCallback(async (event) => {
+    const input = event.target;
+    const file = input.files?.[0] || null;
+    input.value = '';
+    if (!file) return;
+
+    try {
+      const result = await cutsceneManagerRef.current.loadZipFile(file);
+      applyCutsceneLoadResult(result, file.name || 'cutscene.zip');
+    } catch (error) {
+      const message = formatConsoleArg(error);
+      cutsceneManagerRef.current.status.lastError = message;
+      pushConsoleLine('error', `Cutscene zip load failed: ${message}`, 'cutscene');
+      setStatus(`Cutscene load failed: ${message}`);
+    }
+  }, [applyCutsceneLoadResult, pushConsoleLine]);
+
+  const openCutsceneFolderPicker = useCallback(() => {
+    cutsceneFolderInputRef.current?.click?.();
+  }, []);
+
+  const openCutsceneZipPicker = useCallback(() => {
+    cutsceneZipInputRef.current?.click?.();
+  }, []);
+
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
@@ -1317,21 +1405,39 @@ function App() {
       skyCloudScene.add(sprite);
       return sprite;
     });
-    const hudScene = new THREE.Scene();
-    const hudCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
-    hudCamera.position.set(0, 0, 1);
     const skyFeature = new SkyRendererBundle();
     skyFeature.setParticleTextures(skyParticleTexturesRef.current);
 
-    const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 60000);
-    camera.up.copy(WORLD_UP);
-    camera.position.set(300, 300, 220);
-    camera.lookAt(0, 0, 0);
-    const orbitControls = new OrbitControls(camera, canvas);
+    const editorCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 60000);
+    editorCamera.up.copy(WORLD_UP);
+    editorCamera.position.set(300, 300, 220);
+    editorCamera.lookAt(0, 0, 0);
+    const cutsceneCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 60000);
+    cutsceneCamera.up.copy(WORLD_UP);
+    cutsceneCamera.position.copy(editorCamera.position);
+    cutsceneCamera.quaternion.copy(editorCamera.quaternion);
+    const orbitControls = new OrbitControls(editorCamera, canvas);
     orbitControls.enabled = false;
     orbitControls.enableDamping = true;
     orbitControls.target.set(0, 0, 0);
     orbitControls.update();
+
+    const copyCameraState = (source, target) => {
+      if (!source || !target) return;
+      target.position.copy(source.position);
+      target.quaternion.copy(source.quaternion);
+      target.up.copy(source.up);
+      target.fov = source.fov;
+      target.near = source.near;
+      target.far = source.far;
+      target.aspect = source.aspect;
+      target.updateProjectionMatrix();
+      target.updateMatrixWorld(true);
+    };
+
+    const activateCamera = (nextCamera) => {
+      cameraRef.current = nextCamera || editorCamera;
+    };
 
     const updateLookFromAngles = () => {
       const look = lookStateRef.current;
@@ -1341,12 +1447,13 @@ function App() {
         Math.sin(look.pitch),
         Math.cos(look.yaw) * cp,
       );
-      camera.lookAt(camera.position.clone().add(direction));
+      editorCamera.lookAt(editorCamera.position.clone().add(direction));
+      editorCamera.updateMatrixWorld(true);
     };
 
     const syncAnglesFromCamera = () => {
       const direction = new THREE.Vector3();
-      camera.getWorldDirection(direction);
+      editorCamera.getWorldDirection(direction);
       lookStateRef.current.yaw = Math.atan2(direction.x, direction.z);
       lookStateRef.current.pitch = Math.asin(Math.max(-1, Math.min(1, direction.y)));
     };
@@ -1354,10 +1461,10 @@ function App() {
 
     const playerController = new PlayerControllerAdapter({
       scene,
-      camera,
+      camera: editorCamera,
       controls: orbitControls,
       externalFactory: createExternalPlayerController,
-      getSpawnPosition: () => camera.position.clone(),
+      getSpawnPosition: () => editorCamera.position.clone(),
       playerModel: {
         url: '/glb/person.glb',
         scale: 0.01,
@@ -1386,7 +1493,33 @@ function App() {
       setMode: (nextMode) => {
         uiStateRef.current.appMode = nextMode;
       },
-      onModeStatus: (nextMode, controllerMode, enableTest) => {
+      onModeStatus: (nextMode, controllerMode, enableTest, prevMode) => {
+        if (nextMode === APP_MODE_CUTSCENE) {
+          cutsceneCameraSnapshotRef.current.position.copy(editorCamera.position);
+          cutsceneCameraSnapshotRef.current.quaternion.copy(editorCamera.quaternion);
+          cutsceneCameraSnapshotRef.current.fov = editorCamera.fov;
+          copyCameraState(editorCamera, cutsceneCamera);
+          const cutsceneName = uiStateRef.current.cutscene?.selectedName || '';
+          const cutsceneManager = cutsceneManagerRef.current;
+          const loadedName = String(cutsceneManager.status.loadedDefinition?.name || '').trim();
+          if (cutsceneName && loadedName === cutsceneName) {
+            cutsceneManager.seek(cutsceneManager.status.timeMs || 0, cutsceneCamera);
+          } else if (cutsceneName) {
+            void cutsceneManager.setupCutsceneToStart(cutsceneCamera, cutsceneName).catch((error) => {
+              const message = formatConsoleArg(error);
+              cutsceneManager.status.lastError = message;
+              pushConsoleLine('error', `Cutscene setup failed: ${message}`, 'cutscene');
+            });
+          }
+          cutsceneManager.setVisible(true);
+          activateCamera(cutsceneCamera);
+        } else {
+          cutsceneManagerRef.current.setVisible(false);
+          activateCamera(editorCamera);
+          if (prevMode === APP_MODE_CUTSCENE) {
+            syncAnglesFromCamera();
+          }
+        }
         setStatus(`Mode: ${nextMode}${enableTest ? ` (${controllerMode})` : ''}`);
       },
       onModeError: (error) => {
@@ -1408,8 +1541,18 @@ function App() {
     const opaqueSun = sun.clone();
     const opaqueSunTarget = new THREE.Object3D();
     opaqueSun.target = opaqueSunTarget;
+    const cutsceneHemi = hemi.clone();
+    cutsceneHemi.intensity = 1.1;
+    const cutsceneSun = sun.clone();
+    cutsceneSun.intensity = 1.0;
+    const cutsceneSunTarget = new THREE.Object3D();
+    cutsceneSun.target = cutsceneSunTarget;
     const worldOpaqueScene = worldOpaqueSceneRef.current;
     const worldOpaqueRoot = worldOpaqueRootRef.current;
+    const cutsceneScene = cutsceneSceneRef.current;
+    const cutsceneActorsRoot = cutsceneActorsRootRef.current;
+    cutsceneActorsRoot.name = 'CutsceneActorsSceneRoot';
+    cutsceneActorsRoot.visible = true;
 
     const grid = new THREE.GridHelper(5000, 140, 0x334455, 0x6e7f91);
 
@@ -1420,28 +1563,23 @@ function App() {
     worldOpaqueScene.clear();
     worldOpaqueScene.autoUpdate = false;
     worldOpaqueScene.add(opaqueHemi, opaqueSun, opaqueSunTarget, worldOpaqueRoot);
+    cutsceneScene.clear();
+    cutsceneScene.background = null;
+    cutsceneScene.fog = null;
+    cutsceneScene.autoUpdate = true;
+    cutsceneScene.add(cutsceneHemi, cutsceneSun, cutsceneSunTarget, cutsceneActorsRoot);
 
     const textureLoader = new THREE.TextureLoader();
     const iconTextures = {
       SA: textureLoader.load(saIcon),
       VCS: textureLoader.load(vcsIcon),
     };
-    const iconMaterial = new THREE.SpriteMaterial({
-      map: iconTextures.VCS,
-      transparent: true,
-      alphaTest: 0.01,
-      depthTest: false,
-      depthWrite: false,
-    });
-    const gameIconSprite = new THREE.Sprite(iconMaterial);
-    gameIconSprite.center.set(1, 1);
-    gameIconSprite.visible = false;
-    gameIconSprite.renderOrder = 9999;
-    hudScene.add(gameIconSprite);
 
     rendererRef.current = renderer;
     sceneRef.current = scene;
-    cameraRef.current = camera;
+    editorCameraRef.current = editorCamera;
+    cutsceneCameraRef.current = cutsceneCamera;
+    activateCamera(editorCamera);
     skySceneRef.current = skyScene;
     skyCameraRef.current = skyCamera;
     skyMaterialRef.current = skyMaterial;
@@ -1455,6 +1593,17 @@ function App() {
     const jsrwSession = jsrwSessionRef.current;
     jsrwSession.setRoot(worldRootRef.current, { traversalRoots: getWorldTraversalRoots() });
     rwRenderQueueRef.current = jsrwSession.getRenderQueue() || jsrwSession.createRenderQueue(worldRootRef.current);
+    cutsceneManagerRef.current.setSceneRoot(cutsceneActorsRoot);
+    cutsceneManagerRef.current.setRendererSession(jsrwSession);
+    cutsceneManagerRef.current.setWorldContextGetter(() => gtaSessionRef.current.getWorldContext());
+    cutsceneManagerRef.current.setLogger((level, message) => pushConsoleLine(level, message, 'cutscene'));
+    cutsceneManagerRef.current.setRuntimeContextGetters({
+      getActiveBackend: () => activeBackendRef.current,
+      getWorldGameVersion: () => worldGameVersionRef.current || 'VCS',
+      getTimecycleCurrent: () => timecycleStateRef.current?.current || null,
+    });
+    cutsceneManagerRef.current.setDebugSkeletonsVisible(uiStateRef.current.cutscene.showActorSkeletons);
+    cutsceneManagerRef.current.setVisible(playerModeManager.isCutsceneMode());
     gridRef.current = grid;
     axesRef.current = axes;
     sunLightRef.current = sun;
@@ -1462,6 +1611,16 @@ function App() {
     worldOpaqueSunLightRef.current = opaqueSun;
     worldOpaqueSunTargetRef.current = opaqueSunTarget;
     worldOpaqueHemiLightRef.current = opaqueHemi;
+    cutsceneSunLightRef.current = cutsceneSun;
+    cutsceneSunTargetRef.current = cutsceneSunTarget;
+    cutsceneHemiLightRef.current = cutsceneHemi;
+    const hudRuntime = jsrwSession.createHudRuntime({
+      iconTextures,
+      fontUrl: genevaFontUrl,
+    });
+    hudRuntime.setGameVersion(uiStateRef.current.gameVersion);
+    hudRuntime.setShowGameIcon(showGameIconRef.current);
+    hudRuntime.setSubtitleCue(cutsceneSubtitleRef.current);
 
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
@@ -1469,9 +1628,11 @@ function App() {
       const height = Math.max(1, Math.floor(container.clientHeight));
       imguiCanvas.width = Math.max(1, Math.floor(width * dpr));
       imguiCanvas.height = Math.max(1, Math.floor(height * dpr));
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-      hudCamera.updateProjectionMatrix();
+      editorCamera.aspect = width / height;
+      editorCamera.updateProjectionMatrix();
+      cutsceneCamera.aspect = width / height;
+      cutsceneCamera.updateProjectionMatrix();
+      hudRuntime.setViewport(width, height);
       lodUpdateStateRef.current.needsRefresh = true;
       if (!rendererReady) return;
       rendererHost.resize({ width, height, dpr });
@@ -1583,7 +1744,7 @@ function App() {
     };
 
     const trySelectObjectFromPointer = (event) => {
-      if (playerModeManager.isTestMode()) return;
+      if (!playerModeManager.isEditorMode()) return;
       if (imguiCaptureRef.current.mouse) return;
       const cameraObj = cameraRef.current;
       const traversalRoots = getWorldTraversalRoots();
@@ -1616,7 +1777,7 @@ function App() {
     };
 
     const onMouseDown = (event) => {
-      if (playerModeManager.isTestMode()) return;
+      if (!playerModeManager.isEditorMode()) return;
       if (event.button !== 0 || imguiCaptureRef.current.mouse) return;
       pointerStateRef.current.down = true;
       pointerStateRef.current.startX = event.clientX;
@@ -1638,7 +1799,7 @@ function App() {
       }
     };
     const onMouseMove = (event) => {
-      if (playerModeManager.isTestMode()) return;
+      if (!playerModeManager.isEditorMode()) return;
       if (pointerStateRef.current.down) {
         const dx = event.clientX - pointerStateRef.current.startX;
         const dy = event.clientY - pointerStateRef.current.startY;
@@ -1661,6 +1822,46 @@ function App() {
     const switchAppMode = (nextModeRaw) => {
       lookStateRef.current.active = false;
       return playerModeManager.switchMode(nextModeRaw);
+    };
+    const prepareSelectedCutscene = async (options = {}) => {
+      const cutsceneName = String(uiStateRef.current.cutscene?.selectedName || '').trim();
+      if (!cutsceneName) {
+        throw new Error('No cutscene selected');
+      }
+      const manager = cutsceneManagerRef.current;
+      manager.setLoop(uiStateRef.current.cutscene.loop);
+      return manager.setupCutsceneToStart(cutsceneCameraRef.current || cutsceneCamera, cutsceneName, options);
+    };
+    const runCutsceneAction = async (action, errorPrefix) => {
+      try {
+        await action();
+      } catch (error) {
+        const message = formatConsoleArg(error);
+        cutsceneManagerRef.current.status.lastError = message;
+        pushConsoleLine('error', `${errorPrefix}: ${message}`, 'cutscene');
+        setStatus(`${errorPrefix}: ${message}`);
+      }
+    };
+    const syncCutsceneSubtitle = (subtitleCue) => {
+      const nextCue = subtitleCue
+        ? {
+          id: subtitleCue.id,
+          text: subtitleCue.text,
+          speaker: subtitleCue.speaker || '',
+          startMs: subtitleCue.startMs,
+          endMs: subtitleCue.endMs,
+        }
+        : null;
+      const previousCue = cutsceneSubtitleRef.current;
+      if (
+        previousCue?.id === nextCue?.id
+        && previousCue?.text === nextCue?.text
+        && previousCue?.speaker === nextCue?.speaker
+      ) {
+        return;
+      }
+      cutsceneSubtitleRef.current = nextCue;
+      jsrwSessionRef.current.getHudRuntime()?.setSubtitleCue(nextCue);
     };
     const getImguiTextureForImage = (textureSource) => {
       const gl = imguiGlRef.current;
@@ -1822,11 +2023,15 @@ function App() {
         fpsSampleCountRef.current = Math.min(fpsSampleCountRef.current + 1, fpsHistoryRef.current.length);
       }
       renderer.info?.reset?.();
+      const activeCamera = cameraRef.current || editorCamera;
 
       if (dt > 0) {
         if (playerModeManager.isTestMode()) {
           // In test mode, let three-player-controller fully drive character/camera.
           playerModeManager.update(dt);
+        } else if (playerModeManager.isCutsceneMode()) {
+          cutsceneManagerRef.current.setLoop(uiStateRef.current.cutscene.loop);
+          cutsceneManagerRef.current.update(dt, cutsceneCameraRef.current || activeCamera);
         } else if (!imguiCaptureRef.current.keyboard) {
           const move = moveStateRef.current;
           const inputX = (move.right ? 1 : 0) - (move.left ? 1 : 0);
@@ -1849,12 +2054,17 @@ function App() {
             delta.y += inputZ;
             if (delta.lengthSq() > 0) {
               delta.normalize().multiplyScalar(velocity * dt);
-              camera.position.add(delta);
+              editorCamera.position.add(delta);
               updateLookFromAngles();
             }
           }
         }
       }
+      syncCutsceneSubtitle(
+        playerModeManager.isCutsceneMode()
+          ? cutsceneManagerRef.current.getStatus().subtitleCue
+          : null,
+      );
 
       const timecycleCurrent = gtaSessionRef.current.sampleTimecycle({
         timecycleDataRef,
@@ -1880,10 +2090,10 @@ function App() {
       const effectiveFarClip = Number.isFinite(timecycleCurrent?.values?.farClip)
         ? timecycleCurrent.values.farClip
         : uiStateRef.current.renderingDistance;
-      const targetFarClip = Math.max(camera.near + 1, effectiveFarClip);
-      if (Math.abs(camera.far - targetFarClip) > 1e-6) {
-        camera.far = targetFarClip;
-        camera.updateProjectionMatrix();
+      const targetFarClip = Math.max(activeCamera.near + 1, effectiveFarClip);
+      if (Math.abs(activeCamera.far - targetFarClip) > 1e-6) {
+        activeCamera.far = targetFarClip;
+        activeCamera.updateProjectionMatrix();
       }
       const skyMaterial = skyMaterialRef.current;
       const baseSkyTopColor = timecycleCurrent?.three?.skyTop?.isColor
@@ -1927,14 +2137,14 @@ function App() {
           flatForward: new THREE.Vector3(),
           horizonPoint: new THREE.Vector3(),
         };
-        camera.getWorldDirection(cameraForward);
-        cameraRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-        cameraUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
-        const projectedHorizonY = computeProjectedHorizonUvY(camera, horizonScratch);
+        activeCamera.getWorldDirection(cameraForward);
+        cameraRight.setFromMatrixColumn(activeCamera.matrixWorld, 0).normalize();
+        cameraUp.setFromMatrixColumn(activeCamera.matrixWorld, 1).normalize();
+        const projectedHorizonY = computeProjectedHorizonUvY(activeCamera, horizonScratch);
         const lodDistMultiplier = Math.max(0, uiStateRef.current.lodDistMultiplier ?? 1);
         const horizonStripSpan = (
           SKY_HORIZON_STRIP_HEIGHT
-          + (Math.max(camera.position.y, 0) / 300)
+          + (Math.max(activeCamera.position.y, 0) / 300)
           + (cameraUp.y < 0 ? 1.0 : Math.abs(cameraRight.y))
         ) * lodDistMultiplier;
         const lowerBandEndY = THREE.MathUtils.clamp(projectedHorizonY - SKY_SMALL_STRIP_HEIGHT - horizonStripSpan, 0, 1);
@@ -1945,9 +2155,9 @@ function App() {
         skyMaterial.uniforms.uCameraForward.value.copy(cameraForward);
         skyMaterial.uniforms.uCameraRight.value.copy(cameraRight);
         skyMaterial.uniforms.uCameraUp.value.copy(cameraUp);
-        skyMaterial.uniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
-        skyMaterial.uniforms.uAspect.value = camera.aspect;
-        skyMaterial.uniforms.uBelowHorizonMix.value = THREE.MathUtils.clamp((camera.position.y - 25) / 80, 0, 1);
+        skyMaterial.uniforms.uTanHalfFov.value = Math.tan(THREE.MathUtils.degToRad(activeCamera.fov * 0.5));
+        skyMaterial.uniforms.uAspect.value = activeCamera.aspect;
+        skyMaterial.uniforms.uBelowHorizonMix.value = THREE.MathUtils.clamp((activeCamera.position.y - 25) / 80, 0, 1);
         skyMaterial.uniforms.uHorizonY.value = projectedHorizonY;
         skyMaterial.uniforms.uSmallStripHeight.value = SKY_SMALL_STRIP_HEIGHT;
         skyMaterial.uniforms.uHorizonStrength.value = 1.0;
@@ -1965,7 +2175,7 @@ function App() {
         }
       }
       const cameraForwardForClouds = new THREE.Vector3();
-      camera.getWorldDirection(cameraForwardForClouds);
+      activeCamera.getWorldDirection(cameraForwardForClouds);
       const cloudTurnFactor = Math.sin(Math.atan2(cameraForwardForClouds.x, cameraForwardForClouds.z) - 0.85);
       const cloudWind = 1.0;
       if (dt > 0) {
@@ -1982,7 +2192,7 @@ function App() {
       const moonSettings = uiStateRef.current.moon;
       const starsSettings = uiStateRef.current.stars;
       const sunSettings = uiStateRef.current.sun;
-      const skyFrame = skyFeature?.prepareFrame(camera, timecycleCurrent, {
+      const skyFrame = skyFeature?.prepareFrame(activeCamera, timecycleCurrent, {
         moon: moonSettings,
         stars: starsSettings,
         sun: sunSettings,
@@ -1994,9 +2204,9 @@ function App() {
         if (!sprite) continue;
         sprite.visible = lowCloudAlpha > 0.001;
         sprite.position.set(
-          camera.position.x + (800 * LOW_CLOUD_OFFSETS_X[index]),
+          activeCamera.position.x + (800 * LOW_CLOUD_OFFSETS_X[index]),
           (60 * LOW_CLOUD_HEIGHTS[index]) + 40,
-          camera.position.z + (800 * LOW_CLOUD_OFFSETS_Z[index]),
+          activeCamera.position.z + (800 * LOW_CLOUD_OFFSETS_Z[index]),
         );
         sprite.material.color.copy(lowCloudColor).multiplyScalar(lowCloudIntensity);
         sprite.material.opacity = lowCloudAlpha;
@@ -2020,13 +2230,13 @@ function App() {
         sprite.visible = fluffyCloudAlpha > 0.001;
         if (highlightSprite) highlightSprite.visible = false;
         sprite.position.set(
-          camera.position.x + (localX * cloudRotCos) + (localZ * cloudRotSin),
+          activeCamera.position.x + (localX * cloudRotCos) + (localZ * cloudRotSin),
           (40 * FLUFFY_HEIGHTS[index]) + 40,
-          camera.position.z + (localX * cloudRotSin) - (localZ * cloudRotCos),
+          activeCamera.position.z + (localX * cloudRotSin) - (localZ * cloudRotCos),
         );
         sprite.material.color.copy(fluffyBottomColor).lerp(fluffyTopColor, 0.4);
         if (sunMetrics?.onScreen && sunSettings.enabled && sunMetrics.rwScreen) {
-          const spriteRwScreen = calcScreenCoorsLikeRw(camera, sprite.position, viewportWidth, viewportHeight, false);
+          const spriteRwScreen = calcScreenCoorsLikeRw(activeCamera, sprite.position, viewportWidth, viewportHeight, false);
           if (spriteRwScreen) {
             const distanceToSun = Math.hypot(
               spriteRwScreen.x - sunMetrics.rwScreen.x,
@@ -2062,7 +2272,7 @@ function App() {
         }
       }
       const sunState = skyFeature?.finalizeSunFrame({
-        camera,
+        camera: activeCamera,
         worldRoot: getWorldTraversalRoots(),
         timecycleSample: timecycleCurrent,
         settings: { sun: sunSettings },
@@ -2104,8 +2314,8 @@ function App() {
           ? toThreeColorFromTimecycleValue(timecycleCurrent.values.directional)
           : new THREE.Color(1, 1, 1);
         sunLight.color.copy(directionalColor).multiplyScalar(sunLightsMult);
-        sunLight.position.copy(camera.position).addScaledVector(sunState?.direction || new THREE.Vector3(0.5, 1, 0.3), 1200);
-        sunLight.target.position.copy(camera.position);
+        sunLight.position.copy(activeCamera.position).addScaledVector(sunState?.direction || new THREE.Vector3(0.5, 1, 0.3), 1200);
+        sunLight.target.position.copy(activeCamera.position);
         sunLight.target.updateMatrixWorld();
         sunLight.intensity = computeSunLightIntensityFromState(sunState) * sunLightsMult;
       }
@@ -2132,7 +2342,7 @@ function App() {
       }
 
       if (timecycleCurrent?.three?.fogColor?.isColor) {
-        const fogNear = Math.max(camera.near, Math.min(timecycleCurrent.values.fogStart, timecycleCurrent.values.farClip - 1));
+        const fogNear = Math.max(activeCamera.near, Math.min(timecycleCurrent.values.fogStart, timecycleCurrent.values.farClip - 1));
         const fogFar = Math.max(fogNear + 1, timecycleCurrent.values.farClip);
         if (!scene.fog || !scene.fog.isFog) {
           scene.fog = new THREE.Fog(timecycleCurrent.three.fogColor.clone(), fogNear, fogFar);
@@ -2153,7 +2363,7 @@ function App() {
         activeFadeCountRef,
         activeRenderChunksRef,
         bigBuildingItemsRef,
-        camera,
+        camera: activeCamera,
         chunkFrustumRef,
         chunkOcclusionStateRef,
         chunkProjScreenMatrixRef,
@@ -2175,15 +2385,13 @@ function App() {
       try {
         gtaSessionRef.current.renderFrame({
           activeBackend,
-          camera,
+          camera: activeCamera,
+          cutsceneScene: cutsceneSceneRef.current,
+          cutsceneSubtitleCue: cutsceneSubtitleRef.current,
           dt,
           frameVisibilityRef,
-          gameIconSprite,
           grid,
           axes,
-          hudCamera,
-          hudScene,
-          iconTextures,
           lastDisableBackfaceCullingRef,
           lastDisableVertexColorRef,
           lastPipelineSelectionSignatureRef,
@@ -2287,6 +2495,9 @@ function App() {
             }
             if (ImGui.MenuItem('Test', '', uiStateRef.current.appMode === APP_MODE_TEST)) {
               switchAppMode(APP_MODE_TEST).catch(() => {});
+            }
+            if (ImGui.MenuItem('Cutscene', '', uiStateRef.current.appMode === APP_MODE_CUTSCENE)) {
+              switchAppMode(APP_MODE_CUTSCENE).catch(() => {});
             }
             ImGui.EndMenu();
           }
@@ -2514,6 +2725,305 @@ function App() {
         }
 
           ImGui.TextWrapped(liveStatus);
+          ImGui.End();
+        }
+
+        if (isWindowOpen('cutscene')) {
+          const cutsceneStatus = cutsceneManagerRef.current.getStatus();
+          ImGui.SetNextWindowPos(new Vec2(16, 380), ImGui.Cond.Once);
+          ImGui.SetNextWindowSize(new Vec2(420, 0), ImGui.Cond.Once);
+          ImGui.Begin(
+            'Cutscene',
+            (value = isWindowOpen('cutscene')) => setWindowOpen('cutscene', value),
+          );
+
+          ImGui.Text(`Package: ${cutsceneStatus.sourceLabel || 'none'}`);
+          ImGui.Text(`Scenes: ${cutsceneStatus.availableNames.length}`);
+          ImGui.Text(`Mode: ${uiStateRef.current.appMode}`);
+          if (ImGui.Button('Load folder')) {
+            openCutsceneFolderPicker();
+          }
+          ImGui.SameLine();
+          if (ImGui.Button('Load zip')) {
+            openCutsceneZipPicker();
+          }
+
+          if (cutsceneStatus.availableNames.length > 0) {
+            const selectedCutsceneName = uiStateRef.current.cutscene.selectedName || cutsceneStatus.availableNames[0];
+            if (ImGui.BeginCombo('Cutscene Name', selectedCutsceneName)) {
+              for (const name of cutsceneStatus.availableNames) {
+                const selected = selectedCutsceneName === name;
+                if (ImGui.Selectable(name, selected)) {
+                  uiStateRef.current.cutscene.selectedName = name;
+                  cutsceneManagerRef.current.status.selectedName = name;
+                  cutsceneManagerRef.current.deleteCutsceneData();
+                }
+                if (selected) ImGui.SetItemDefaultFocus();
+              }
+              ImGui.EndCombo();
+            }
+          } else {
+            ImGui.TextWrapped('No `.CAM` files loaded yet. Import a cutscene folder or zip first.');
+          }
+
+          let loopEnabled = uiStateRef.current.cutscene.loop;
+          if (ImGui.Checkbox(
+            'Loop',
+            (value = loopEnabled) => {
+              loopEnabled = value;
+              return value;
+            },
+          )) {
+            uiStateRef.current.cutscene.loop = loopEnabled;
+            cutsceneManagerRef.current.setLoop(loopEnabled);
+          }
+          let showActorSkeletons = uiStateRef.current.cutscene.showActorSkeletons;
+          if (ImGui.Checkbox(
+            'Show Actor Skeletons',
+            (value = showActorSkeletons) => {
+              showActorSkeletons = value;
+              return value;
+            },
+          )) {
+            uiStateRef.current.cutscene.showActorSkeletons = showActorSkeletons;
+            cutsceneManagerRef.current.setDebugSkeletonsVisible(showActorSkeletons);
+          }
+
+          const hasSelectedCutscene = Boolean(uiStateRef.current.cutscene.selectedName);
+          if (!hasSelectedCutscene) ImGui.BeginDisabled();
+          if (ImGui.Button('Preview')) {
+            void runCutsceneAction(async () => {
+              await prepareSelectedCutscene();
+              cutsceneManagerRef.current.pause();
+            }, 'Cutscene preview failed');
+          }
+          ImGui.SameLine();
+          if (ImGui.Button('Play')) {
+            void runCutsceneAction(async () => {
+              const selectedName = String(uiStateRef.current.cutscene.selectedName || '').trim();
+              const loadedName = String(cutsceneManagerRef.current.status.loadedDefinition?.name || '').trim();
+              if (!loadedName || loadedName !== selectedName) {
+                await prepareSelectedCutscene();
+              }
+              cutsceneManagerRef.current.setLoop(uiStateRef.current.cutscene.loop);
+              cutsceneManagerRef.current.play();
+              if (!playerModeManager.isCutsceneMode()) {
+                await switchAppMode(APP_MODE_CUTSCENE);
+              }
+            }, 'Cutscene play failed');
+          }
+          ImGui.SameLine();
+          if (ImGui.Button('Pause')) {
+            cutsceneManagerRef.current.pause();
+          }
+          ImGui.SameLine();
+          if (ImGui.Button('Stop')) {
+            cutsceneManagerRef.current.stop(cutsceneCameraRef.current);
+          }
+          if (!hasSelectedCutscene) ImGui.EndDisabled();
+
+          const durationMs = Math.max(0, cutsceneStatus.durationMs || 0);
+          let timeValue = Math.round(cutsceneStatus.timeMs || 0);
+          if (durationMs > 0) {
+            if (ImGui.SliderInt(
+              'Time',
+              (value = timeValue) => {
+                timeValue = value;
+                return value;
+              },
+              0,
+              durationMs,
+              `${timeValue} ms`,
+            )) {
+              cutsceneManagerRef.current.seek(timeValue, cutsceneCameraRef.current);
+            }
+          } else {
+            ImGui.TextWrapped('No cutscene timeline loaded.');
+          }
+
+          const definition = cutsceneStatus.loadedDefinition;
+          const debugSample = cutsceneStatus.debugSample;
+          const actorRuntime = cutsceneStatus.actorRuntime || {
+            actors: [],
+            warnings: [],
+            attachments: [],
+            loadedActorCount: 0,
+            hasWorldContext: false,
+          };
+          const audioRuntime = cutsceneStatus.audioRuntime || {
+            fileName: '',
+            hasAudio: false,
+            ready: false,
+            playing: false,
+            durationSeconds: 0,
+            lastError: '',
+          };
+          ImGui.Separator();
+          ImGui.Text(`Loaded: ${definition?.name || 'none'}`);
+          ImGui.Text(`Playing: ${cutsceneStatus.playing ? 'yes' : 'no'}`);
+          ImGui.Text(`Duration: ${durationMs} ms`);
+          ImGui.Text(`Has .CUT: ${definition?.metadata?.hasCutFile ? 'yes' : 'no'}`);
+          ImGui.Text(`Has .IFP: ${definition?.metadata?.hasIfpFile ? 'yes' : 'no'}`);
+          ImGui.Text(`Has Voice: ${audioRuntime.hasAudio ? 'yes' : 'no'}`);
+          ImGui.Text(`Voice File: ${audioRuntime.fileName || 'none'}`);
+          ImGui.Text(`Voice Ready: ${audioRuntime.ready ? 'yes' : 'no'}`);
+          ImGui.Text(`Voice Playing: ${audioRuntime.playing ? 'yes' : 'no'}`);
+          ImGui.Text(`IFP Archive: ${actorRuntime.ifpArchiveName || definition?.ifpName || 'none'}`);
+          ImGui.Text(`IFP Version: ${actorRuntime.ifpVersion || 'n/a'}`);
+          ImGui.Text(`Subtitles: ${definition?.metadata?.subtitles?.length || 0}`);
+          ImGui.Text(`Models: ${definition?.models?.length || 0}`);
+          ImGui.Text(`Motion Entries: ${definition?.motionEntries?.length || 0}`);
+          ImGui.Text(`Actor World Context: ${actorRuntime.hasWorldContext ? 'ready' : 'missing'}`);
+          ImGui.Text(`Actors Loaded: ${actorRuntime.loadedActorCount || 0}/${actorRuntime.actors?.length || 0}`);
+          const offset = definition?.offset;
+          ImGui.Text(
+            `Offset: ${offset ? `${offset.x.toFixed(3)}, ${offset.y.toFixed(3)}, ${offset.z.toFixed(3)}` : '0.000, 0.000, 0.000'}`,
+          );
+          if (debugSample?.source && debugSample?.target) {
+            ImGui.TextWrapped(
+              `GTA Camera: ${debugSample.source.x.toFixed(3)}, ${debugSample.source.y.toFixed(3)}, ${debugSample.source.z.toFixed(3)}`,
+            );
+            ImGui.TextWrapped(
+              `GTA Target: ${debugSample.target.x.toFixed(3)}, ${debugSample.target.y.toFixed(3)}, ${debugSample.target.z.toFixed(3)}`,
+            );
+          }
+          if (debugSample?.worldSource && debugSample?.worldTarget) {
+            ImGui.TextWrapped(
+              `Three Camera: ${debugSample.worldSource.x.toFixed(3)}, ${debugSample.worldSource.y.toFixed(3)}, ${debugSample.worldSource.z.toFixed(3)}`,
+            );
+            ImGui.TextWrapped(
+              `Three Target: ${debugSample.worldTarget.x.toFixed(3)}, ${debugSample.worldTarget.y.toFixed(3)}, ${debugSample.worldTarget.z.toFixed(3)}`,
+            );
+            ImGui.Text(`FOV: ${Number(debugSample.fov || 0).toFixed(3)}`);
+          }
+          if (cutsceneStatus.subtitleCue?.text) {
+            ImGui.TextWrapped(`Subtitle: ${cutsceneStatus.subtitleCue.text}`);
+          }
+          if (audioRuntime.lastError) {
+            ImGui.TextWrapped(`Voice Error: ${audioRuntime.lastError}`);
+          }
+          if (actorRuntime.warnings?.length > 0) {
+            ImGui.Separator();
+            ImGui.TextWrapped(`Actor Warnings: ${actorRuntime.warnings.length}`);
+            for (const warning of actorRuntime.warnings) {
+              ImGui.BulletText(warning);
+            }
+          }
+          if (actorRuntime.actors?.length > 0) {
+            ImGui.Separator();
+            ImGui.TextWrapped('Actors');
+            for (const actor of actorRuntime.actors) {
+              ImGui.PushID(actor.name);
+              ImGui.Text(`${actor.name} [${actor.loadStatus}]`);
+              ImGui.TextWrapped(`Model: ${actor.modelName} | Anim: ${actor.animName || 'none'}`);
+              ImGui.TextWrapped(`Clip: ${actor.clipName || 'none'} | Tracks: ${actor.matchedTrackCount || 0} | Root Motion: ${actor.hasRootMotion ? 'yes' : 'no'}`);
+              ImGui.TextWrapped(`Skinned: ${actor.skinned ? 'yes' : 'no'} | Skeleton Helper: ${actor.hasSkeletonHelper ? 'yes' : 'no'} | Skeletons: ${actor.skeletonCount || 0} | Bones: ${actor.boneCount || 0} | Frames: ${actor.frameCount || 0}`);
+              if (actor.modelSource || actor.txdSource) {
+                ImGui.TextWrapped(`Assets: DFF ${actor.modelSource || 'n/a'} | TXD ${actor.txdSource || 'n/a'}`);
+              }
+              if (actor.attachment) {
+                ImGui.TextWrapped(`Attached -> ${actor.attachment.parentName} / ${actor.attachment.targetType}:${actor.attachment.targetName}`);
+              }
+              for (const warning of actor.warnings || []) {
+                ImGui.BulletText(warning);
+              }
+              ImGui.Separator();
+              ImGui.PopID();
+            }
+
+            const loadedActors = actorRuntime.actors.filter((actor) => actor.loadStatus === 'loaded');
+            if (loadedActors.length > 0) {
+              const childNames = loadedActors.map((actor) => actor.name);
+              if (!childNames.includes(uiStateRef.current.cutscene.attachChildName)) {
+                uiStateRef.current.cutscene.attachChildName = childNames[0] || '';
+              }
+              const parentCandidates = loadedActors
+                .filter((actor) => actor.name !== uiStateRef.current.cutscene.attachChildName);
+              if (!parentCandidates.some((actor) => actor.name === uiStateRef.current.cutscene.attachParentName)) {
+                uiStateRef.current.cutscene.attachParentName = parentCandidates[0]?.name || '';
+              }
+
+              const selectedChildName = uiStateRef.current.cutscene.attachChildName || '';
+              const selectedParentName = uiStateRef.current.cutscene.attachParentName || '';
+              const selectedParentActor = loadedActors.find((actor) => actor.name === selectedParentName) || null;
+              const attachmentTargets = Array.isArray(selectedParentActor?.attachmentTargets)
+                ? selectedParentActor.attachmentTargets
+                : [];
+              const targetKeys = attachmentTargets.map((target) => `${target.type}:${target.name}`);
+              if (!targetKeys.includes(uiStateRef.current.cutscene.attachTargetKey)) {
+                uiStateRef.current.cutscene.attachTargetKey = targetKeys[0] || '';
+              }
+
+              ImGui.TextWrapped('Attachment Debug');
+              if (ImGui.BeginCombo('Attach Child', selectedChildName || 'none')) {
+                for (const actorName of childNames) {
+                  const selected = selectedChildName === actorName;
+                  if (ImGui.Selectable(actorName, selected)) {
+                    uiStateRef.current.cutscene.attachChildName = actorName;
+                  }
+                  if (selected) ImGui.SetItemDefaultFocus();
+                }
+                ImGui.EndCombo();
+              }
+              if (ImGui.BeginCombo('Attach Parent', selectedParentName || 'none')) {
+                for (const actor of parentCandidates) {
+                  const selected = selectedParentName === actor.name;
+                  if (ImGui.Selectable(actor.name, selected)) {
+                    uiStateRef.current.cutscene.attachParentName = actor.name;
+                  }
+                  if (selected) ImGui.SetItemDefaultFocus();
+                }
+                ImGui.EndCombo();
+              }
+              if (ImGui.BeginCombo('Attach Target', uiStateRef.current.cutscene.attachTargetKey || 'none')) {
+                for (const target of attachmentTargets) {
+                  const targetKey = `${target.type}:${target.name}`;
+                  const selected = uiStateRef.current.cutscene.attachTargetKey === targetKey;
+                  if (ImGui.Selectable(target.label || targetKey, selected)) {
+                    uiStateRef.current.cutscene.attachTargetKey = targetKey;
+                  }
+                  if (selected) ImGui.SetItemDefaultFocus();
+                }
+                ImGui.EndCombo();
+              }
+              const canAttach = Boolean(selectedChildName && selectedParentName && uiStateRef.current.cutscene.attachTargetKey);
+              if (!canAttach) ImGui.BeginDisabled();
+              if (ImGui.Button('Attach Selected')) {
+                const [targetType, ...targetRest] = String(uiStateRef.current.cutscene.attachTargetKey || '').split(':');
+                const targetName = targetRest.join(':');
+                try {
+                  cutsceneManagerRef.current.attachActorToActor({
+                    childName: selectedChildName,
+                    parentName: selectedParentName,
+                    targetType,
+                    targetName,
+                  });
+                } catch (error) {
+                  const message = formatConsoleArg(error);
+                  cutsceneManagerRef.current.status.lastError = message;
+                  pushConsoleLine('error', `Attach failed: ${message}`, 'cutscene');
+                }
+              }
+              if (!canAttach) ImGui.EndDisabled();
+              ImGui.SameLine();
+              const canDetach = Boolean(selectedChildName);
+              if (!canDetach) ImGui.BeginDisabled();
+              if (ImGui.Button('Detach Child')) {
+                try {
+                  cutsceneManagerRef.current.detachActor(selectedChildName);
+                } catch (error) {
+                  const message = formatConsoleArg(error);
+                  cutsceneManagerRef.current.status.lastError = message;
+                  pushConsoleLine('error', `Detach failed: ${message}`, 'cutscene');
+                }
+              }
+              if (!canDetach) ImGui.EndDisabled();
+            }
+          }
+          if (cutsceneStatus.lastError) {
+            ImGui.Separator();
+            ImGui.TextWrapped(`Error: ${cutsceneStatus.lastError}`);
+          }
           ImGui.End();
         }
 
@@ -3064,6 +3574,24 @@ function App() {
                 .join('\n');
               ImGui.InputTextMultiline(
                 '##console-text',
+                (value = text) => { text = value; return text; },
+                Math.max(4096, text.length + 1),
+                new Vec2(-1, -1),
+                ImGui.InputTextFlags.ReadOnly,
+              );
+              ImGui.EndChild();
+              ImGui.EndTabItem();
+            }
+            if (ImGui.BeginTabItem('Cutscene')) {
+              ImGui.BeginChild('console-cutscene-scroll', new Vec2(0, 0), true);
+              const cutsceneLines = consoleLinesRef.current.filter((line) => line.source === 'cutscene');
+              const start = Math.max(0, cutsceneLines.length - 500);
+              let text = cutsceneLines
+                .slice(start)
+                .map((line) => `[${line.ts}] [${line.level.toUpperCase()}] ${line.message}`)
+                .join('\n');
+              ImGui.InputTextMultiline(
+                '##cutscene-text',
                 (value = text) => { text = value; return text; },
                 Math.max(4096, text.length + 1),
                 new Vec2(-1, -1),
@@ -3997,7 +4525,6 @@ function App() {
       rendererHost.dispose();
       rendererHostRef.current = null;
       Object.values(iconTextures).forEach((texture) => texture.dispose());
-      iconMaterial.dispose();
       for (const sprite of lowCloudSpritesRef.current) {
         sprite.material.map?.dispose?.();
         sprite.material.dispose?.();
@@ -4026,6 +4553,8 @@ function App() {
     getWorldTraversalRoots,
     isWindowOpen,
     loadDefaultMap,
+    openCutsceneFolderPicker,
+    openCutsceneZipPicker,
     openMapPicker,
     openZipPicker,
     pushConsoleLine,
@@ -4060,6 +4589,26 @@ function App() {
             type="file"
             accept=".zip,application/zip"
             onChange={onPickZip}
+          />
+        </label>
+        <label className="picker">
+          <span>Pick cutscene folder</span>
+          <input
+            ref={cutsceneFolderInputRef}
+            type="file"
+            multiple
+            webkitdirectory=""
+            directory=""
+            onChange={onPickCutsceneFolder}
+          />
+        </label>
+        <label className="picker">
+          <span>Pick cutscene zip</span>
+          <input
+            ref={cutsceneZipInputRef}
+            type="file"
+            accept=".zip,application/zip"
+            onChange={onPickCutsceneZip}
           />
         </label>
         {showMapPickerFallback ? (

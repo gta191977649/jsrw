@@ -7,7 +7,9 @@ function basename(path) {
 
 export function buildFileIndex(fileList) {
   const byPath = new Map();
+  const byPathLower = new Map();
   const byBasename = new Map();
+  const byBasenameLower = new Map();
   const entries = [];
 
   for (const inputEntry of fileList) {
@@ -21,23 +23,31 @@ export function buildFileIndex(fileList) {
       normalizedPath: rel,
     };
     byPath.set(rel, entry);
+    byPathLower.set(rel.toLowerCase(), entry);
     entries.push(entry);
 
     const base = basename(rel);
     if (!byBasename.has(base)) byBasename.set(base, []);
     byBasename.get(base).push(entry);
+    const baseLower = base.toLowerCase();
+    if (!byBasenameLower.has(baseLower)) byBasenameLower.set(baseLower, []);
+    byBasenameLower.get(baseLower).push(entry);
   }
 
   function findByPathHint(inputPath) {
     const normalized = normalizePath(inputPath);
+    const normalizedLower = normalized.toLowerCase();
     if (byPath.has(normalized)) return byPath.get(normalized);
+    if (byPathLower.has(normalizedLower)) return byPathLower.get(normalizedLower);
 
     const withDataPrefix = normalized.startsWith('data/') ? normalized : `data/${normalized}`;
+    const withDataPrefixLower = withDataPrefix.toLowerCase();
     if (byPath.has(withDataPrefix)) return byPath.get(withDataPrefix);
+    if (byPathLower.has(withDataPrefixLower)) return byPathLower.get(withDataPrefixLower);
 
     for (const entry of entries) {
-      const path = entry.normalizedPath;
-      if (path.endsWith(`/${normalized}`) || path.endsWith(`/${withDataPrefix}`)) {
+      const path = entry.normalizedPath.toLowerCase();
+      if (path.endsWith(`/${normalizedLower}`) || path.endsWith(`/${withDataPrefixLower}`)) {
         return entry;
       }
     }
@@ -48,6 +58,12 @@ export function buildFileIndex(fileList) {
   function findByBasename(name) {
     const normalized = normalizePath(name);
     const candidates = byBasename.get(normalized);
+    if (!candidates || candidates.length === 0) return null;
+    return candidates[0];
+  }
+  function findByBasenameInsensitive(name) {
+    const normalized = normalizePath(name).toLowerCase();
+    const candidates = byBasenameLower.get(normalized);
     if (!candidates || candidates.length === 0) return null;
     return candidates[0];
   }
@@ -82,9 +98,11 @@ export function buildFileIndex(fileList) {
   return {
     count: byPath.size,
     byPath,
+    byPathLower,
     byBasename,
+    byBasenameLower,
     findByPathHint,
-    findByBasename,
+    findByBasename: (name) => findByBasename(name) || findByBasenameInsensitive(name),
     listByPathPrefix,
     listByExtension,
   };

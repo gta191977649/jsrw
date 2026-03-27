@@ -143,7 +143,7 @@ export class ThreeDffFactory {
       meshesByGeometry.push(geometryMeshes);
     });
 
-    clump.RWAtomicList.forEach((atomic) => {
+    clump.RWAtomicList.forEach((atomic, atomicIndex) => {
       const geometryMeshes = meshesByGeometry[atomic.geometryIndex];
       if (!geometryMeshes?.length) return;
 
@@ -196,26 +196,45 @@ export class ThreeDffFactory {
           bones[i] = nodeInfo[i].node;
         }
         if (bones.every((bone) => bone !== null)) {
-          for (const meshData of geometryMeshes) meshData.skeleton = new THREE.Skeleton(bones);
+          const sharedSkeleton = new THREE.Skeleton(bones);
+          for (const meshData of geometryMeshes) {
+            meshData.skeleton = sharedSkeleton;
+            meshData.skinRootBone = bones[0];
+            meshData.skinAtomicId = atomicIndex;
+          }
         }
       }
     });
 
+    const skinnedContainers = new Map();
     meshes.forEach((meshData) => {
       let mesh;
       if (meshData.skeleton) {
         mesh = new THREE.SkinnedMesh(meshData.geometry, meshData.material);
-        mesh.add(meshData.skeleton.bones[0]);
+        const containerKey = `${meshData.skinAtomicId}:${meshData.skinRootBone?.uuid || 'root'}`;
+        let container = skinnedContainers.get(containerKey);
+        if (!container) {
+          container = new THREE.Group();
+          container.name = `skinned_atomic_${meshData.skinAtomicId}`;
+          container.rotation.set(-Math.PI / 2, 0, Math.PI);
+          if (meshData.skinRootBone) {
+            container.add(meshData.skinRootBone);
+          }
+          group.add(container);
+          skinnedContainers.set(containerKey, container);
+        }
+        container.add(mesh);
+        group.updateMatrixWorld(true);
         mesh.bind(meshData.skeleton);
       } else {
         mesh = new THREE.Mesh(meshData.geometry, meshData.material);
+        mesh.rotation.set(-Math.PI / 2, 0, Math.PI);
+        group.add(mesh);
       }
       mesh.userData = {
         ...(mesh.userData || {}),
         rwMaterialIndex: meshData.materialIndex,
       };
-      mesh.rotation.set(-Math.PI / 2, 0, Math.PI);
-      group.add(mesh);
     });
 
     group.userData = {

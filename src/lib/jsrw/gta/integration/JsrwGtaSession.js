@@ -284,10 +284,15 @@ export class JsrwGtaSession {
     this.rendererSession = options.rendererSession || createJsrwRenderer(options);
     this.streamingRuntime = new WorldStreamingRuntime({ rendererSession: this.rendererSession });
     this.frameComposer = new FrameComposer({ rendererSession: this.rendererSession });
+    this.worldContext = null;
   }
 
   getRendererSession() {
     return this.rendererSession;
+  }
+
+  getWorldContext() {
+    return this.worldContext;
   }
 
   ensureRenderQueue(root) {
@@ -380,6 +385,7 @@ export class JsrwGtaSession {
     this.rendererSession.disposeWaterRuntime();
     this.rendererSession.disposeCoronaRuntime();
     this.rendererSession.disposeShadowRuntime();
+    this.worldContext = null;
 
     if (timecycleDataRef) timecycleDataRef.current = null;
     if (timecycleStateRef) timecycleStateRef.current = createDefaultTimecycleState();
@@ -534,6 +540,7 @@ export class JsrwGtaSession {
       }
 
       const worldContext = worldLoadResult.context;
+      this.worldContext = worldContext;
       const worldBuild = worldLoadResult.build;
       const worldLoadStats = worldLoadResult.stats;
       const defaultResources = worldLoadStats.defaultResources || worldContext.defaultResources || null;
@@ -1508,6 +1515,7 @@ export class JsrwGtaSession {
   }
 
   dispose() {
+    this.worldContext = null;
     this.rendererSession.dispose();
   }
 }

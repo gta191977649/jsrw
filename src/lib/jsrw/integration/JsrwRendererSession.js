@@ -2,6 +2,7 @@ import RWPipelineController from '../core/pipeline/controller.js';
 import { WaterRuntime } from '../renderer/water/WaterRuntime.js';
 import { CoronaRuntime } from '../renderer/corona/CoronaRuntime.js';
 import { ShadowRuntime } from '../renderer/shadows/ShadowRuntime.js';
+import { HudRuntime } from '../renderer/hud/HudRuntime.js';
 import WebGLRenderBackend from '../backends/webgl/WebGLRenderBackend.js';
 import WebGPURenderBackend from '../backends/webgpu/WebGPURenderBackend.js';
 import { RWRenderQueue } from './three/RWRenderQueue.js';
@@ -18,6 +19,7 @@ export class JsrwRendererSession {
     this.waterRuntime = null;
     this.coronaRuntime = null;
     this.shadowRuntime = null;
+    this.hudRuntime = null;
     this.backend = createBackend(options.activeBackend || 'WebGL');
     this.renderQueue = null;
   }
@@ -142,6 +144,31 @@ export class JsrwRendererSession {
     return this.shadowRuntime;
   }
 
+  createHudRuntime(options = {}) {
+    this.hudRuntime?.dispose();
+    this.hudRuntime = new HudRuntime({
+      ...options,
+      backend: this.backend,
+    });
+    return this.hudRuntime;
+  }
+
+  getHudRuntime() {
+    return this.hudRuntime;
+  }
+
+  setHudRuntime(runtime) {
+    if (this.hudRuntime === runtime) return this.hudRuntime;
+    this.disposeHudRuntime();
+    this.hudRuntime = runtime || null;
+    return this.hudRuntime;
+  }
+
+  disposeHudRuntime() {
+    this.hudRuntime?.dispose();
+    this.hudRuntime = null;
+  }
+
   setShadowRuntime(runtime) {
     if (this.shadowRuntime === runtime) return this.shadowRuntime;
     this.disposeShadowRuntime();
@@ -181,6 +208,7 @@ export class JsrwRendererSession {
   }
 
   dispose() {
+    this.disposeHudRuntime();
     this.disposeWaterRuntime();
     this.disposeCoronaRuntime();
     this.disposeShadowRuntime();

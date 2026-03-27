@@ -89,6 +89,7 @@ export class FrameComposer {
       renderer,
       scene,
       camera,
+      cutsceneScene,
       activeBackend,
       worldGameVersionRef,
       uiStateRef,
@@ -113,11 +114,8 @@ export class FrameComposer {
       skyFeature,
       skyBottomColor,
       postFxSunCoronaEnabled,
-      hudScene,
-      hudCamera,
-      gameIconSprite,
-      iconTextures,
       showGameIcon,
+      cutsceneSubtitleCue,
       pushConsoleLine,
       setStatus,
       postFxDebugCapture = false,
@@ -135,6 +133,39 @@ export class FrameComposer {
     const skyCloudPassStats = { drawCalls: 0, triangles: 0 };
     let skyCloudsPassInvoked = false;
     const renderStages = uiStateRef.current.renderStages || {};
+    const hudRuntime = this.rendererSession?.getHudRuntime?.() || null;
+
+    const renderHudStage = () => {
+      if (!renderStages.hud || !hudRuntime) {
+        metrics.frameHudCpuMs = 0;
+        return;
+      }
+      hudRuntime.setViewport(viewportWidth, viewportHeight);
+      hudRuntime.setGameVersion(uiStateRef.current.gameVersion);
+      hudRuntime.setShowGameIcon(showGameIcon);
+      hudRuntime.setSubtitleCue(cutsceneSubtitleCue);
+      renderer.autoClear = false;
+      renderer.clearDepth();
+      const beforeHud = takeRenderStatsSnapshot(renderer);
+      const hudCpuStartMs = beginCpuProfile(detailedProfileEnabled);
+      hudRuntime.render(renderer);
+      const hudCpuMs = endCpuProfile(detailedProfileEnabled, hudCpuStartMs);
+      accumulateRenderStatsDelta(renderer, stageSkyStats, beforeHud);
+      renderer.autoClear = true;
+      metrics.frameHudCpuMs = hudCpuMs;
+    };
+
+    const renderCutsceneSceneStage = () => {
+      if (!cutsceneScene?.isScene || cutsceneScene.children.length === 0) return;
+      cutsceneScene.background = null;
+      cutsceneScene.fog = scene?.fog || null;
+      renderer.autoClear = false;
+      renderer.clearDepth();
+      const beforeCutscene = takeRenderStatsSnapshot(renderer);
+      renderer.render(cutsceneScene, camera);
+      accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCutscene);
+      renderer.autoClear = true;
+    };
 
     if (grid) grid.visible = uiStateRef.current.showGrid;
     if (axes) axes.visible = uiStateRef.current.showAxes;
@@ -201,7 +232,8 @@ export class FrameComposer {
       renderer.autoClear = true;
       renderer.setClearColor(DEFAULT_SCENE_BACKGROUND, 1);
       renderer.clear(true, true, true);
-      renderer.autoClear = true;
+      renderCutsceneSceneStage();
+      renderHudStage();
       return;
     }
 
@@ -572,35 +604,8 @@ export class FrameComposer {
       metrics.frameSunFinalCpuMs = 0;
     }
 
-    const activeIcon = uiStateRef.current.gameVersion === 'SA' ? 'SA' : 'VCS';
-    gameIconSprite.material.map = iconTextures[activeIcon];
-    gameIconSprite.visible = showGameIcon;
-    const iconPx = 80;
-    const padXPx = 20;
-    const padYPx = 56;
-    gameIconSprite.position.set(
-      1 - ((2 * padXPx) / viewportWidth),
-      1 - ((2 * padYPx) / viewportHeight),
-      0,
-    );
-    gameIconSprite.scale.set(
-      (2 * iconPx) / viewportWidth,
-      (2 * iconPx) / viewportHeight,
-      1,
-    );
-    if (renderStages.hud) {
-      renderer.autoClear = false;
-      renderer.clearDepth();
-      const beforeHud = takeRenderStatsSnapshot(renderer);
-      const hudCpuStartMs = beginCpuProfile(detailedProfileEnabled);
-      renderer.render(hudScene, hudCamera);
-      const hudCpuMs = endCpuProfile(detailedProfileEnabled, hudCpuStartMs);
-      accumulateRenderStatsDelta(renderer, stageSkyStats, beforeHud);
-      renderer.autoClear = true;
-      metrics.frameHudCpuMs = hudCpuMs;
-    } else {
-      metrics.frameHudCpuMs = 0;
-    }
+    renderCutsceneSceneStage();
+    renderHudStage();
 
     metrics.transparentQueue = rwRenderQueueRef.current?.debugStats?.transparentCount ?? 0;
     metrics.additiveQueue = rwRenderQueueRef.current?.debugStats?.additiveCount ?? 0;
