@@ -427,6 +427,9 @@ export class RWCoronaPipeline {
   setDebugShowAll(enabled) {
     this.debugShowAll = Boolean(enabled);
     this.debugRoot.visible = this.debugShowAll;
+    if (this.enableDebugHelpers && this.debugShowAll) {
+      for (const entry of this.entries) this.ensureDebugHelpers(entry);
+    }
     for (const entry of this.entries) {
       if (entry.helperMesh) entry.helperMesh.visible = this.enableDebugHelpers && this.debugShowAll;
       if (entry.helperLine) entry.helperLine.visible = this.enableDebugHelpers && this.debugShowAll;
@@ -549,7 +552,12 @@ export class RWCoronaPipeline {
       }
     }
 
-    if (this.enableDebugHelpers) {
+    return entry;
+  }
+
+  ensureDebugHelpers(entry) {
+    if (!this.enableDebugHelpers || !entry) return entry;
+    if (!entry.helperMesh) {
       const helperMaterial = new THREE.MeshBasicMaterial({
         color: 0x00ff00,
         transparent: true,
@@ -558,39 +566,37 @@ export class RWCoronaPipeline {
         toneMapped: false,
       });
       const helperMesh = new THREE.Mesh(DEBUG_HELPER_GEOMETRY, helperMaterial);
-      helperMesh.visible = false;
+      helperMesh.visible = this.debugShowAll;
       helperMesh.frustumCulled = false;
       helperMesh.userData = {
         ...(helperMesh.userData || {}),
         rwCoronaAux: true,
-        rwCoronaEmitterId: emitter.id,
+        rwCoronaEmitterId: entry.emitter?.id,
       };
       this.debugRoot.add(helperMesh);
       entry.helperMesh = helperMesh;
-
-      if (emitter.direction) {
-        const lineGeometry = new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(0, 0, 0),
-          new THREE.Vector3(0, 0, -1),
-        ]);
-        const lineMaterial = new THREE.LineBasicMaterial({
-          color: 0xffffff,
-          transparent: true,
-          opacity: 0.75,
-          toneMapped: false,
-        });
-        const helperLine = new THREE.Line(lineGeometry, lineMaterial);
-        helperLine.visible = this.debugShowAll;
-        helperLine.userData = {
-          ...(helperLine.userData || {}),
-          rwCoronaAux: true,
-          rwCoronaEmitterId: emitter.id,
-        };
-        this.debugRoot.add(helperLine);
-        entry.helperLine = helperLine;
-      }
     }
-
+    if (!entry.helperLine && entry.emitter?.direction) {
+      const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, -1),
+      ]);
+      const lineMaterial = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.75,
+        toneMapped: false,
+      });
+      const helperLine = new THREE.Line(lineGeometry, lineMaterial);
+      helperLine.visible = this.debugShowAll;
+      helperLine.userData = {
+        ...(helperLine.userData || {}),
+        rwCoronaAux: true,
+        rwCoronaEmitterId: entry.emitter?.id,
+      };
+      this.debugRoot.add(helperLine);
+      entry.helperLine = helperLine;
+    }
     return entry;
   }
 
@@ -966,6 +972,7 @@ export class RWCoronaPipeline {
         }
       }
 
+      if (this.enableDebugHelpers && this.debugShowAll) this.ensureDebugHelpers(entry);
       if (entry.helperMesh) {
         entry.helperMesh.visible = this.enableDebugHelpers && this.debugShowAll;
         entry.helperMesh.position.copy(toVector3(emitter.position));
@@ -1071,6 +1078,7 @@ export class RWCoronaPipeline {
 
   render(renderer, camera) {
     if (!renderer || !camera || !this.enabled) return;
+    if ((this.debugStats.spriteCount || 0) === 0 && !(this.enableDebugHelpers && this.debugShowAll)) return;
     this.renderScene.updateMatrixWorld(true);
     renderer.render(this.renderScene, camera);
   }

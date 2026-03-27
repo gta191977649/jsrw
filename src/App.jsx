@@ -1418,7 +1418,7 @@ function App() {
 
     scene.add(hemi, sun, sun.target, grid, axes, worldRootRef.current);
     worldOpaqueScene.clear();
-    worldOpaqueScene.autoUpdate = true;
+    worldOpaqueScene.autoUpdate = false;
     worldOpaqueScene.add(opaqueHemi, opaqueSun, opaqueSunTarget, worldOpaqueRoot);
 
     const textureLoader = new THREE.TextureLoader();
