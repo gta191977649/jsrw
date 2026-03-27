@@ -241,6 +241,16 @@ function normalizeEmitterColor(color) {
   };
 }
 
+function hashEmitterId(id) {
+  const text = String(id || '');
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
 function isNightHour(hour) {
   const normalizedHour = ((Math.floor(Number(hour) || 0) % 24) + 24) % 24;
   return normalizedHour > 18 || normalizedHour < 7;
@@ -290,14 +300,43 @@ function shouldShadowEmitterBeActive(entry, runtimeContext) {
     case 'night':
       return { active: isNightHour(hour), flicker: false };
     case 'flicker': {
-      const active = ((timeMs ^ entry.index) & 0x60) !== 0 || (((timeMs >> 11) ^ entry.index) & 3) !== 0;
+      const active = ((timeMs ^ entry.randomSeed) & 0x60) !== 0 || (((timeMs >> 11) ^ entry.randomSeed) & 3) !== 0;
       return { active, flicker: !active };
     }
     case 'flicker-night': {
       if (!isNightHour(hour)) return { active: false, flicker: false };
-      const active = ((timeMs ^ entry.index) & 0x60) !== 0 || (((timeMs >> 11) ^ entry.index) & 3) !== 0;
+      const active = ((timeMs ^ entry.randomSeed) & 0x60) !== 0 || (((timeMs >> 11) ^ entry.randomSeed) & 3) !== 0;
       return { active, flicker: !active };
     }
+    case 'flash1':
+      return { active: ((timeMs + entry.flashOffset1) & 0x200) !== 0, flicker: false };
+    case 'flash1-night':
+      return { active: isNightHour(hour) && (((timeMs + entry.flashOffset1) & 0x200) !== 0), flicker: false };
+    case 'flash2':
+      return { active: ((timeMs + entry.flashOffset2) & 0x400) !== 0, flicker: false };
+    case 'flash2-night':
+      return { active: isNightHour(hour) && (((timeMs + entry.flashOffset2) & 0x400) !== 0), flicker: false };
+    case 'flash3':
+      return { active: ((timeMs + entry.flashOffset3) & 0x800) !== 0, flicker: false };
+    case 'flash3-night':
+      return { active: isNightHour(hour) && (((timeMs + entry.flashOffset3) & 0x800) !== 0), flicker: false };
+    case 'random-flicker':
+      if (entry.randomSeed > 16) return { active: true, flicker: false };
+      return shouldShadowEmitterBeActive({ ...entry, emitter: { ...entry.emitter, visibilityMode: 'flicker' } }, runtimeContext);
+    case 'random-flicker-night':
+      if (!isNightHour(hour)) return { active: false, flicker: false };
+      if (entry.randomSeed > 16) return { active: true, flicker: false };
+      return shouldShadowEmitterBeActive({ ...entry, emitter: { ...entry.emitter, visibilityMode: 'flicker' } }, runtimeContext);
+    case 'bridge-flash1':
+      return {
+        active: runtimeContext?.bridge?.lightsFlashing === true && ((timeMs & 0x200) !== 0),
+        flicker: false,
+      };
+    case 'bridge-flash2':
+      return {
+        active: runtimeContext?.bridge?.lightsFlashing === true && ((timeMs & 0x1FF) < 60),
+        flicker: false,
+      };
     case 'traffic-light':
       if (
         resolveTrafficLightPhase(
@@ -559,6 +598,10 @@ export class RWShadowPipeline {
     return {
       emitter,
       index,
+      randomSeed: hashEmitterId(emitter.id ?? index) & 0xFFFF,
+      flashOffset1: index * 0x80,
+      flashOffset2: index * 0x100,
+      flashOffset3: index * 0x200,
       fadeAlpha: 0,
       streamAlpha: 0,
       shadowMesh,
