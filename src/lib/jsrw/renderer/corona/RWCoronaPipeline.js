@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import {
   calcScreenCoorsLikeRw,
+  createRwSpriteMaterial,
   prepareRwSpriteTexture,
 } from '../world/sky/RWSpriteUtils.js';
 import { resolveTrafficLightPhase } from './TrafficLights.js';
@@ -140,6 +141,10 @@ function isNightHour(hour) {
   return normalizedHour > 18 || normalizedHour < 7;
 }
 
+function isAlwaysTrackedEmitter(entry) {
+  return entry?.emitter?.sourceType === '2dfx';
+}
+
 function shouldEmitterBeActive(entry, runtimeContext) {
   if (runtimeContext?.forceRender2dfx && entry?.emitter?.sourceType === '2dfx') {
     return { active: true, flicker: false };
@@ -183,6 +188,16 @@ function shouldEmitterBeActive(entry, runtimeContext) {
       if (!isNightHour(hour)) return { active: false, flicker: false };
       if (entry.randomSeed > 16) return { active: true, flicker: false };
       return shouldEmitterBeActive({ ...entry, emitter: { ...entry.emitter, visibilityMode: 'flicker' } }, runtimeContext);
+    case 'bridge-flash1':
+      return {
+        active: runtimeContext?.bridge?.lightsFlashing === true && ((timeMs & 0x200) !== 0),
+        flicker: false,
+      };
+    case 'bridge-flash2':
+      return {
+        active: runtimeContext?.bridge?.lightsFlashing === true && ((timeMs & 0x1FF) < 60),
+        flicker: false,
+      };
     case 'traffic-light':
       if (
         resolveTrafficLightPhase(
@@ -239,6 +254,7 @@ function createCoronaBatchMaterial(map, depthTest) {
     fog: false,
     toneMapped: false,
     vertexColors: true,
+    side: THREE.DoubleSide,
     blending: THREE.CustomBlending,
   });
   material.blendSrc = THREE.OneFactor;
@@ -312,10 +328,22 @@ export class RWCoronaPipeline {
     this.entryByEmitter = new WeakMap();
     this.activeEntries = new Set();
     this.spriteBatches = new Map();
+    this.spritePool = [];
     this.debugStats = {
       entryCount: 0,
+      sourceCount: 0,
       candidateCount: 0,
+      selectedCount: 0,
       activeCount: 0,
+      spriteCount: 0,
+      lightCount: 0,
+      lastHour: 0,
+      rejectedByVisibility: 0,
+      rejectedByDistance: 0,
+      rejectedByBudget: 0,
+      rejectedByLos: 0,
+      rejectedByScreen: 0,
+      rejectedByTexture: 0,
     };
     this.raycaster = new THREE.Raycaster();
     this.cachedOccluderMeshes = null;
@@ -456,6 +484,11 @@ export class RWCoronaPipeline {
       : [];
     const entries = [];
     const seen = new Set();
+    for (const entry of this.entries) {
+      if (!isAlwaysTrackedEmitter(entry) || seen.has(entry)) continue;
+      seen.add(entry);
+      entries.push(entry);
+    }
     for (const emitter of frameVisibilityCandidates) {
       const entry = this.entryByEmitter.get(emitter);
       if (!entry || seen.has(entry)) continue;
@@ -466,6 +499,9 @@ export class RWCoronaPipeline {
       if (!entry || seen.has(entry)) continue;
       seen.add(entry);
       entries.push(entry);
+    }
+    if (entries.length === 0) {
+      return this.entries;
     }
     return entries;
   }
@@ -634,6 +670,39 @@ export class RWCoronaPipeline {
       batch.mesh.count = 0;
       batch.mesh.visible = false;
     }
+    for (const sprite of this.spritePool) {
+      sprite.visible = false;
+    }
+  }
+
+  ensureSpriteObject(index, textureKey, depthTest) {
+    let sprite = this.spritePool[index] || null;
+    if (!sprite) {
+      const material = createRwSpriteMaterial(this.resolveTexture(textureKey));
+      material.depthTest = depthTest;
+      material.needsUpdate = true;
+      sprite = new THREE.Sprite(material);
+      sprite.visible = false;
+      sprite.frustumCulled = false;
+      sprite.renderOrder = 90;
+      sprite.layers.enable(0);
+      sprite.userData = {
+        ...(sprite.userData || {}),
+        rwCoronaAux: true,
+        rwCoronaSprite: true,
+      };
+      this.spriteRoot.add(sprite);
+      this.spritePool[index] = sprite;
+    }
+    const material = sprite.material;
+    if (material?.map !== this.resolveTexture(textureKey)) {
+      material.map = this.resolveTexture(textureKey);
+      material.needsUpdate = true;
+    }
+    if (material) {
+      material.depthTest = depthTest;
+    }
+    return sprite;
   }
 
   createLightBundle(emitter) {
@@ -674,7 +743,7 @@ export class RWCoronaPipeline {
   }
 
   computeLosVisible(entry, camera, timeMs) {
-    if (!entry.emitter.losCheck || !this.root) return true;
+    if (!entry.emitter.losCheck || !Array.isArray(this.roots) || this.roots.length === 0) return true;
     if ((timeMs - entry.lastLosCheckMs) < MIN_LOS_INTERVAL_MS) return entry.losVisible;
     const occluders = this.getOccluderMeshes();
     if (occluders.length === 0) {
@@ -723,6 +792,12 @@ export class RWCoronaPipeline {
     const nextActiveEntries = new Set();
     const lightAssignments = [];
     const spriteAssignments = [];
+    let rejectedByVisibility = 0;
+    let rejectedByDistance = 0;
+    let rejectedByBudget = 0;
+    let rejectedByLos = 0;
+    let rejectedByScreen = 0;
+    let rejectedByTexture = 0;
 
     for (const entry of sourceEntries) {
       const emitter = entry.emitter;
@@ -731,6 +806,8 @@ export class RWCoronaPipeline {
       const drawDistance = Math.max(0, Number(emitter.drawDistance) || 0);
       const withinDrawDistance = RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig);
       const wantsShow = visibility.active && withinDrawDistance;
+      if (!visibility.active) rejectedByVisibility += 1;
+      else if (!withinDrawDistance) rejectedByDistance += 1;
       if (wantsShow || RenderEntityController.isActive(entry, fadeConfig)) {
         candidateEntries.push({
           entry,
@@ -752,18 +829,25 @@ export class RWCoronaPipeline {
       const { entry, visibility, distance, drawDistance, withinDrawDistance } = item;
       const emitter = entry.emitter;
       let targetStreamAlpha = visibility.active && withinDrawDistance ? 1 : 0;
-      if (!selectedEntries.has(entry)) targetStreamAlpha = 0;
+      if (!selectedEntries.has(entry)) {
+        if (visibility.active && withinDrawDistance) rejectedByBudget += 1;
+        targetStreamAlpha = 0;
+      }
 
       if (targetStreamAlpha > 0 && emitter.longDistance) {
         if (distance < 35) {
           targetStreamAlpha = 0;
+          rejectedByDistance += 1;
         } else if (distance < 50) {
           targetStreamAlpha *= clamp01((distance - 35) / 15);
         }
       }
 
       const losVisible = targetStreamAlpha > 0 ? this.computeLosVisible(entry, camera, timeMs) : true;
-      if (!losVisible) targetStreamAlpha = 0;
+      if (!losVisible) {
+        rejectedByLos += 1;
+        targetStreamAlpha = 0;
+      }
 
       const needsScreenTest = emitter.textureKey && (
         targetStreamAlpha > 0
@@ -775,7 +859,10 @@ export class RWCoronaPipeline {
         : null;
       let screen = currentScreen;
       let screenVisible = Boolean(screen);
-      if (emitter.textureKey && !screen) targetStreamAlpha = 0;
+      if (emitter.textureKey && !screen) {
+        rejectedByTexture += 1;
+        targetStreamAlpha = 0;
+      }
       if (emitter.textureKey && screen) {
         const offscreen = (
           screen.x < -OFFSCREEN_FADE_MARGIN
@@ -784,6 +871,7 @@ export class RWCoronaPipeline {
           || screen.y > (this.viewportHeight + OFFSCREEN_FADE_MARGIN)
         );
         if (offscreen) {
+          rejectedByScreen += 1;
           targetStreamAlpha = 0;
           screenVisible = false;
         }
@@ -938,39 +1026,21 @@ export class RWCoronaPipeline {
     }
 
     this.resetSpriteBatches();
-    const spriteAssignmentsByBatch = new Map();
-    for (const entry of spriteAssignments) {
-      const spriteState = entry.spriteState;
+    for (let index = 0; index < spriteAssignments.length; index += 1) {
+      const spriteState = spriteAssignments[index]?.spriteState;
       if (!spriteState) continue;
-      const batchKey = this.getSpriteBatchKey(spriteState.textureKey, spriteState.depthTest);
-      const batchEntries = spriteAssignmentsByBatch.get(batchKey) || [];
-      batchEntries.push(spriteState);
-      spriteAssignmentsByBatch.set(batchKey, batchEntries);
-    }
-    TMP_QUATERNION.copy(camera.quaternion);
-    for (const [, batchEntries] of spriteAssignmentsByBatch.entries()) {
-      const firstState = batchEntries[0];
-      const batch = this.ensureSpriteBatchCapacity(firstState.textureKey, firstState.depthTest, batchEntries.length);
-      batch.mesh.visible = batchEntries.length > 0;
-      batch.mesh.count = batchEntries.length;
-      for (let index = 0; index < batchEntries.length; index += 1) {
-        const spriteState = batchEntries[index];
-        TMP_SCALE.set(spriteState.scale, spriteState.scale, 1);
-        TMP_POSITION.copy(spriteState.position);
-        batch.mesh.setMatrixAt(index, new THREE.Matrix4().compose(TMP_POSITION, TMP_QUATERNION, TMP_SCALE));
-        batch.mesh.setColorAt(index, TMP_COLOR.setRGB(
-          spriteState.color.r,
-          spriteState.color.g,
-          spriteState.color.b,
-          THREE.SRGBColorSpace,
-        ));
-        batch.opacityAttr.array[index] = spriteState.opacity;
-        batch.rotationAttr.array[index] = spriteState.rotation;
-      }
-      batch.mesh.instanceMatrix.needsUpdate = true;
-      if (batch.mesh.instanceColor) batch.mesh.instanceColor.needsUpdate = true;
-      batch.opacityAttr.needsUpdate = true;
-      batch.rotationAttr.needsUpdate = true;
+      const sprite = this.ensureSpriteObject(index, spriteState.textureKey, spriteState.depthTest);
+      sprite.visible = true;
+      sprite.position.copy(spriteState.position);
+      sprite.scale.setScalar(spriteState.scale);
+      sprite.material.color.setRGB(
+        spriteState.color.r,
+        spriteState.color.g,
+        spriteState.color.b,
+        THREE.SRGBColorSpace,
+      );
+      sprite.material.opacity = spriteState.opacity;
+      sprite.material.rotation = spriteState.rotation;
     }
 
     for (const entry of sourceEntries) {
@@ -984,8 +1054,19 @@ export class RWCoronaPipeline {
       }
     }
     this.activeEntries = nextActiveEntries;
+    this.debugStats.sourceCount = sourceEntries.length;
     this.debugStats.candidateCount = candidateEntries.length;
+    this.debugStats.selectedCount = selectedEntries.size;
     this.debugStats.activeCount = this.activeEntries.size;
+    this.debugStats.spriteCount = spriteAssignments.length;
+    this.debugStats.lightCount = lightAssignments.length;
+    this.debugStats.lastHour = Number(updateContext?.timecycleCurrent?.hour) || 0;
+    this.debugStats.rejectedByVisibility = rejectedByVisibility;
+    this.debugStats.rejectedByDistance = rejectedByDistance;
+    this.debugStats.rejectedByBudget = rejectedByBudget;
+    this.debugStats.rejectedByLos = rejectedByLos;
+    this.debugStats.rejectedByScreen = rejectedByScreen;
+    this.debugStats.rejectedByTexture = rejectedByTexture;
   }
 
   render(renderer, camera) {
@@ -1025,6 +1106,11 @@ export class RWCoronaPipeline {
       batch?.mesh?.material?.dispose?.();
     }
     this.spriteBatches.clear();
+    for (const sprite of this.spritePool) {
+      if (sprite?.parent) sprite.parent.remove(sprite);
+      sprite?.material?.dispose?.();
+    }
+    this.spritePool = [];
     if (this.lightRoot.parent) this.lightRoot.parent.remove(this.lightRoot);
     if (this.spriteRoot.parent) this.spriteRoot.parent.remove(this.spriteRoot);
     if (this.debugRoot.parent) this.debugRoot.parent.remove(this.debugRoot);

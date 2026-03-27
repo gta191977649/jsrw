@@ -629,6 +629,11 @@ function App() {
     visibleLod: 0,
     visibleQueueMeshes: 0,
     coronaCandidates: 0,
+    coronaSourceEntries: 0,
+    coronaSelectedEntries: 0,
+    coronaSpriteCount: 0,
+    coronaLightCount: 0,
+    coronaLastHour: 0,
     shadowCandidates: 0,
     transparentQueue: 0,
     additiveQueue: 0,
@@ -2997,6 +3002,10 @@ function App() {
               ImGui.Text(`CPU World opaque pass: ${Number(renderMetrics.worldOpaqueCpuMs || 0).toFixed(2)} ms`);
               ImGui.Text(`CPU World transparent pass: ${Number(renderMetrics.worldTransparentCpuMs || 0).toFixed(2)} ms`);
               ImGui.Text(`CPU Corona update: ${Number(renderMetrics.coronaUpdateCpuMs || 0).toFixed(2)} ms`);
+              ImGui.Text(`  Corona hour/src/cand/sel: ${Math.round(renderMetrics.coronaLastHour || 0)} / ${renderMetrics.coronaSourceEntries || 0} / ${renderMetrics.coronaCandidates || 0} / ${renderMetrics.coronaSelectedEntries || 0}`);
+              ImGui.Text(`  Corona sprites/lights: ${renderMetrics.coronaSpriteCount || 0} / ${renderMetrics.coronaLightCount || 0}`);
+              ImGui.Text(`  Corona rej vis/dist/bud: ${renderMetrics.coronaRejectedByVisibility || 0} / ${renderMetrics.coronaRejectedByDistance || 0} / ${renderMetrics.coronaRejectedByBudget || 0}`);
+              ImGui.Text(`  Corona rej los/scr/tex: ${renderMetrics.coronaRejectedByLos || 0} / ${renderMetrics.coronaRejectedByScreen || 0} / ${renderMetrics.coronaRejectedByTexture || 0}`);
               ImGui.Text(`CPU Shadow update: ${Number(renderMetrics.shadowUpdateCpuMs || 0).toFixed(2)} ms`);
               ImGui.SetNextItemOpen(false, ImGui.Cond.Once);
               const frameComposerProfileOpen = ImGui.CollapsingHeader('FrameComposer Profile');

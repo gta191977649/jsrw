@@ -30,6 +30,12 @@ const TMP_RECEIVER_INVERSE = new THREE.Matrix4();
 const TMP_COLOR = new THREE.Color();
 const TMP_INSTANCE_MATRIX = new THREE.Matrix4();
 const TMP_INSTANCE_WORLD_MATRIX = new THREE.Matrix4();
+const TMP_NORMAL_MATRIX = new THREE.Matrix3();
+const TMP_RAY_ORIGIN = new THREE.Vector3();
+const TMP_RAY_DIR = new THREE.Vector3(0, -1, 0);
+const TMP_HIT_NORMAL = new THREE.Vector3();
+const TMP_PLANE_FRONT = new THREE.Vector3();
+const TMP_PLANE_SIDE = new THREE.Vector3();
 const CORNER_OFFSETS = [
   { front: 1, side: -1, uv: [0, 0] },
   { front: 1, side: 1, uv: [1, 0] },
@@ -117,18 +123,73 @@ function inferShadowBlendMode(emitter) {
 }
 
 function applyShadowBlendMode(material, mode = 'dark') {
+  if (mode === 'additive') {
+    material.blending = THREE.CustomBlending;
+    material.blendEquation = THREE.AddEquation;
+    material.blendEquationAlpha = THREE.AddEquation;
+    material.blendSrc = THREE.OneFactor;
+    material.blendDst = THREE.OneFactor;
+    material.blendSrcAlpha = THREE.OneFactor;
+    material.blendDstAlpha = THREE.OneFactor;
+    material.depthTest = true;
+    material.transparent = true;
+    return;
+  }
   material.blending = THREE.CustomBlending;
   material.blendEquation = THREE.AddEquation;
   material.blendEquationAlpha = THREE.AddEquation;
   material.blendSrc = THREE.SrcAlphaFactor;
   material.blendSrcAlpha = THREE.OneFactor;
-  if (mode === 'additive') {
-    material.blendDst = THREE.OneFactor;
-    material.blendDstAlpha = THREE.OneFactor;
-    return;
-  }
   material.blendDst = THREE.OneMinusSrcAlphaFactor;
   material.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+  material.depthTest = true;
+}
+
+function textureHasShadowAlpha(texture) {
+  if (!texture?.isTexture) return false;
+  if (texture.hasAlpha === true) return true;
+  const alphaMode = String(texture.userData?.rwAlphaMode || '').toLowerCase();
+  return alphaMode === 'blend' || alphaMode === 'cutout';
+}
+
+function configureShadowMaterial(material, texture, mode = 'dark') {
+  material.map = texture || null;
+  material.alphaMap = null;
+  applyShadowBlendMode(material, mode);
+
+  if (mode === 'additive') {
+    const useTextureAlpha = textureHasShadowAlpha(texture);
+    material.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+        float rwShadowMask = diffuseColor.a;
+        #ifdef USE_MAP
+          float rwShadowLuma = max(sampledDiffuseColor.r, max(sampledDiffuseColor.g, sampledDiffuseColor.b));
+          rwShadowMask *= ${useTextureAlpha ? 'sampledDiffuseColor.a' : 'rwShadowLuma'};
+        #endif
+        diffuseColor.rgb = diffuse * rwShadowMask;
+        diffuseColor.a = rwShadowMask;`,
+      );
+    };
+    material.needsUpdate = true;
+    return;
+  }
+
+  material.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      `#include <map_fragment>
+      float rwShadowMask = diffuseColor.a;
+      #ifdef USE_MAP
+        float rwShadowLuma = max(sampledDiffuseColor.r, max(sampledDiffuseColor.g, sampledDiffuseColor.b));
+        rwShadowMask *= max(sampledDiffuseColor.a, rwShadowLuma);
+      #endif
+      diffuseColor.rgb = diffuse * rwShadowMask;
+      diffuseColor.a = rwShadowMask;`,
+    );
+  };
+  material.needsUpdate = true;
 }
 
 function toVector3(value, fallback = [0, 0, 0]) {
@@ -145,6 +206,28 @@ function toVector3(value, fallback = [0, 0, 0]) {
     Number(value?.y) || fallback[1] || 0,
     Number(value?.z) || fallback[2] || 0,
   );
+}
+
+function getPlacementIndexFromObject(object) {
+  let current = object;
+  while (current) {
+    if (Number.isInteger(current.userData?.rwPlacementIndex)) return current.userData.rwPlacementIndex;
+    current = current.parent;
+  }
+  return null;
+}
+
+function getHitWorldNormal(hit, target = new THREE.Vector3()) {
+  const faceNormal = hit?.face?.normal;
+  if (!faceNormal?.isVector3 || !hit?.object) return target.set(0, 1, 0);
+  if (hit.instanceId != null && hit.object.isInstancedMesh === true) {
+    hit.object.getMatrixAt(hit.instanceId, TMP_INSTANCE_MATRIX);
+    TMP_INSTANCE_WORLD_MATRIX.multiplyMatrices(hit.object.matrixWorld, TMP_INSTANCE_MATRIX);
+    TMP_NORMAL_MATRIX.getNormalMatrix(TMP_INSTANCE_WORLD_MATRIX);
+  } else {
+    TMP_NORMAL_MATRIX.getNormalMatrix(hit.object.matrixWorld);
+  }
+  return target.copy(faceNormal).applyMatrix3(TMP_NORMAL_MATRIX).normalize();
 }
 
 function normalizeEmitterColor(color) {
@@ -277,6 +360,7 @@ export class RWShadowPipeline {
     this.loggedFailureKeys = new Set();
     this.cachedSceneMeshes = null;
     this.sceneMeshesDirty = true;
+    this.raycaster = new THREE.Raycaster();
     this.setRoot(options.root || null);
     this.setTextureDictionary(options.textureDictionary || null);
     this.setEmitters(options.emitters || []);
@@ -314,8 +398,8 @@ export class RWShadowPipeline {
     this.textureDictionary = textureDictionary || null;
     for (const entry of this.entries) {
       if (!entry.shadowMesh?.material) continue;
-      entry.shadowMesh.material.map = this.resolveTexture(entry.emitter.shadow?.textureKey);
-      entry.shadowMesh.material.needsUpdate = true;
+      const texture = this.resolveTexture(entry.emitter.shadow?.textureKey);
+      configureShadowMaterial(entry.shadowMesh.material, texture, entry.shadowBlendMode);
     }
   }
 
@@ -406,6 +490,7 @@ export class RWShadowPipeline {
           geometry,
           positionAttribute,
           indexAttribute: geometry.getIndex?.() || null,
+          placementIndex: getPlacementIndexFromObject(object),
         };
         if (object.isInstancedMesh === true) {
           const instanceCount = Math.max(0, Number(object.count) || 0);
@@ -437,8 +522,10 @@ export class RWShadowPipeline {
   createEntry(emitter, index) {
     if (!emitter) return null;
     const shadowBlendMode = inferShadowBlendMode(emitter);
+    const shadowTexture = this.resolveTexture(emitter.shadow?.textureKey);
     const shadowMaterial = new THREE.MeshBasicMaterial({
-      map: this.resolveTexture(emitter.shadow?.textureKey),
+      map: shadowTexture,
+      alphaMap: null,
       color: 0xffffff,
       transparent: true,
       depthWrite: false,
@@ -454,21 +541,7 @@ export class RWShadowPipeline {
       fog: false,
       toneMapped: false,
     });
-    applyShadowBlendMode(shadowMaterial, shadowBlendMode);
-    shadowMaterial.onBeforeCompile = (shader) => {
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <map_fragment>',
-        `#include <map_fragment>
-        float rwShadowMask = diffuseColor.a;
-        #ifdef USE_MAP
-          float rwShadowLuma = max(sampledDiffuseColor.r, max(sampledDiffuseColor.g, sampledDiffuseColor.b));
-          rwShadowMask *= max(sampledDiffuseColor.a, rwShadowLuma);
-        #endif
-        diffuseColor.rgb = diffuse * rwShadowMask;
-        diffuseColor.a = rwShadowMask;`,
-      );
-    };
-    shadowMaterial.needsUpdate = true;
+    configureShadowMaterial(shadowMaterial, shadowTexture, shadowBlendMode);
 
     const shadowMesh = new THREE.Mesh(createShadowGeometry(), shadowMaterial);
     shadowMesh.visible = false;
@@ -513,9 +586,22 @@ export class RWShadowPipeline {
     console.warn(`[RWShadowPipeline] rebuild failed: ${reason}`, payload);
   }
 
-  collectCandidateMeshes(bounds) {
+  collectCandidateMeshes(bounds, shadowEntry = null) {
     const sceneMeshes = this.getSceneMeshes();
-    return sceneMeshes.filter((entry) => entry.worldBox.intersectsBox(bounds));
+    const emitterPlacementIndex = Number.isInteger(shadowEntry?.emitter?.placementIndex)
+      ? shadowEntry.emitter.placementIndex
+      : null;
+    return sceneMeshes.filter((entry) => {
+      if (!entry.worldBox.intersectsBox(bounds)) return false;
+      if (
+        emitterPlacementIndex !== null
+        && Number.isInteger(entry.placementIndex)
+        && entry.placementIndex === emitterPlacementIndex
+      ) {
+        return false;
+      }
+      return true;
+    });
   }
 
   getProjectionKey(entry, shadowDebug = null) {
@@ -540,7 +626,142 @@ export class RWShadowPipeline {
     ].join('|');
   }
 
+  shouldUseGroundProjection(entry) {
+    return entry?.shadowBlendMode === 'additive';
+  }
+
+  rebuildGroundProjectedGeometry(entry, shadowDebug = null) {
+    const shadow = entry.emitter.shadow || {};
+    const sizeScale = Math.max(0.01, Number(shadowDebug?.sizeScale) || 1);
+    const zDistanceScale = Math.max(0.01, Number(shadowDebug?.zDistanceScale) || 1);
+    const heightBias = Number(shadowDebug?.heightBias);
+    const vertexBias = Number.isFinite(heightBias) ? heightBias : 0.03;
+    const maxDistance = (Number(shadow.zDistance) || DEFAULT_SHADOW_Z_DISTANCE) * zDistanceScale;
+    const center = toVector3(entry.emitter.position);
+    TMP_FRONT.copy(toVector3(shadow.front, [Number(shadow.size) || 0, 0, 0])).multiplyScalar(sizeScale);
+    TMP_SIDE.copy(toVector3(shadow.side, [0, 0, -(Number(shadow.size) || 0)])).multiplyScalar(sizeScale);
+    const minX = Math.min(
+      center.x + TMP_FRONT.x + TMP_SIDE.x,
+      center.x + TMP_FRONT.x - TMP_SIDE.x,
+      center.x - TMP_FRONT.x + TMP_SIDE.x,
+      center.x - TMP_FRONT.x - TMP_SIDE.x,
+    );
+    const maxX = Math.max(
+      center.x + TMP_FRONT.x + TMP_SIDE.x,
+      center.x + TMP_FRONT.x - TMP_SIDE.x,
+      center.x - TMP_FRONT.x + TMP_SIDE.x,
+      center.x - TMP_FRONT.x - TMP_SIDE.x,
+    );
+    const minZ = Math.min(
+      center.z + TMP_FRONT.z + TMP_SIDE.z,
+      center.z + TMP_FRONT.z - TMP_SIDE.z,
+      center.z - TMP_FRONT.z + TMP_SIDE.z,
+      center.z - TMP_FRONT.z - TMP_SIDE.z,
+    );
+    const maxZ = Math.max(
+      center.z + TMP_FRONT.z + TMP_SIDE.z,
+      center.z + TMP_FRONT.z - TMP_SIDE.z,
+      center.z - TMP_FRONT.z + TMP_SIDE.z,
+      center.z - TMP_FRONT.z - TMP_SIDE.z,
+    );
+    const searchBounds = EMPTY_BOX.clone().set(
+      new THREE.Vector3(minX, center.y - maxDistance, minZ),
+      new THREE.Vector3(maxX, center.y + 0.5, maxZ),
+    );
+    const candidateMeshes = this.collectCandidateMeshes(searchBounds, entry);
+    const candidateObjects = [];
+    const seenObjects = new Set();
+    for (const meshEntry of candidateMeshes) {
+      const object = meshEntry.object;
+      if (!object || seenObjects.has(object)) continue;
+      seenObjects.add(object);
+      candidateObjects.push(object);
+    }
+    if (candidateObjects.length === 0) {
+      this.logFailure(entry, 'no-ground-candidate-meshes', {
+        center: { x: center.x, y: center.y, z: center.z },
+        maxDistance,
+      });
+      return false;
+    }
+
+    TMP_RAY_ORIGIN.copy(center);
+    TMP_RAY_ORIGIN.y = center.y + 0.25;
+    this.raycaster.set(TMP_RAY_ORIGIN, TMP_RAY_DIR);
+    this.raycaster.near = 0.01;
+    this.raycaster.far = maxDistance + 0.5;
+    const hits = this.raycaster.intersectObjects(candidateObjects, false);
+    const centerHit = hits.find((hit) => {
+      if (!hit?.point) return false;
+      if (hit.point.y >= center.y - 0.02) return false;
+      const worldNormal = getHitWorldNormal(hit, TMP_HIT_NORMAL);
+      return worldNormal.y >= 0.45;
+    }) || null;
+
+    if (!centerHit) {
+      this.logFailure(entry, 'no-ground-center-hit', {
+        candidateMeshes: candidateMeshes.length,
+        center: { x: center.x, y: center.y, z: center.z },
+        maxDistance,
+      });
+      return false;
+    }
+
+    const planeNormal = getHitWorldNormal(centerHit, TMP_HIT_NORMAL).clone();
+    const planeCenter = centerHit.point.clone().addScaledVector(planeNormal, vertexBias);
+    TMP_PLANE_FRONT.copy(TMP_FRONT).addScaledVector(planeNormal, -planeNormal.dot(TMP_FRONT));
+    TMP_PLANE_SIDE.copy(TMP_SIDE).addScaledVector(planeNormal, -planeNormal.dot(TMP_SIDE));
+
+    if (TMP_PLANE_FRONT.lengthSq() <= 1e-4 || TMP_PLANE_SIDE.lengthSq() <= 1e-4) {
+      this.logFailure(entry, 'invalid-ground-plane-basis', {
+        center: { x: center.x, y: center.y, z: center.z },
+        normal: { x: planeNormal.x, y: planeNormal.y, z: planeNormal.z },
+      });
+      return false;
+    }
+
+    const orderedPoints = CORNER_OFFSETS.map((offset) => ({
+      point: planeCenter.clone()
+        .addScaledVector(TMP_PLANE_FRONT, offset.front)
+        .addScaledVector(TMP_PLANE_SIDE, offset.side),
+      uv: [...offset.uv],
+    }));
+
+    const positions = [];
+    const uvs = [];
+    const pushVertex = (vertex) => {
+      positions.push(vertex.point.x, vertex.point.y, vertex.point.z);
+      uvs.push(vertex.uv[0], vertex.uv[1]);
+    };
+
+    pushVertex(orderedPoints[0]);
+    pushVertex(orderedPoints[1]);
+    pushVertex(orderedPoints[2]);
+    pushVertex(orderedPoints[0]);
+    pushVertex(orderedPoints[2]);
+    pushVertex(orderedPoints[3]);
+
+    const geometry = entry.shadowMesh.geometry;
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    if (!geometry.boundingSphere) {
+      this.logFailure(entry, 'missing-ground-bounding-sphere', {
+        center: { x: center.x, y: center.y, z: center.z },
+      });
+      return false;
+    }
+    entry.projected = true;
+    entry.lastProjectionKey = this.getProjectionKey(entry, shadowDebug);
+    entry.lastFallbackCornerCount = 0;
+    return true;
+  }
+
   rebuildProjectedGeometry(entry, shadowDebug = null) {
+    if (this.shouldUseGroundProjection(entry)) {
+      return this.rebuildGroundProjectedGeometry(entry, shadowDebug);
+    }
     const shadow = entry.emitter.shadow || {};
     const sizeScale = Math.max(0.01, Number(shadowDebug?.sizeScale) || 1);
     const zDistanceScale = Math.max(0.01, Number(shadowDebug?.zDistanceScale) || 1);
@@ -571,7 +792,7 @@ export class RWShadowPipeline {
       new THREE.Vector3(minX, minY, minZ),
       new THREE.Vector3(maxX, maxY, maxZ),
     );
-    const candidateMeshes = this.collectCandidateMeshes(searchBounds);
+    const candidateMeshes = this.collectCandidateMeshes(searchBounds, entry);
     if (candidateMeshes.length === 0) {
       this.logFailure(entry, 'no-candidate-meshes', {
         center: { x: center.x, y: center.y, z: center.z },
@@ -727,6 +948,7 @@ export class RWShadowPipeline {
       const emitter = entry.emitter;
       const shadowSettings = emitter.shadow || {};
       const shadowTexture = entry.shadowMesh.material?.map || null;
+      const hasRenderableShadowSource = Boolean(shadowTexture);
       const rawShadowIntensity = Number(shadowSettings.intensity);
       const rawShadowAlpha = Number(shadowSettings.alpha);
       const shadowIntensity = Math.max(
@@ -745,7 +967,7 @@ export class RWShadowPipeline {
         (Number(shadowSettings.drawDistance) || DEFAULT_SHADOW_DRAW_DISTANCE)
           * Math.max(0, Number(shadowDebug.drawDistanceScale) || 1),
       );
-      if (!shadowTexture) missingTextureCount += 1;
+      if (!hasRenderableShadowSource) missingTextureCount += 1;
       if (shadowIntensity <= 0) zeroIntensityCount += 1;
       if (drawDistance > 0 && !RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig)) outOfRangeCount += 1;
       const trafficLightShadowVisible = emitter.sourceType !== 'trafficLightShadow' || trafficLightBrightness > 0.05;
@@ -753,7 +975,7 @@ export class RWShadowPipeline {
         this.enabled
         && visibility.active
         && shadowIntensity > 0
-        && shadowTexture
+        && hasRenderableShadowSource
         && (Number(shadowSettings.size) || 0) > 0
         && RenderEntityController.isWithinDrawDistance(distance, drawDistance, fadeConfig)
         && trafficLightShadowVisible
@@ -825,6 +1047,7 @@ export class RWShadowPipeline {
         : spriteBrightness;
       const resolvedBrightness = Math.max(0, timecycleBrightness * fixedIntensityWeight * debugIntensityScale);
       const alphaScale = clamp01(entry.fadeAlpha * ((Number(shadowSettings.alpha) || 128) / 255) * debugIntensityScale);
+      const effectiveOpacity = alphaScale;
       entry.shadowMesh.visible = true;
       visibleCount += 1;
       projectedCount += 1;
@@ -838,7 +1061,7 @@ export class RWShadowPipeline {
         THREE.SRGBColorSpace,
       );
       entry.shadowMesh.material.color.copy(TMP_COLOR);
-      entry.shadowMesh.material.opacity = alphaScale;
+      entry.shadowMesh.material.opacity = effectiveOpacity;
       if (
         entry.fadeAlpha > DISTANCE_FADE_DEFAULTS.epsilon
         || entry.streamAlpha > DISTANCE_FADE_DEFAULTS.epsilon

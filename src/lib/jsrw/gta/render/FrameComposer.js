@@ -236,6 +236,7 @@ export class FrameComposer {
       trafficLights: uiStateRef.current.trafficLights,
     });
     const coronaUpdateCpuMs = endCpuProfile(profileEnabled, coronaUpdateStartMs);
+    const coronaDebugStats = coronaRuntime?.raw?.debugStats || {};
     const shadowUpdateStartMs = beginCpuProfile(profileEnabled);
     shadowRuntime?.update?.(camera, {
       ...pipelineRuntimeContext,
@@ -622,6 +623,18 @@ export class FrameComposer {
     metrics.worldOpaqueCpuMs = passCpuMetrics.worldOpaqueCpuMs ?? 0;
     metrics.worldTransparentCpuMs = passCpuMetrics.worldTransparentCpuMs ?? 0;
     metrics.coronaUpdateCpuMs = coronaUpdateCpuMs;
+    metrics.coronaSourceEntries = coronaDebugStats.sourceCount || 0;
+    metrics.coronaCandidates = coronaDebugStats.candidateCount || 0;
+    metrics.coronaSelectedEntries = coronaDebugStats.selectedCount || 0;
+    metrics.coronaSpriteCount = coronaDebugStats.spriteCount || 0;
+    metrics.coronaLightCount = coronaDebugStats.lightCount || 0;
+    metrics.coronaLastHour = coronaDebugStats.lastHour || 0;
+    metrics.coronaRejectedByVisibility = coronaDebugStats.rejectedByVisibility || 0;
+    metrics.coronaRejectedByDistance = coronaDebugStats.rejectedByDistance || 0;
+    metrics.coronaRejectedByBudget = coronaDebugStats.rejectedByBudget || 0;
+    metrics.coronaRejectedByLos = coronaDebugStats.rejectedByLos || 0;
+    metrics.coronaRejectedByScreen = coronaDebugStats.rejectedByScreen || 0;
+    metrics.coronaRejectedByTexture = coronaDebugStats.rejectedByTexture || 0;
     metrics.shadowUpdateCpuMs = shadowUpdateCpuMs;
     metrics.frameComposerCpuMs = endCpuProfile(profileEnabled, frameComposerStartMs);
     metrics.frameWaterUpdateCpuMs = passCpuMetrics.waterUpdateCpuMs ?? 0;

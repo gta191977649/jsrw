@@ -149,6 +149,17 @@ function createRenderMetrics() {
     visibleLod: 0,
     visibleQueueMeshes: 0,
     coronaCandidates: 0,
+    coronaSourceEntries: 0,
+    coronaSelectedEntries: 0,
+    coronaSpriteCount: 0,
+    coronaLightCount: 0,
+    coronaLastHour: 0,
+    coronaRejectedByVisibility: 0,
+    coronaRejectedByDistance: 0,
+    coronaRejectedByBudget: 0,
+    coronaRejectedByLos: 0,
+    coronaRejectedByScreen: 0,
+    coronaRejectedByTexture: 0,
     shadowCandidates: 0,
     transparentQueue: 0,
     additiveQueue: 0,
@@ -781,6 +792,11 @@ export class JsrwGtaSession {
         worldOpaqueRoot.add(chunk.opaqueGroup);
       };
 
+      const attachChunkMainGroup = (chunk) => {
+        if (!worldRoot || !chunk?.group || chunk.group.parent) return;
+        worldRoot.add(chunk.group);
+      };
+
       const getRenderChunk = (anchor) => {
         const chunkKey = getChunkKeyFromPosition(anchor);
         if (renderChunkMap.has(chunkKey)) return renderChunkMap.get(chunkKey);
@@ -819,7 +835,6 @@ export class JsrwGtaSession {
           rwWorldChunkKey: chunkKey,
           rwSplitOpaqueSceneChunk: true,
         };
-        worldRoot.add(chunk.group);
         renderChunkMap.set(chunkKey, chunk);
         return chunk;
       };
@@ -1045,6 +1060,7 @@ export class JsrwGtaSession {
           attachChunkOpaqueGroup(chunk);
           chunk.opaqueGroup.add(mesh);
         } else {
+          attachChunkMainGroup(chunk);
           chunk.group.add(mesh);
         }
         this.rendererSession?.applyToObject(mesh, {
@@ -1203,17 +1219,26 @@ export class JsrwGtaSession {
           instance.userData.objectDetail = buildObjectDetail(ide, placement, lodKind, model);
           instance.userData.fadeTemplate = model.template;
           instance.userData.placementMatrix = worldMatrix.clone();
+          instance.userData.rwPlacementIndex = placementIndex;
           instance.userData.rwIdeFlags = ide.flags | 0;
           instance.userData.isTobj = ide.section === 'tobjs';
           instance.userData.rwPipelineTarget = createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs');
           instance.userData.rwQueueRenderClass = 'building';
           collectQueueMeshes(instance);
+          instance.traverse((node) => {
+            if (!node?.isObject3D) return;
+            node.userData = {
+              ...(node.userData || {}),
+              rwPlacementIndex: placementIndex,
+            };
+          });
           const chunk = getRenderChunk(anchor);
           if (worldOpaqueRoot && isDedicatedOpaqueSceneCandidate(instance)) {
             markDedicatedOpaqueSceneObject(instance);
             attachChunkOpaqueGroup(chunk);
             chunk.opaqueGroup.add(instance);
           } else {
+            attachChunkMainGroup(chunk);
             chunk.group.add(instance);
           }
           rwRenderQueueRef.current?.markDirty?.();

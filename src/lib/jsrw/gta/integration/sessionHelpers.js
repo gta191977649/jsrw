@@ -45,6 +45,8 @@ export function map2dfxVisibilityMode(lightType, IDE_LIGHT_TYPE) {
     case IDE_LIGHT_TYPE.FLASH3_NIGHT: return 'flash3-night';
     case IDE_LIGHT_TYPE.RANDOM_FLICKER: return 'random-flicker';
     case IDE_LIGHT_TYPE.RANDOM_FLICKER_NIGHT: return 'random-flicker-night';
+    case IDE_LIGHT_TYPE.BRIDGE_FLASH1: return 'bridge-flash1';
+    case IDE_LIGHT_TYPE.BRIDGE_FLASH2: return 'bridge-flash2';
     default: return 'always';
   }
 }
