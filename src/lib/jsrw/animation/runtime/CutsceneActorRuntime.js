@@ -19,6 +19,7 @@ function createEmptyState() {
     actors: [],
     warnings: [],
     hasWorldContext: false,
+    timeMs: 0,
   };
 }
 
@@ -373,6 +374,8 @@ export class CutsceneActorRuntime {
         if (actor.clip) {
           actor.mixer = new THREE.AnimationMixer(instance);
           actor.action = actor.mixer.clipAction(actor.clip);
+          actor.action.setLoop(THREE.LoopOnce, 1);
+          actor.action.clampWhenFinished = true;
           actor.action.play();
           this.log(
             'info',
@@ -436,11 +439,37 @@ export class CutsceneActorRuntime {
         actor.root.position.copy(actor.baseOffset).add(rootMotion);
       }
     }
+    this.state.timeMs = Math.max(0, Number(timeMs) || 0);
     return this.getDebugState();
   }
 
   update(timeMs = 0) {
-    return this.seek(timeMs);
+    const nextTimeMs = Math.max(0, Number(timeMs) || 0);
+    const previousTimeMs = Math.max(0, Number(this.state.timeMs) || 0);
+    const dtSeconds = Math.max(0, nextTimeMs - previousTimeMs) / 1000;
+
+    if (dtSeconds <= 0 || dtSeconds > 0.5) {
+      return this.seek(nextTimeMs);
+    }
+
+    const timeSeconds = nextTimeMs / 1000;
+    for (const actor of this.state.actors) {
+      if (!actor.root) continue;
+      const actorTimeSeconds = mapCutsceneTimeToActorTime(this.definition, actor, timeSeconds);
+      actor.mixer?.update?.(dtSeconds);
+      const attachment = this.attachmentRuntime.get(actor.root);
+      actor.attachment = attachment;
+      const rootMotion = actor.clipBundle?.rootMotion
+        ? rootMotionToThreeOffset(sampleRootMotion(actor.clipBundle.rootMotion, actorTimeSeconds))
+        : new THREE.Vector3(0, 0, 0);
+      if (attachment) {
+        actor.root.position.copy(rootMotion);
+      } else {
+        actor.root.position.copy(actor.baseOffset).add(rootMotion);
+      }
+    }
+    this.state.timeMs = nextTimeMs;
+    return this.getDebugState();
   }
 
   attachActorToActor({
