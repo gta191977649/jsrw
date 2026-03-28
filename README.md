@@ -46,21 +46,21 @@ The relevant matrices are:
 
 The correct inverse bind matrix is:
 
-```text
-B_i = M_bone_i^{-1} M_atomic
-```
+$$
+B_i = M_{\text{bone}_i}^{-1} M_{\text{atomic}}
+$$
 
 The skinned vertex transform is:
 
-```text
-v' = Σ_i w_i (M_bone_i B_i) v
-```
+$$
+v' = \sum_i w_i \left( M_{\text{bone}_i} B_i \right) v
+$$
 
 For these DFFs, `skinToBoneMatrix` is therefore not just `M_bone_i^{-1}`. It is the bone inverse bind matrix relative to the atomic frame:
 
-```text
-S_i = M_bone_i^{-1} M_atomic
-```
+$$
+S_i = M_{\text{bone}_i}^{-1} M_{\text{atomic}}
+$$
 
 In practice this means:
 
