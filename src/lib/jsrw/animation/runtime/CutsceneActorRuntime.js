@@ -297,7 +297,7 @@ export class CutsceneActorRuntime {
     actor.baseOffset = gtaPositionToThree(
       this.definition?.offset?.x || 0,
       this.definition?.offset?.y || 0,
-      (this.definition?.offset?.z || 0) + 1,
+      this.definition?.offset?.z || 0,
     );
 
     let resolvedModel = null;

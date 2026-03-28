@@ -146,6 +146,7 @@ export class ThreeDffFactory {
     clump.RWAtomicList.forEach((atomic, atomicIndex) => {
       const geometryMeshes = meshesByGeometry[atomic.geometryIndex];
       if (!geometryMeshes?.length) return;
+      const atomicFrameWorldMatrix = frameTransforms[atomic.frameIndex]?.worldMatrix?.clone?.() || new THREE.Matrix4();
 
       const nodelist = new Array(clump.RWFrameList.length);
       let nodeInfo = null;
@@ -201,6 +202,7 @@ export class ThreeDffFactory {
             meshData.skeleton = sharedSkeleton;
             meshData.skinRootBone = bones[0];
             meshData.skinAtomicId = atomicIndex;
+            meshData.atomicFrameWorldMatrix = atomicFrameWorldMatrix;
           }
         }
       }
@@ -222,6 +224,9 @@ export class ThreeDffFactory {
           }
           group.add(container);
           skinnedContainers.set(containerKey, container);
+        }
+        if (meshData.atomicFrameWorldMatrix) {
+          mesh.applyMatrix4(meshData.atomicFrameWorldMatrix);
         }
         container.add(mesh);
         group.updateMatrixWorld(true);

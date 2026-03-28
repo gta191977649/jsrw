@@ -32,6 +32,42 @@ Open the app, then:
 - RW material descriptor pipeline for default world rendering.
 - Custom RW pipeline debug profiles in `Rendering > Pipeline`.
 
+## Skinned DFF binding
+
+For skinned RenderWare DFFs, the mesh bind space is not always the skeleton root space.
+Some models, including VCS cutscene player variants such as `csplr.dff`, place the skinned geometry under a separate atomic frame while the HAnim hierarchy starts elsewhere in the frame tree.
+
+The relevant matrices are:
+
+- `M_atomic`: world matrix of the DFF atomic frame (`atomic.frameIndex`)
+- `M_bone_i`: world matrix of bone `i`
+- `B_i`: inverse bind matrix used by skinning
+- `S_i`: DFF `skinToBoneMatrix[i]`
+
+The correct inverse bind matrix is:
+
+```text
+B_i = M_bone_i^{-1} M_atomic
+```
+
+The skinned vertex transform is:
+
+```text
+v' = Σ_i w_i (M_bone_i B_i) v
+```
+
+For these DFFs, `skinToBoneMatrix` is therefore not just `M_bone_i^{-1}`. It is the bone inverse bind matrix relative to the atomic frame:
+
+```text
+S_i = M_bone_i^{-1} M_atomic
+```
+
+In practice this means:
+
+- the mesh must be bound in its atomic frame space, not implicitly in skeleton-root space
+- dropping the atomic frame term causes large pose offsets and stretched "zombie" deformation on models like `csplr.dff`
+- three.js skinning is correct as long as the mesh is placed in atomic-frame space before `bind()`
+
 ## Custom RW pipeline
 
 The renderer now includes a profile-driven RW pipeline layer for debugging and visual comparison.
