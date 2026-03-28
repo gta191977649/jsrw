@@ -231,7 +231,9 @@ export class HudPipeline {
     this.disposeSubtitleMeshes();
     if (!this.font || !this.subtitleCue?.text) return;
 
-    const maxWidth = Math.max(260, Math.min(this.viewport.width * 0.8, 980));
+    const aspectRatio = this.viewport.width / Math.max(1, this.viewport.height);
+    const widthScale = aspectRatio >= 1 ? 0.88 : 0.82;
+    const maxWidth = Math.max(320, Math.min(this.viewport.width * widthScale, 1280));
     const fontSize = snap(Math.max(26, Math.min(42, this.viewport.width * 0.034)));
     const lineHeight = snap(fontSize * 1.16);
     const speakerSize = snap(Math.max(13, Math.min(18, fontSize * 0.5)));
