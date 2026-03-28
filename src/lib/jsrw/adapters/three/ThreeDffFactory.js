@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createRWMaterial } from './ThreeMaterialAdapter.js';
 
 const RW_TO_THREE_LOCAL_MATRIX = new THREE.Matrix4().makeRotationFromEuler(
   new THREE.Euler(-Math.PI / 2, 0, Math.PI),
@@ -136,7 +137,12 @@ export class ThreeDffFactory {
           geometry.setAttribute('skinWeight', weightsBuffer);
         }
 
-        const meshEntry = { geometry, material: materials[split.matIndex], materialIndex: split.matIndex };
+        const baseMaterial = materials[split.matIndex];
+        const meshEntry = {
+          geometry,
+          material: baseMaterial ? createRWMaterial(baseMaterial, geometry) : baseMaterial,
+          materialIndex: split.matIndex,
+        };
         geometryMeshes.push(meshEntry);
         meshes.push(meshEntry);
       }
