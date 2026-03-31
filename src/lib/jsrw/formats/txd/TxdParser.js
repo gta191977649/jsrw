@@ -28,6 +28,15 @@ function getCompressionName(compression, d3dFormat) {
   if (fmt === D3DFORMAT.D3DFMT_DXT1) return 'DXT1';
   if (fmt === D3DFORMAT.D3DFMT_DXT3) return 'DXT3';
   if (fmt === D3DFORMAT.D3DFMT_DXT5) return 'DXT5';
+  if (
+    fmt === D3DFORMAT.D3DFMT_A8R8G8B8 ||
+    fmt === D3DFORMAT.D3DFMT_X8R8G8B8 ||
+    fmt === D3DFORMAT.D3DFMT_R5G6B5 ||
+    fmt === D3DFORMAT.D3DFMT_A1R5G5B5 ||
+    fmt === D3DFORMAT.D3DFMT_A4R4G4B4
+  ) {
+    return 'RAW';
+  }
   const c = Number(compression);
   if (c === 1 || c === 8) return 'DXT1';
   if (c === 3) return 'DXT3';

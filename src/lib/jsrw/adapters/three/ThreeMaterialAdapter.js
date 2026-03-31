@@ -121,7 +121,7 @@ function buildRWDescriptor(material, geometry, overrides = {}) {
     toneMapped: false,
     filterMode: material.map?.minFilter === THREE.LinearFilter ? 'linear' : 'mipmap-linear',
     textureName: material.map?.name || material.userData?.textureName || '',
-    maskName: material.alphaMap?.name || '',
+    maskName: material.alphaMap?.name || material.userData?.maskName || '',
     surfaceProps: {
       ambient: Number.isFinite(sourceSurfaceProps.ambient) ? sourceSurfaceProps.ambient : 1,
       specular: Number.isFinite(sourceSurfaceProps.specular) ? sourceSurfaceProps.specular : 0,

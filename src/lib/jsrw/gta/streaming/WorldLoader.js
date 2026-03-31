@@ -39,6 +39,7 @@ const DEFAULT_TEXTURE_PATHS = Object.freeze([
   'models/particle.txd',
 ]);
 const DEFAULT_COL_DIR = 'models/coll';
+const TEXT_DECODER = new TextDecoder('ascii');
 
 function sanitizeImgList(content) {
   return String(content || '')
@@ -244,6 +245,12 @@ export class WorldLoader {
     return orderedPaths;
   }
 
+  async hasEmbeddedImgDirectory(imgRecord) {
+    const header = await imgRecord?.file?.slice?.(0, 8)?.arrayBuffer?.();
+    if (!header || header.byteLength < 8) return false;
+    return TEXT_DECODER.decode(new Uint8Array(header, 0, 4)) === 'VER2';
+  }
+
   async mountArchives(imgPaths, imgArchives) {
     for (const imgPath of imgPaths) {
       const normalizedImgPath = normalizePath(imgPath);
@@ -255,21 +262,24 @@ export class WorldLoader {
       });
       if (!imgRecord) continue;
 
-      const dirRecord = this.resolveByPath('DIR', imgPath.replace(/\.img$/i, '.dir'), {
-        foundDetail: 'found',
-        missingDetail: 'missing dir',
-        warnOnMissing: false,
-      });
-      if (!dirRecord) {
+      const hasEmbeddedDirectory = await this.hasEmbeddedImgDirectory(imgRecord);
+      const dirRecord = hasEmbeddedDirectory
+        ? null
+        : this.resolveByPath('DIR', imgPath.replace(/\.img$/i, '.dir'), {
+            foundDetail: 'found',
+            missingDetail: 'missing dir',
+            warnOnMissing: false,
+          });
+      const parsed = await imgArchives.mount(imgRecord, dirRecord, imgPath);
+      if (parsed.directoryMode === 'none') {
         this.onLog?.('warn', `IMG directory missing: ${imgPath.replace(/\.img$/i, '.dir')}`);
         continue;
       }
 
-      const parsed = await imgArchives.mount(imgRecord, dirRecord, imgPath);
       this.onFileEvent?.('IMG', imgRecord.resolvedPath, `${parsed.total} entries`);
       this.onLog?.(
         'info',
-        `IMG loaded: ${imgPath} (${parsed.total} entries${parsed.overridden > 0 ? `, override ${parsed.overridden}` : ''})`,
+        `IMG loaded: ${imgPath} (${parsed.total} entries, ${parsed.directoryMode}${parsed.overridden > 0 ? `, override ${parsed.overridden}` : ''})`,
       );
     }
   }

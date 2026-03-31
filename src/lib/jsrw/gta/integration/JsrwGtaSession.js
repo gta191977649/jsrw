@@ -721,6 +721,7 @@ export class JsrwGtaSession {
               registerTexture(mat.map?.name, mat.map);
               registerTexture(mat.alphaMap?.name, mat.alphaMap);
               registerTexture(mat.userData?.textureName, mat.map);
+              registerTexture(mat.userData?.maskName, mat.alphaMap);
             }
             const rwMats = sourceMats.map((mat) => {
               tuneTransparentMaterial(mat);

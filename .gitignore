@@ -2,3 +2,9 @@ node_modules/*
 .DS_Store
 /dist
 *.log
+/tools
+.codex-dff-probe.dff
+.codex-write-test.dff
+.codex-write-test2.dff
+.codex-write-test3.dff
+/.vendor

@@ -4,6 +4,10 @@ const IMG_SECTOR_SIZE = 2048;
 const DIR_ENTRY_SIZE = 32;
 const TEXT_DECODER = new TextDecoder('ascii');
 
+function readSignature(buffer) {
+  return TEXT_DECODER.decode(new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength)));
+}
+
 function readDirName(bytes) {
   let end = bytes.length;
   for (let i = 0; i < bytes.length; i += 1) {
@@ -15,9 +19,13 @@ function readDirName(bytes) {
   return normalizePath(TEXT_DECODER.decode(bytes.subarray(0, end)));
 }
 
+function hasEmbeddedVer2Directory(imgBuffer) {
+  return readSignature(imgBuffer) === 'VER2' && imgBuffer.byteLength >= 8;
+}
+
 function parseDirEntries(dirBuffer) {
   const dataView = new DataView(dirBuffer);
-  const signature = TEXT_DECODER.decode(new Uint8Array(dirBuffer, 0, Math.min(4, dirBuffer.byteLength)));
+  const signature = readSignature(dirBuffer);
 
   let offset = 0;
   let numEntries = 0;
@@ -63,13 +71,21 @@ export class IMGParser {
     this.archives = [];
   }
 
-  async appendArchive(imgFile, dirFile, sourcePath = '') {
-    if (!imgFile || !dirFile) {
-      return { total: 0, added: 0, overridden: 0 };
+  async appendArchive(imgFile, dirFile = null, sourcePath = '') {
+    if (!imgFile) {
+      return { total: 0, added: 0, overridden: 0, directoryMode: 'none' };
     }
 
-    const [imgBuffer, dirBuffer] = await Promise.all([imgFile.arrayBuffer(), dirFile.arrayBuffer()]);
-    const entries = parseDirEntries(dirBuffer);
+    const [imgBuffer, dirBuffer = null] = await Promise.all([
+      imgFile.arrayBuffer(),
+      dirFile ? dirFile.arrayBuffer() : Promise.resolve(null),
+    ]);
+    const useEmbeddedDirectory = hasEmbeddedVer2Directory(imgBuffer);
+    if (!useEmbeddedDirectory && !dirBuffer) {
+      return { total: 0, added: 0, overridden: 0, directoryMode: 'none' };
+    }
+
+    const entries = parseDirEntries(useEmbeddedDirectory ? imgBuffer : dirBuffer);
     const archiveIndex = this.archives.length;
     this.archives.push({
       buffer: imgBuffer,
@@ -97,7 +113,12 @@ export class IMGParser {
       else added += 1;
     }
 
-    return { total: entries.length, added, overridden };
+    return {
+      total: entries.length,
+      added,
+      overridden,
+      directoryMode: useEmbeddedDirectory ? 'img-ver2' : 'external-dir',
+    };
   }
 
   getAssetBytes(name) {

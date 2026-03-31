@@ -6,8 +6,8 @@ export class ImgArchiveManager {
     this.parser = new IMGParser();
   }
 
-  async mount(imgRecord, dirRecord, sourcePath = '') {
-    return this.parser.appendArchive(imgRecord.file, dirRecord.file, sourcePath || imgRecord.resolvedPath);
+  async mount(imgRecord, dirRecord = null, sourcePath = '') {
+    return this.parser.appendArchive(imgRecord.file, dirRecord?.file || null, sourcePath || imgRecord.resolvedPath);
   }
 
   has(name) {
