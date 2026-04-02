@@ -78,6 +78,8 @@ const ENABLE_WORLD_INSTANCING = true;
 const STREAMING_BUILD_PLACEMENT_BUDGET = 8;
 const STREAMING_BUILD_FRAME_BUDGET_MS = 8;
 const RW_DISTANCE_FADE_WINDOW = DISTANCE_FADE_DEFAULTS.window;
+const CUTSCENE_CAMERA_ASPECT = 5 / 4;
+const CUTSCENE_CAMERA_DEFAULT_HORIZONTAL_FOV = 70;
 const RW_STREAM_ALPHA_PER_SECOND = DISTANCE_FADE_DEFAULTS.streamAlphaPerSecond;
 const RW_FADE_EPSILON = DISTANCE_FADE_DEFAULTS.epsilon;
 const SKY_SMALL_STRIP_HEIGHT = 4 / 400;
@@ -137,6 +139,13 @@ const FRAME_STAGE_DEBUG_DEFAULTS = Object.freeze({
 });
 const STATS_WINDOW_DEFAULT_POS = Object.freeze({ x: 460, y: 270 });
 const STATS_WINDOW_DEFAULT_SIZE = Object.freeze({ x: 360, y: 250 });
+
+function rwHorizontalFovToThreeVertical(horizontalFovDegrees, aspect) {
+  const safeAspect = Math.max(1e-6, Number(aspect) || 1);
+  const horizontalRadians = THREE.MathUtils.degToRad(Number(horizontalFovDegrees) || 0);
+  const verticalRadians = 2 * Math.atan(Math.tan(horizontalRadians * 0.5) / safeAspect);
+  return THREE.MathUtils.radToDeg(verticalRadians);
+}
 const STATS_WINDOW_MIN_SIZE = Object.freeze({ x: 260, y: 200 });
 const STATS_WINDOW_MAX_SIZE = Object.freeze({ x: 960, y: 720 });
 const STATS_WINDOW_PADDING = Object.freeze({ x: 14, y: 12 });
@@ -1420,7 +1429,12 @@ function App() {
     editorCamera.up.copy(WORLD_UP);
     editorCamera.position.set(300, 300, 220);
     editorCamera.lookAt(0, 0, 0);
-    const cutsceneCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 60000);
+    const cutsceneCamera = new THREE.PerspectiveCamera(
+      rwHorizontalFovToThreeVertical(CUTSCENE_CAMERA_DEFAULT_HORIZONTAL_FOV, CUTSCENE_CAMERA_ASPECT),
+      1,
+      0.1,
+      60000,
+    );
     cutsceneCamera.up.copy(WORLD_UP);
     cutsceneCamera.position.copy(editorCamera.position);
     cutsceneCamera.quaternion.copy(editorCamera.quaternion);
@@ -1638,7 +1652,7 @@ function App() {
       imguiCanvas.height = Math.max(1, Math.floor(height * dpr));
       editorCamera.aspect = width / height;
       editorCamera.updateProjectionMatrix();
-      cutsceneCamera.aspect = width / height;
+      cutsceneCamera.aspect = CUTSCENE_CAMERA_ASPECT;
       cutsceneCamera.updateProjectionMatrix();
       hudRuntime.setViewport(width, height);
       lodUpdateStateRef.current.needsRefresh = true;

@@ -10,40 +10,94 @@ const TMP_FALLBACK_UP = new THREE.Vector3(0, 1, 0);
 const TMP_ALT_UP = new THREE.Vector3(0, 0, 1);
 const TMP_ROLL_QUAT = new THREE.Quaternion();
 const TMP_BASIS = new THREE.Matrix4();
+const TMP_BEZIER_A = new THREE.Vector3();
+const TMP_BEZIER_B = new THREE.Vector3();
+const TMP_BEZIER_C = new THREE.Vector3();
+const MIN_SPLINE_DELTA_SECONDS = 0.075;
 
-function findKeySpan(keys = [], timeSeconds = 0) {
+function rwHorizontalFovToThreeVertical(horizontalFovDegrees, aspect) {
+  const safeAspect = Math.max(1e-6, Number(aspect) || 1);
+  const horizontalRadians = THREE.MathUtils.degToRad(Number(horizontalFovDegrees) || 0);
+  const verticalRadians = 2 * Math.atan(Math.tan(horizontalRadians * 0.5) / safeAspect);
+  return THREE.MathUtils.radToDeg(verticalRadians);
+}
+
+function cubicBezierScalar(p0, p1, p2, p3, alpha) {
+  const a = THREE.MathUtils.clamp(alpha, 0, 1);
+  const b = 1 - a;
+  return (b * b * b * p0)
+    + (3 * a * b * b * p1)
+    + (3 * a * a * b * p2)
+    + (a * a * a * p3);
+}
+
+function cubicBezierVec3(p0, p1, p2, p3, alpha, target) {
+  const a = THREE.MathUtils.clamp(alpha, 0, 1);
+  const b = 1 - a;
+  target.copy(p0).multiplyScalar(b * b * b);
+  target.add(TMP_BEZIER_A.copy(p1).multiplyScalar(3 * a * b * b));
+  target.add(TMP_BEZIER_B.copy(p2).multiplyScalar(3 * a * a * b));
+  target.add(TMP_BEZIER_C.copy(p3).multiplyScalar(a * a * a));
+  return target;
+}
+
+function findSplineSpan(keys = [], timeSeconds = 0) {
   if (!Array.isArray(keys) || keys.length === 0) return null;
-  if (keys.length === 1 || timeSeconds <= keys[0].time) {
+  if (keys.length === 1) {
     return { left: keys[0], right: keys[0], alpha: 0 };
   }
-  for (let index = 1; index < keys.length; index += 1) {
-    const right = keys[index];
-    if (timeSeconds > right.time) continue;
-    const left = keys[index - 1];
-    const delta = right.time - left.time;
-    const alpha = delta > 1e-6 ? (timeSeconds - left.time) / delta : 0;
-    return { left, right, alpha: THREE.MathUtils.clamp(alpha, 0, 1) };
+
+  let rightIndex = 1;
+  while (rightIndex < keys.length && timeSeconds >= (Number(keys[rightIndex]?.time) || 0)) {
+    rightIndex += 1;
   }
-  const last = keys[keys.length - 1];
-  return { left: last, right: last, alpha: 0 };
+  if (rightIndex >= keys.length) rightIndex = keys.length - 1;
+
+  let leftIndex = Math.max(0, rightIndex - 1);
+  while (rightIndex < keys.length) {
+    const leftTime = Number(keys[leftIndex]?.time) || 0;
+    const rightTime = Number(keys[rightIndex]?.time) || leftTime;
+    if ((rightTime - leftTime) > MIN_SPLINE_DELTA_SECONDS) break;
+    if (rightIndex >= (keys.length - 1)) break;
+    rightIndex += 1;
+    leftIndex = Math.max(0, rightIndex - 1);
+  }
+
+  const left = keys[leftIndex];
+  const right = keys[rightIndex];
+  const leftTime = Number(left?.time) || 0;
+  const rightTime = Number(right?.time) || leftTime;
+  const delta = rightTime - leftTime;
+  const alpha = delta > 1e-6 ? (timeSeconds - leftTime) / delta : 0;
+  return {
+    left,
+    right,
+    alpha: THREE.MathUtils.clamp(alpha, 0, 1),
+  };
 }
 
 function sampleScalarTrack(keys = [], timeSeconds = 0) {
-  const span = findKeySpan(keys, timeSeconds);
+  const span = findSplineSpan(keys, timeSeconds);
   if (!span) return 0;
-  return THREE.MathUtils.lerp(
+  if (span.left === span.right) return Number(span.left?.value) || 0;
+  return cubicBezierScalar(
     Number(span.left?.value) || 0,
+    Number(span.left?.lane3) || Number(span.left?.value) || 0,
+    Number(span.right?.lane2) || Number(span.right?.value) || 0,
     Number(span.right?.value) || 0,
     span.alpha,
   );
 }
 
 function sampleVec3Track(keys = [], timeSeconds = 0, target = new THREE.Vector3()) {
-  const span = findKeySpan(keys, timeSeconds);
+  const span = findSplineSpan(keys, timeSeconds);
   if (!span) return target.set(0, 0, 0);
   const left = span.left?.value?.isVector3 ? span.left.value : target.set(0, 0, 0);
+  if (span.left === span.right) return target.copy(left);
+  const leftControl = span.left?.lane3?.isVector3 ? span.left.lane3 : left;
+  const rightControl = span.right?.lane2?.isVector3 ? span.right.lane2 : span.right?.value || left;
   const right = span.right?.value?.isVector3 ? span.right.value : left;
-  return target.copy(left).lerp(right, span.alpha);
+  return cubicBezierVec3(left, leftControl, rightControl, right, span.alpha, target);
 }
 
 function buildCameraBasis(source, target, rollRadians, quaternionTarget) {
@@ -129,14 +183,15 @@ export class CutsceneCameraPlayer {
     const target = sampleVec3Track(this.definition.tracks?.cameraTarget, timeSeconds, TMP_TARGET)
       .add(offset);
     const fov = sampleScalarTrack(this.definition.tracks?.fov, timeSeconds);
+    const appliedVerticalFov = rwHorizontalFovToThreeVertical(fov, camera.aspect);
     const rollRadians = THREE.MathUtils.degToRad(sampleScalarTrack(this.definition.tracks?.roll, timeSeconds));
     const worldSource = gtaPositionToThree(source.x, source.y, source.z);
     const worldTarget = gtaPositionToThree(target.x, target.y, target.z);
 
     camera.position.copy(worldSource);
     buildCameraBasis(worldSource, worldTarget, rollRadians, camera.quaternion);
-    if (Number.isFinite(fov) && Math.abs(camera.fov - fov) > 1e-6) {
-      camera.fov = fov;
+    if (Number.isFinite(appliedVerticalFov) && Math.abs(camera.fov - appliedVerticalFov) > 1e-6) {
+      camera.fov = appliedVerticalFov;
       camera.updateProjectionMatrix();
     }
     camera.updateMatrixWorld(true);
@@ -147,6 +202,7 @@ export class CutsceneCameraPlayer {
       worldSource: worldSource.clone(),
       worldTarget: worldTarget.clone(),
       fov,
+      appliedVerticalFov,
       rollRadians,
       timeMs: Math.max(0, Number(timeMs) || 0),
       durationMs: this.getDurationMs(),

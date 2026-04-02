@@ -4,6 +4,7 @@ import { Font } from 'three/examples/jsm/loaders/FontLoader.js';
 import { TTFLoader } from 'three/examples/jsm/loaders/TTFLoader.js';
 
 const SUBTITLE_PASS_SCALE = 0.5;
+const CUTSCENE_BORDER_PERCENT = 0.30;
 
 function createSubtitleMaterial(color, opacity = 1) {
   return new THREE.MeshBasicMaterial({
@@ -65,6 +66,7 @@ export class HudPipeline {
     this.viewport = { width: 1, height: 1 };
     this.gameVersion = 'VCS';
     this.showGameIcon = false;
+    this.cutscenePresentation = false;
     this.subtitleCue = null;
     this.font = null;
     this.renderKey = '';
@@ -91,6 +93,22 @@ export class HudPipeline {
     this.subtitleCompositeSprite.center.set(0.5, 0.5);
     this.subtitleCompositeSprite.renderOrder = 9998;
     this.scene.add(this.subtitleCompositeSprite);
+
+    this.cutsceneBorderMaterial = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.cutsceneBorderGeometry = new THREE.PlaneGeometry(1, 1);
+    this.cutsceneTopBorder = new THREE.Mesh(this.cutsceneBorderGeometry, this.cutsceneBorderMaterial);
+    this.cutsceneBottomBorder = new THREE.Mesh(this.cutsceneBorderGeometry, this.cutsceneBorderMaterial);
+    this.cutsceneTopBorder.renderOrder = 9996;
+    this.cutsceneBottomBorder.renderOrder = 9996;
+    this.cutsceneTopBorder.visible = false;
+    this.cutsceneBottomBorder.visible = false;
+    this.scene.add(this.cutsceneTopBorder);
+    this.scene.add(this.cutsceneBottomBorder);
 
     this.iconTextures = options.iconTextures || {};
     this.iconMaterial = new THREE.SpriteMaterial({
@@ -137,6 +155,7 @@ export class HudPipeline {
     this.ensureSubtitleRenderTarget();
     this.subtitleCompositeSprite.position.set(0, 0, 0);
     this.subtitleCompositeSprite.scale.set(this.viewport.width, this.viewport.height, 1);
+    this.updateCutsceneBorders();
     this.rebuildSubtitleMeshes();
   }
 
@@ -172,6 +191,32 @@ export class HudPipeline {
     }
     this.subtitleCue = nextCue;
     this.rebuildSubtitleMeshes();
+  }
+
+  setCutscenePresentation(enabled) {
+    const nextValue = Boolean(enabled);
+    if (this.cutscenePresentation === nextValue) return;
+    this.cutscenePresentation = nextValue;
+    this.updateCutsceneBorders();
+    this.rebuildSubtitleMeshes();
+  }
+
+  getCutsceneBorderHeight() {
+    return this.cutscenePresentation
+      ? (this.viewport.height * 0.5) * CUTSCENE_BORDER_PERCENT
+      : 0;
+  }
+
+  updateCutsceneBorders() {
+    const borderHeight = this.getCutsceneBorderHeight();
+    const visible = borderHeight > 0.5;
+    this.cutsceneTopBorder.visible = visible;
+    this.cutsceneBottomBorder.visible = visible;
+    if (!visible) return;
+    this.cutsceneTopBorder.position.set(0, (this.viewport.height * 0.5) - (borderHeight * 0.5), 0);
+    this.cutsceneBottomBorder.position.set(0, (-this.viewport.height * 0.5) + (borderHeight * 0.5), 0);
+    this.cutsceneTopBorder.scale.set(this.viewport.width, borderHeight, 1);
+    this.cutsceneBottomBorder.scale.set(this.viewport.width, borderHeight, 1);
   }
 
   updateGameIcon() {
@@ -226,6 +271,7 @@ export class HudPipeline {
       id: this.subtitleCue?.id || '',
       width: this.viewport.width,
       height: this.viewport.height,
+      cutscenePresentation: this.cutscenePresentation,
     });
     if (renderKey === this.renderKey) return;
     this.disposeSubtitleMeshes();
@@ -266,7 +312,10 @@ export class HudPipeline {
       ? snap((fontSize * 0.55) + (speakerSize * 0.85) + Math.max(6, fontSize * 0.12))
       : 0;
     const blockHeight = totalTextHeight + speakerGap;
-    const subtitleBottom = -this.viewport.height * 0.33;
+    const cutsceneBottomSafeMargin = this.getCutsceneBorderHeight();
+    const subtitleBottom = this.cutscenePresentation
+      ? ((-this.viewport.height * 0.5) + cutsceneBottomSafeMargin + Math.max(42, fontSize * 1.2))
+      : (-this.viewport.height * 0.33);
     let cursorY = snap(subtitleBottom + (blockHeight * 0.5));
     const fillMeshes = [];
 
@@ -344,6 +393,8 @@ export class HudPipeline {
     this.subtitleCompositeMaterial.dispose();
     this.subtitleRenderTarget?.dispose?.();
     this.iconMaterial.dispose();
+    this.cutsceneBorderMaterial.dispose();
+    this.cutsceneBorderGeometry.dispose();
   }
 }
 

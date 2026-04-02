@@ -26,6 +26,10 @@ export class HudRuntime {
     this.pipeline.setSubtitleCue(cue);
   }
 
+  setCutscenePresentation(enabled) {
+    this.pipeline.setCutscenePresentation(enabled);
+  }
+
   render(renderer) {
     this.pipeline.render(renderer);
   }
