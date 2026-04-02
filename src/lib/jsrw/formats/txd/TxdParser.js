@@ -8,8 +8,10 @@ const TextureFormat = {
   FORMAT_8888: 0x0500,
   FORMAT_888: 0x0600,
   FORMAT_555: 0x0A00,
+  FORMAT_EXT_AUTO_MIPMAP: 0x1000,
   FORMAT_EXT_PAL8: 0x2000,
   FORMAT_EXT_PAL4: 0x4000,
+  FORMAT_EXT_MIPMAP: 0x8000,
 };
 
 const D3DFORMAT = {
@@ -43,6 +45,21 @@ function getCompressionName(compression, d3dFormat) {
   if (c === 5 || c === 9) return 'DXT5';
   if (c > 0) return `COMP_${c}`;
   return 'RAW';
+}
+
+function getRasterFormatType(rasterFormat) {
+  return Number(rasterFormat) & 0x0F00;
+}
+
+function parseTextureFormatFlags(value) {
+  const flags = Number(value) >>> 0;
+  return {
+    raw: flags,
+    filterMode: flags & 0xFF,
+    uAddressing: (flags >> 8) & 0x0F,
+    vAddressing: (flags >> 12) & 0x0F,
+    pad: (flags >> 16) & 0xFFFF,
+  };
 }
 
 export class TxdParser {
@@ -96,7 +113,7 @@ export class TxdParser {
     this.readHeader();
 
     const platformId = this.readUInt32();
-    this.readUInt32();
+    const textureFormatFlags = parseTextureFormatFlags(this.readUInt32());
     const name = this.readString(32);
     const alphaName = this.readString(32);
     const rasterFormat = this.readUInt32();
@@ -109,6 +126,9 @@ export class TxdParser {
     let compression;
     let hasAlpha = false;
     let d3dFormat = 0;
+    let platformPropertyValue = 0;
+    let platformProperties = null;
+    let legacyHasAlphaValue = 0;
 
     if (platformId === 9) {
       d3dFormat = this.readUInt32();
@@ -117,22 +137,19 @@ export class TxdParser {
       depth = this.readUInt8();
       numLevels = this.readUInt8();
       rasterType = this.readUInt8();
-      compression = this.readUInt8();
-      hasAlpha = (
-        d3dFormat === D3DFORMAT.D3DFMT_DXT3 ||
-        d3dFormat === D3DFORMAT.D3DFMT_DXT5 ||
-        d3dFormat === D3DFORMAT.D3DFMT_A8R8G8B8 ||
-        d3dFormat === D3DFORMAT.D3DFMT_A4R4G4B4 ||
-        d3dFormat === D3DFORMAT.D3DFMT_A1R5G5B5
-      );
+      platformPropertyValue = this.readUInt8();
+      platformProperties = this.parsePlatformProperties(platformId, platformPropertyValue);
+      compression = this.getCompressionCode(platformId, d3dFormat, platformProperties);
+      hasAlpha = this.getHasAlpha(platformId, rasterFormat, d3dFormat, platformProperties);
     } else if (platformId === 8) {
-      hasAlpha = this.readUInt32() !== 0;
+      legacyHasAlphaValue = this.readUInt32();
       width = this.readUInt16();
       height = this.readUInt16();
       depth = this.readUInt8();
       numLevels = this.readUInt8();
       rasterType = this.readUInt8();
       compression = this.readUInt8();
+      hasAlpha = legacyHasAlphaValue !== 0;
     } else {
       console.warn(`TxdParser: Unsupported platform ID: ${platformId}`);
       this.position = chunkEnd;
@@ -190,13 +207,70 @@ export class TxdParser {
       depth,
       rasterType,
       platformId,
+      textureFormatFlags,
       hasAlpha,
+      legacyHasAlphaValue,
       compression,
       compressionName,
       d3dFormat,
+      platformProperties,
+      platformPropertyValue,
       rasterFormat,
       rgba,
     };
+  }
+
+  parsePlatformProperties(platformId, propertyValue) {
+    const value = Number(propertyValue) & 0xFF;
+    if (platformId === 9) {
+      return {
+        alpha: (value & 0x01) !== 0,
+        cubeTexture: (value & 0x02) !== 0,
+        autoMipmaps: (value & 0x04) !== 0,
+        compressed: (value & 0x08) !== 0,
+      };
+    }
+    return null;
+  }
+
+  getCompressionCode(platformId, d3dFormat, platformProperties) {
+    const fmt = Number(d3dFormat);
+    if (fmt === D3DFORMAT.D3DFMT_DXT1) return 1;
+    if (fmt === D3DFORMAT.D3DFMT_DXT3) return 3;
+    if (fmt === D3DFORMAT.D3DFMT_DXT5) return 5;
+    return 0;
+  }
+
+  getHasAlpha(platformId, rasterFormat, d3dFormat, platformProperties) {
+    if (platformId === 9) {
+      return Boolean(platformProperties?.alpha);
+    }
+
+    const fmt = Number(d3dFormat);
+    if (
+      fmt === D3DFORMAT.D3DFMT_DXT3
+      || fmt === D3DFORMAT.D3DFMT_DXT5
+      || fmt === D3DFORMAT.D3DFMT_A8R8G8B8
+      || fmt === D3DFORMAT.D3DFMT_A4R4G4B4
+      || fmt === D3DFORMAT.D3DFMT_A1R5G5B5
+    ) {
+      return true;
+    }
+    if (
+      fmt === D3DFORMAT.D3DFMT_X8R8G8B8
+      || fmt === D3DFORMAT.D3DFMT_R5G6B5
+      || fmt === D3DFORMAT.D3DFMT_DXT1
+    ) {
+      return false;
+    }
+
+    const formatType = getRasterFormatType(rasterFormat);
+    return !(
+      formatType === TextureFormat.FORMAT_565
+      || formatType === TextureFormat.FORMAT_LUM8
+      || formatType === TextureFormat.FORMAT_888
+      || formatType === TextureFormat.FORMAT_555
+    );
   }
 
   decodeDXT1(data, width, height) {

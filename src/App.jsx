@@ -110,6 +110,12 @@ const SHADOW_DEBUG_DEFAULTS = Object.freeze({
   heightBias: 0.03,
   maxActiveShadows: 48,
 });
+
+function normalizeInteriorId(value) {
+  const interior = Number.parseInt(value, 10);
+  return Number.isFinite(interior) ? interior : 0;
+}
+
 const FRAME_STAGE_DEBUG_DEFAULTS = Object.freeze({
   skyDome: true,
   skyBackdrop: true,
@@ -869,6 +875,7 @@ function App() {
     lastForceLodOnly: false,
     lastShowTobjs: false,
     lastEnableOcclusion: false,
+    lastInteriorId: 0,
     lastCameraAspect: Number.NaN,
     lastCameraFov: Number.NaN,
     lastCameraNear: Number.NaN,
@@ -917,6 +924,8 @@ function App() {
       attachParentName: '',
       attachTargetKey: '',
     },
+    currentInterior: 0,
+    availableInteriors: [0],
     backendSelection: 'WebGL',
     windows: Object.fromEntries(WINDOW_DEFS.map((item) => [item.key, item.defaultVisible])),
   });
@@ -969,6 +978,7 @@ function App() {
     totalChunks: 0,
     instancedBatches: 0,
     instancedItems: 0,
+    interiorCount: 1,
     lightObjects: 0,
     lightEmitters: 0,
     queuedChunks: 0,
@@ -979,7 +989,6 @@ function App() {
   const [loadedFiles, setLoadedFiles] = useState([]);
   const [selectedObject, setSelectedObject] = useState(null);
   const [selectedTextureDetail, setSelectedTextureDetail] = useState(null);
-  const [showMapPickerFallback, setShowMapPickerFallback] = useState(false);
   const statusRef = useRef(status);
   const activeBackendRef = useRef(activeBackend);
   const statsRef = useRef(stats);
@@ -1191,7 +1200,6 @@ function App() {
       setSelectedObject,
       setSelectedTextureDetail,
       setShowGameIcon,
-      setShowMapPickerFallback,
       setStats,
       setStatus,
     },
@@ -2476,7 +2484,7 @@ function App() {
             ImGui.EndMenu();
           }
           if (ImGui.BeginMenu('View')) {
-            for (const item of WINDOW_DEFS) {
+            for (const item of WINDOW_DEFS.filter((entry) => entry.key !== 'cutscene')) {
               if (ImGui.MenuItem(item.title, '', isWindowOpen(item.key))) {
                 setWindowOpen(item.key, !isWindowOpen(item.key));
               }
@@ -2486,6 +2494,18 @@ function App() {
           if (ImGui.BeginMenu('Rendering')) {
             if (ImGui.MenuItem('Settings', '', isWindowOpen('rendering'))) {
               setWindowOpen('rendering', !isWindowOpen('rendering'));
+            }
+            ImGui.EndMenu();
+          }
+          if (ImGui.BeginMenu('Interiors')) {
+            if (ImGui.MenuItem('Interior Manager', '', isWindowOpen('interiors'))) {
+              setWindowOpen('interiors', !isWindowOpen('interiors'));
+            }
+            ImGui.EndMenu();
+          }
+          if (ImGui.BeginMenu('Cutscene')) {
+            if (ImGui.MenuItem('Cutscene Manager', '', isWindowOpen('cutscene'))) {
+              setWindowOpen('cutscene', !isWindowOpen('cutscene'));
             }
             ImGui.EndMenu();
           }
@@ -2725,6 +2745,47 @@ function App() {
         }
 
           ImGui.TextWrapped(liveStatus);
+          ImGui.End();
+        }
+
+        if (isWindowOpen('interiors')) {
+          ImGui.SetNextWindowPos(new Vec2(452, 16), ImGui.Cond.Once);
+          ImGui.SetNextWindowSize(new Vec2(300, 0), ImGui.Cond.Once);
+          ImGui.Begin(
+            'Interiors',
+            (value = isWindowOpen('interiors')) => setWindowOpen('interiors', value),
+            0,
+          );
+          const availableInteriors = Array.isArray(uiStateRef.current.availableInteriors) && uiStateRef.current.availableInteriors.length > 0
+            ? [...uiStateRef.current.availableInteriors].sort((left, right) => left - right)
+            : [0];
+          const currentInterior = normalizeInteriorId(uiStateRef.current.currentInterior);
+          const hasCurrentInterior = availableInteriors.includes(currentInterior);
+
+          ImGui.Text(`Active interior: ${currentInterior}`);
+          ImGui.Text(`Interior range: 0-${availableInteriors[availableInteriors.length - 1] ?? 0}`);
+          if (ImGui.Button('World (0)')) {
+            uiStateRef.current.currentInterior = 0;
+          }
+          ImGui.SameLine();
+          ImGui.TextDisabled('IPL inst[2]');
+
+          if (ImGui.BeginCombo('Current Interior', hasCurrentInterior ? String(currentInterior) : `${currentInterior} (custom)`)) {
+            for (const interiorId of availableInteriors) {
+              const selected = interiorId === currentInterior;
+              if (ImGui.Selectable(String(interiorId), selected)) {
+                uiStateRef.current.currentInterior = interiorId;
+              }
+              if (selected) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+          }
+
+          if (!hasCurrentInterior) {
+            ImGui.TextWrapped('Current interior is not present in the loaded IPL set. Pick one of the loaded ids or switch back to world interior 0.');
+          }
+          ImGui.Separator();
+          ImGui.TextWrapped('World buildings are filtered and streamed by IPL interior id. Switching this value updates the active interior in real time.');
           ImGui.End();
         }
 
@@ -3492,6 +3553,7 @@ function App() {
                 `Sky clouds pass: ${renderMetrics.skyCloudsPassInvoked ? 'yes' : 'no'} | calls ${renderMetrics.skyCloudsPassDrawCalls ?? 0} | tris ${renderMetrics.skyCloudsPassTriangles ?? 0}`,
               );
               ImGui.Text(`Chunks: ${renderMetrics.frustumChunks}/${statsRef.current.totalChunks}`);
+              ImGui.Text(`Interior: ${uiStateRef.current.currentInterior} | loaded ${statsRef.current.interiorCount || 1} | chunks ${renderMetrics.interiorChunkCount || 0}`);
               ImGui.Text(`Active Items: ${renderMetrics.activeItems}`);
               ImGui.Text(`Transparent Queue: blend ${renderMetrics.transparentQueue} | add ${renderMetrics.additiveQueue} | overlay ${renderMetrics.overlayQueue}`);
               ImGui.Text(`Instancing: batches ${statsRef.current.instancedBatches} | placements ${statsRef.current.instancedItems}`);
@@ -4563,86 +4625,42 @@ function App() {
     setWindowOpen,
   ]);
 
-  const fileSummary = useMemo(() => `Indexed files: ${stats.files}`, [stats.files]);
-
   return (
     <div className="app-root" ref={containerRef}>
       <canvas key={`renderer-${activeBackend}`} ref={canvasRef} className="viewport" />
       <canvas ref={imguiCanvasRef} className="imgui-overlay" />
-
-      <div className="hud">
-        <label className="picker">
-          <span>Pick extracted GTA folder</span>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            webkitdirectory=""
-            directory=""
-            onChange={onPickFolder}
-          />
-        </label>
-        <label className="picker">
-          <span>Pick map zip</span>
-          <input
-            ref={zipInputRef}
-            type="file"
-            accept=".zip,application/zip"
-            onChange={onPickZip}
-          />
-        </label>
-        <label className="picker">
-          <span>Pick cutscene folder</span>
-          <input
-            ref={cutsceneFolderInputRef}
-            type="file"
-            multiple
-            webkitdirectory=""
-            directory=""
-            onChange={onPickCutsceneFolder}
-          />
-        </label>
-        <label className="picker">
-          <span>Pick cutscene zip</span>
-          <input
-            ref={cutsceneZipInputRef}
-            type="file"
-            accept=".zip,application/zip"
-            onChange={onPickCutsceneZip}
-          />
-        </label>
-        {showMapPickerFallback ? (
-          <button type="button" onClick={() => openMapPicker('dom')}>Open map picker</button>
-        ) : null}
-
-        <button type="button" onClick={rebuildWorld}>Build World</button>
-        <button type="button" onClick={clearWorld}>Clear</button>
-        <p>{fileSummary}</p>
-        {defaultMapDownload.active ? (
-          <div className="hud-progress">
-            <div className="hud-progress__label">
-              <span>Downloading {defaultMapDownload.label}</span>
-              <span>{defaultMapDownload.speedLabel || '0 B/s'}</span>
-            </div>
-            <div className="hud-progress__bar">
-              <div
-                className="hud-progress__fill"
-                style={{
-                  width: defaultMapDownload.indeterminate
-                    ? '100%'
-                    : `${clamp01(defaultMapDownload.loaded / Math.max(defaultMapDownload.total, 1)) * 100}%`,
-                }}
-              />
-            </div>
-            <p className="hud-progress__meta">
-              {defaultMapDownload.indeterminate
-                ? `${formatByteCount(defaultMapDownload.loaded)} downloaded`
-                : `${formatByteCount(defaultMapDownload.loaded)} / ${formatByteCount(defaultMapDownload.total)}`}
-            </p>
-          </div>
-        ) : null}
-        <p>{status}</p>
-      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        webkitdirectory=""
+        directory=""
+        onChange={onPickFolder}
+        style={{ display: 'none' }}
+      />
+      <input
+        ref={zipInputRef}
+        type="file"
+        accept=".zip,application/zip"
+        onChange={onPickZip}
+        style={{ display: 'none' }}
+      />
+      <input
+        ref={cutsceneFolderInputRef}
+        type="file"
+        multiple
+        webkitdirectory=""
+        directory=""
+        onChange={onPickCutsceneFolder}
+        style={{ display: 'none' }}
+      />
+      <input
+        ref={cutsceneZipInputRef}
+        type="file"
+        accept=".zip,application/zip"
+        onChange={onPickCutsceneZip}
+        style={{ display: 'none' }}
+      />
     </div>
   );
 }

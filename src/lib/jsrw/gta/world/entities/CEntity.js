@@ -39,6 +39,7 @@ export class CEntity {
   constructor(options = {}) {
     this.kind = 'CEntity';
     this.isTobj = Boolean(options.isTobj);
+    this.interior = Number.isFinite(options.interior) ? options.interior : 0;
     this.anchor = options.anchor || null;
     this.mode = options.mode || 'hidden';
     this.chunkKey = options.chunkKey || null;

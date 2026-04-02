@@ -143,6 +143,8 @@ function classifyBigBuildingItem(item) {
 function createRenderMetrics() {
   return {
     activeChunks: 0,
+    activeInterior: 0,
+    interiorChunkCount: 0,
     frustumChunks: 0,
     activeItems: 0,
     visibleNear: 0,
@@ -279,6 +281,26 @@ function normalizeModelLookupName(value = '') {
   return extensionIndex >= 0 ? normalized.slice(0, extensionIndex) : normalized;
 }
 
+function normalizeInteriorId(value) {
+  const interior = Number.parseInt(value, 10);
+  return Number.isFinite(interior) ? interior : 0;
+}
+
+function createInteriorIndexedLookup() {
+  return {
+    all: new Map(),
+    byInterior: new Map(),
+  };
+}
+
+function ensureInteriorBucket(collection, interiorId, factory) {
+  const normalizedInterior = normalizeInteriorId(interiorId);
+  if (collection.has(normalizedInterior)) return collection.get(normalizedInterior);
+  const next = factory();
+  collection.set(normalizedInterior, next);
+  return next;
+}
+
 export class JsrwGtaSession {
   constructor(options = {}) {
     this.rendererSession = options.rendererSession || createJsrwRenderer(options);
@@ -390,9 +412,9 @@ export class JsrwGtaSession {
     if (timecycleDataRef) timecycleDataRef.current = null;
     if (timecycleStateRef) timecycleStateRef.current = createDefaultTimecycleState();
     if (renderItemsRef) renderItemsRef.current = [];
-    if (bigBuildingItemsRef) bigBuildingItemsRef.current = [];
+    if (bigBuildingItemsRef) bigBuildingItemsRef.current = { all: [], byInterior: new Map() };
     if (renderChunksRef) renderChunksRef.current = [];
-    if (renderChunkLookupRef) renderChunkLookupRef.current = new Map();
+    if (renderChunkLookupRef) renderChunkLookupRef.current = createInteriorIndexedLookup();
     if (activeRenderChunksRef) activeRenderChunksRef.current = new Set();
     if (frameVisibilityRef) resetFrameVisibilityResult(frameVisibilityRef.current);
     if (chunkOcclusionStateRef) resetChunkOcclusionState(chunkOcclusionStateRef.current);
@@ -433,7 +455,12 @@ export class JsrwGtaSession {
       lodUpdateStateRef.current.lastCameraFov = Number.NaN;
       lodUpdateStateRef.current.lastCameraNear = Number.NaN;
       lodUpdateStateRef.current.lastCameraFar = Number.NaN;
+      lodUpdateStateRef.current.lastInteriorId = Number.NaN;
       lodUpdateStateRef.current.chunkScanCache = null;
+    }
+    if (uiStateRef?.current) {
+      uiStateRef.current.currentInterior = 0;
+      uiStateRef.current.availableInteriors = [0];
     }
     setShowGameIcon?.(false);
     if (renderResourcesReadyRef) renderResourcesReadyRef.current = false;
@@ -446,6 +473,7 @@ export class JsrwGtaSession {
       ideEffects: 0,
       nearOnly: 0,
       totalChunks: 0,
+      interiorCount: 1,
       instancedBatches: 0,
       instancedItems: 0,
       lightObjects: 0,
@@ -547,6 +575,15 @@ export class JsrwGtaSession {
       const ideById = worldContext.ideRegistry?.byId || new Map();
       const ideByModel = worldContext.ideRegistry?.byModel || new Map();
       const placements = worldBuild.world?.placements || worldContext.iplRegistry?.getAll?.() || [];
+      const availableInteriorIds = new Set([0]);
+      placements.forEach((placement) => {
+        availableInteriorIds.add(normalizeInteriorId(placement?.interior));
+      });
+      const maxInteriorId = Math.max(...availableInteriorIds);
+      const sortedInteriorIds = Array.from({ length: maxInteriorId + 1 }, (_, index) => index);
+      const requestedInterior = normalizeInteriorId(uiStateRef.current.currentInterior);
+      uiStateRef.current.availableInteriors = sortedInteriorIds;
+      uiStateRef.current.currentInterior = sortedInteriorIds.includes(requestedInterior) ? requestedInterior : 0;
 
       if (defaultResources) {
         pushConsoleLine?.(
@@ -605,6 +642,7 @@ export class JsrwGtaSession {
         unresolved: 0,
         nearOnly: 0,
         totalChunks: 0,
+        interiorCount: sortedInteriorIds.length,
         instancedBatches: 0,
         instancedItems: 0,
         lightObjects: 0,
@@ -788,7 +826,8 @@ export class JsrwGtaSession {
 
       const renderItems = [];
       const bigBuildingItems = [];
-      const renderChunkMap = new Map();
+      const bigBuildingItemsByInterior = new Map();
+      const renderChunkLookup = createInteriorIndexedLookup();
       const instancedBatchMap = new Map();
       const coronaEmitters = [];
       const registeredCoronaPlacements = new Set();
@@ -805,14 +844,18 @@ export class JsrwGtaSession {
         worldRoot.add(chunk.group);
       };
 
-      const getRenderChunk = (anchor) => {
-        const chunkKey = getChunkKeyFromPosition(anchor);
-        if (renderChunkMap.has(chunkKey)) return renderChunkMap.get(chunkKey);
+      const getRenderChunk = (anchor, interiorId = 0) => {
+        const normalizedInterior = normalizeInteriorId(interiorId);
+        const localChunkKey = getChunkKeyFromPosition(anchor);
+        const chunkKey = `${normalizedInterior}:${localChunkKey}`;
+        if (renderChunkLookup.all.has(chunkKey)) return renderChunkLookup.all.get(chunkKey);
         const chunk = {
           key: chunkKey,
+          localKey: localChunkKey,
+          interior: normalizedInterior,
           cx: Math.floor(anchor.x / WORLD_CHUNK_SIZE),
           cz: Math.floor(anchor.z / WORLD_CHUNK_SIZE),
-          center: getChunkCenterFromKey(chunkKey),
+          center: getChunkCenterFromKey(localChunkKey),
           group: new THREE.Group(),
           opaqueGroup: new THREE.Group(),
           items: [],
@@ -836,20 +879,24 @@ export class JsrwGtaSession {
           ...(chunk.group.userData || {}),
           rwWorldChunk: true,
           rwWorldChunkKey: chunkKey,
+          rwInteriorId: normalizedInterior,
         };
         chunk.opaqueGroup.userData = {
           ...(chunk.opaqueGroup.userData || {}),
           rwWorldChunk: true,
           rwWorldChunkKey: chunkKey,
+          rwInteriorId: normalizedInterior,
           rwSplitOpaqueSceneChunk: true,
         };
-        renderChunkMap.set(chunkKey, chunk);
+        renderChunkLookup.all.set(chunkKey, chunk);
+        ensureInteriorBucket(renderChunkLookup.byInterior, normalizedInterior, () => new Map())
+          .set(chunkKey, chunk);
         return chunk;
       };
 
       const registerChunkEmitter = (emitter) => {
         if (!emitter?.position) return;
-        const chunk = getRenderChunk(emitter.position);
+        const chunk = getRenderChunk(emitter.position, emitter.interior);
         emitter.chunkKey = chunk.key;
         chunk.coronaEmitters.push(emitter);
         if (Number(emitter.shadow?.size) > 0) {
@@ -885,6 +932,7 @@ export class JsrwGtaSession {
           section: ide.section,
           drawDistance: ide.drawDistance,
           lodKind,
+          interior: normalizeInteriorId(placement.interior),
           position: {
             x: placement.position.x,
             y: placement.position.y,
@@ -950,6 +998,7 @@ export class JsrwGtaSession {
               sourceType: '2dfx',
               modelName: placement.modelName,
               placementIndex,
+              interior: normalizeInteriorId(placement.interior),
               position: toPlainVector(worldPosition),
               color: { ...effectColor, a: 255 },
               alpha: 255,
@@ -999,6 +1048,7 @@ export class JsrwGtaSession {
             sourceType: 'dffLight',
             modelName: placement.modelName,
             placementIndex,
+            interior: normalizeInteriorId(placement.interior),
             position: toPlainVector(worldPosition),
             direction: toPlainVector(worldDirection),
             color: normalizedColor,
@@ -1061,6 +1111,7 @@ export class JsrwGtaSession {
           isTobj: ide.section === 'tobjs',
           rwQueueRenderClass: 'building',
           rwWorldChunkKey: chunk.key,
+          rwInteriorId: chunk.interior,
           rwSplitOpaqueScene: Boolean(worldOpaqueRoot),
         };
         applyRwIdeFlagsToInstance(mesh, ide.flags);
@@ -1087,6 +1138,7 @@ export class JsrwGtaSession {
         rwRenderQueueRef.current?.markDirty?.();
         const batch = {
           key: batchKey,
+          interior: chunk.interior,
           mesh,
           entries: [],
           visibleCount: 0,
@@ -1133,13 +1185,16 @@ export class JsrwGtaSession {
         item.boundingBox = boundsBox.clone();
         item.boundingSphere = boundsBox.getBoundingSphere(new THREE.Sphere());
         renderItems.push(item);
-        const chunk = getRenderChunk(item.anchor);
+        const chunk = getRenderChunk(item.anchor, item.interior);
         chunk.items.push(item);
         chunk.boundsMin.min(item.boundsMin);
         chunk.boundsMax.max(item.boundsMax);
         item.chunkKey = chunk.key;
         item.isBigBuilding = classifyBigBuildingItem(item);
-        if (item.isBigBuilding) bigBuildingItems.push(item);
+        if (item.isBigBuilding) {
+          bigBuildingItems.push(item);
+          ensureInteriorBucket(bigBuildingItemsByInterior, item.interior, () => []).push(item);
+        }
         return item;
       };
 
@@ -1154,7 +1209,7 @@ export class JsrwGtaSession {
           const model = await getModelTemplate(ide.modelName, ide.txdName);
           if (!canUseInstancing(model, ide)) return null;
           const worldMatrix = buildPlacementWorldMatrix(placement, anchor);
-          const chunk = getRenderChunk(anchor);
+          const chunk = getRenderChunk(anchor, placement.interior);
           maybeRegisterPlacementEmitters(placement, placementIndex, worldMatrix, ide, model, lodKind);
           const handles = [];
           const objectDetail = buildObjectDetail(ide, placement, lodKind, model);
@@ -1174,6 +1229,7 @@ export class JsrwGtaSession {
               placementMatrix: worldMatrix.clone(),
               visible: false,
               objectDetail,
+              interior: normalizeInteriorId(placement.interior),
               selectionTemplate: model.template,
               localBounds: descriptor.geometry.boundingBox?.clone?.() || null,
               ideFlags: ide.flags | 0,
@@ -1230,6 +1286,7 @@ export class JsrwGtaSession {
           instance.userData.rwPlacementIndex = placementIndex;
           instance.userData.rwIdeFlags = ide.flags | 0;
           instance.userData.isTobj = ide.section === 'tobjs';
+          instance.userData.rwInteriorId = normalizeInteriorId(placement.interior);
           instance.userData.rwPipelineTarget = createRwPipelineTarget(buildGameVersion, ide.section === 'tobjs');
           instance.userData.rwQueueRenderClass = 'building';
           collectQueueMeshes(instance);
@@ -1238,9 +1295,10 @@ export class JsrwGtaSession {
             node.userData = {
               ...(node.userData || {}),
               rwPlacementIndex: placementIndex,
+              rwInteriorId: normalizeInteriorId(placement.interior),
             };
           });
-          const chunk = getRenderChunk(anchor);
+          const chunk = getRenderChunk(anchor, placement.interior);
           if (worldOpaqueRoot && isDedicatedOpaqueSceneCandidate(instance)) {
             markDedicatedOpaqueSceneObject(instance);
             attachChunkOpaqueGroup(chunk);
@@ -1292,6 +1350,7 @@ export class JsrwGtaSession {
           if (nearObj || lodObj || nearInstanced) {
             registerRenderItem(createCEntity({
               isTobj,
+              interior: normalizeInteriorId(placement.interior),
               anchor: anchor.clone(),
               nearDistance: nearDef?.drawDistance ?? null,
               relatedModelName: placementModelName,
@@ -1330,6 +1389,7 @@ export class JsrwGtaSession {
           if (nearObj || nearInstanced) {
             registerRenderItem(createCEntity({
               isTobj,
+              interior: normalizeInteriorId(placement.interior),
               anchor: anchor.clone(),
               nearState: createEntityRenderSide({
                 object3D: nearObj,
@@ -1344,7 +1404,7 @@ export class JsrwGtaSession {
         }));
       }
 
-      for (const chunk of renderChunkMap.values()) {
+      for (const chunk of renderChunkLookup.all.values()) {
         if (chunk.items.length === 0 || !hasFiniteVector3(chunk.boundsMin) || !hasFiniteVector3(chunk.boundsMax)) {
           chunk.occlusionBox.setFromCenterAndSize(
             chunk.center.clone(),
@@ -1444,9 +1504,9 @@ export class JsrwGtaSession {
       }
 
       renderItemsRef.current = renderItems;
-      bigBuildingItemsRef.current = bigBuildingItems;
-      renderChunksRef.current = Array.from(renderChunkMap.values());
-      renderChunkLookupRef.current = renderChunkMap;
+      bigBuildingItemsRef.current = { all: bigBuildingItems, byInterior: bigBuildingItemsByInterior };
+      renderChunksRef.current = Array.from(renderChunkLookup.all.values());
+      renderChunkLookupRef.current = renderChunkLookup;
       activeRenderChunksRef.current = new Set();
       this.rendererSession.setBackend(activeBackend);
       this.rendererSession.setRoot(worldRoot, { traversalRoots });
@@ -1502,13 +1562,14 @@ export class JsrwGtaSession {
         loaded,
         failed,
         unresolved,
-        totalChunks: renderChunkMap.size,
+        totalChunks: renderChunkLookup.all.size,
+        interiorCount: sortedInteriorIds.length,
         instancedBatches: instancedBatchMap.size,
         instancedItems,
         lightObjects: placementsWithLights.size,
         lightEmitters: coronaEmitters.length,
       }));
-      pushConsoleLine?.('info', `Chunk visible set: ${renderChunkMap.size} chunks`);
+      pushConsoleLine?.('info', `Chunk visible set: ${renderChunkLookup.all.size} chunks across ${sortedInteriorIds.length} interiors`);
       pushConsoleLine?.('info', `Instanced batches: ${instancedBatchMap.size}, instanced placements: ${instancedItems}`);
     } finally {
       buildActiveRef.current = false;

@@ -138,7 +138,6 @@ export function createAppSessionController(options = {}) {
     setSelectedObject,
     setSelectedTextureDetail,
     setShowGameIcon,
-    setShowMapPickerFallback,
     setStats,
     setStatus,
   } = setters;
@@ -158,7 +157,6 @@ export function createAppSessionController(options = {}) {
     fileIndexRef.current = index;
     pushConsoleLine('info', options.consoleMessage || `Map indexed: ${index.count} files`);
     setStats((prev) => ({ ...prev, files: index.count }));
-    setShowMapPickerFallback(false);
     setStatus(options.statusMessage || `Indexed ${index.count} files. Click Build World.`);
     return index;
   };
@@ -247,39 +245,26 @@ export function createAppSessionController(options = {}) {
     }
   };
 
-  const openMapPicker = (source = 'dom') => {
+  const openMapPicker = () => {
     const input = fileInputRef.current;
     if (!input) return false;
-
-    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
-    const isSafari = /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|FxiOS/i.test(ua);
 
     input.value = '';
 
     try {
       if (typeof input.showPicker === 'function') {
         input.showPicker();
-        setShowMapPickerFallback(false);
         return true;
       }
     } catch {
-      // Safari may reject showPicker/click outside a trusted DOM gesture.
+      // Some browsers may reject showPicker outside a trusted DOM gesture.
     }
 
     try {
       input.click();
-      if (source !== 'imgui' || !isSafari) {
-        setShowMapPickerFallback(false);
-      } else {
-        setShowMapPickerFallback(true);
-        setStatus('Safari may block file dialogs from the ImGui menu. Click the HUD folder picker below.');
-      }
       return true;
     } catch {
-      if (isSafari) {
-        setShowMapPickerFallback(true);
-        setStatus('Safari blocked the ImGui file dialog. Click the HUD folder picker below.');
-      }
+      setStatus('Browser blocked the folder dialog from the ImGui menu.');
       return false;
     }
   };
@@ -303,7 +288,7 @@ export function createAppSessionController(options = {}) {
       input.click();
       return true;
     } catch {
-      setStatus('Browser blocked the zip file dialog. Use the HUD zip picker below.');
+      setStatus('Browser blocked the zip file dialog from the ImGui menu.');
       return false;
     }
   };

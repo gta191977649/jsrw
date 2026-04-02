@@ -160,7 +160,6 @@ export class FrameComposer {
       cutsceneScene.background = null;
       cutsceneScene.fog = scene?.fog || null;
       renderer.autoClear = false;
-      renderer.clearDepth();
       const beforeCutscene = takeRenderStatsSnapshot(renderer);
       renderer.render(cutsceneScene, camera);
       accumulateRenderStatsDelta(renderer, stageWorldStats, beforeCutscene);
@@ -569,6 +568,8 @@ export class FrameComposer {
       coronaRenderCpuMs: 0,
     };
 
+    renderCutsceneSceneStage();
+
     if (postFxSceneTarget && postFxSunCoronaEnabled && renderStages.sunBloom) {
       renderer.clearDepth();
       const beforeSunBloom = takeRenderStatsSnapshot(renderer);
@@ -604,7 +605,6 @@ export class FrameComposer {
       metrics.frameSunFinalCpuMs = 0;
     }
 
-    renderCutsceneSceneStage();
     renderHudStage();
 
     metrics.transparentQueue = rwRenderQueueRef.current?.debugStats?.transparentCount ?? 0;

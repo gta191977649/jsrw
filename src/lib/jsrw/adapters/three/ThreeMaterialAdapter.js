@@ -5,12 +5,13 @@ import {
   cloneRwMaterialDescriptor,
 } from '../../core/material/RwMaterialDescriptor.js';
 
-function mapCompressionMethod(compression, d3dFormat) {
+function mapCompressionMethod(compression, d3dFormat, platformId) {
   const c = Number(compression);
   const fmt = Number(d3dFormat);
   if (fmt === 0x31545844) return 'DXT1';
   if (fmt === 0x33545844) return 'DXT3';
   if (fmt === 0x35545844) return 'DXT5';
+  if (Number(platformId) === 9) return 'RAW';
   if (c === 1 || c === 8) return 'DXT1';
   if (c === 3) return 'DXT3';
   if (c === 5 || c === 9) return 'DXT5';
@@ -289,7 +290,11 @@ export function normalizeTextureDictionary(dict, options = {}) {
     texture.wrapT = THREE.RepeatWrapping;
     const hasAlpha = rawEntry?.hasAlpha === true || texture.hasAlpha === true;
     const meta = metadataByName.get(key) || {};
-    const compressionMethod = mapCompressionMethod(meta.compression ?? rawEntry?.compression, meta.d3dFormat ?? rawEntry?.d3dFormat);
+    const compressionMethod = mapCompressionMethod(
+      meta.compression ?? rawEntry?.compression,
+      meta.d3dFormat ?? rawEntry?.d3dFormat,
+      meta.platformId ?? rawEntry?.platformId,
+    );
     const pixelFormat = mapPixelFormat(meta.rasterFormat ?? rawEntry?.rasterFormat, meta.d3dFormat ?? rawEntry?.d3dFormat);
     const alphaMode = decideAlphaMode(texture, hasAlpha, compressionMethod, pixelFormat);
     texture.hasAlpha = hasAlpha;
