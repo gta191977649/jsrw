@@ -73,6 +73,13 @@ function getDescriptorSide(side) {
   return side ?? THREE.DoubleSide;
 }
 
+function inferMaterialAlphaMode(material) {
+  if (material?.blending === THREE.AdditiveBlending) return 'additive';
+  if ((Number(material?.alphaTest) || 0) > 0) return 'cutout';
+  if (material?.transparent || ((typeof material?.opacity === 'number') && material.opacity < 1)) return 'blend';
+  return 'opaque';
+}
+
 function cloneColor(color) {
   if (color?.isColor) return color.clone();
   const plain = cloneRwColor(color);
@@ -94,9 +101,8 @@ function renderBucketFromMode(alphaMode) {
 
 function buildRWDescriptor(material, geometry, overrides = {}) {
   const hasVertexColor = Boolean(geometry?.getAttribute?.('color'));
-  const alphaMode = String(material.map?.userData?.rwAlphaMode || 'opaque');
-  const baseTransparent = alphaMode === 'blend'
-    || (alphaMode === 'opaque' && Boolean(material.transparent || ((typeof material.opacity === 'number') && material.opacity < 1)));
+  const alphaMode = String(overrides.alphaMode || inferMaterialAlphaMode(material));
+  const baseTransparent = alphaMode === 'blend' || alphaMode === 'additive';
   const sourceSurfaceProps = overrides.surfaceProps || material.userData?.rwSurfaceProps || {};
   const descriptor = {
     kind: 'RWMaterial',
@@ -108,8 +114,8 @@ function buildRWDescriptor(material, geometry, overrides = {}) {
     alphaMapMode: overrides.alphaMapMode || 'ignore',
     color: cloneColor(material.color),
     opacity: typeof material.opacity === 'number' ? material.opacity : 1,
-    alphaMode: overrides.alphaMode || (baseTransparent ? 'blend' : alphaMode),
-    alphaRef: overrides.alphaRef ?? (alphaMode === 'cutout' ? 0.5 : 0),
+    alphaMode,
+    alphaRef: overrides.alphaRef ?? ((alphaMode === 'cutout' && (Number(material.alphaTest) || 0) <= 0) ? 0.5 : (Number(material.alphaTest) || 0)),
     depthTest: typeof material.depthTest === 'boolean' ? material.depthTest : true,
     depthWrite: typeof material.depthWrite === 'boolean' ? material.depthWrite : !baseTransparent,
     transparent: overrides.transparent ?? baseTransparent,
@@ -301,6 +307,7 @@ export function normalizeTextureDictionary(dict, options = {}) {
     texture.userData = {
       ...(texture.userData || {}),
       rwAlphaMode: alphaMode,
+      rwTextureAlphaMode: alphaMode,
       rwCompressionMethod: compressionMethod,
       rwPixelFormat: pixelFormat,
       rwD3dFormat: Number(meta.d3dFormat ?? rawEntry?.d3dFormat) || 0,

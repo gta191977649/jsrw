@@ -360,10 +360,15 @@ export class ThreeDffFactory {
         if (txdEntry) {
           const txdTexture = txdEntry.texture || txdEntry;
           result.map = txdTexture.clone();
-          const textureAlphaMode = txdTexture?.userData?.rwAlphaMode
+          const textureAlphaMode = txdTexture?.userData?.rwTextureAlphaMode
+            || txdEntry?.texture?.userData?.rwTextureAlphaMode
+            || txdTexture?.userData?.rwAlphaMode
             || txdEntry?.texture?.userData?.rwAlphaMode
             || (txdEntry.hasAlpha ? 'blend' : 'opaque');
-          applyAlphaMode(textureAlphaMode, 0.5);
+          result.userData.rwTextureAlphaMode = textureAlphaMode;
+          if (textureAlphaMode === 'cutout') {
+            applyAlphaMode(textureAlphaMode, 0.5);
+          }
           result.map.needsUpdate = true;
         }
       }
@@ -411,7 +416,9 @@ export class ThreeDffFactory {
         if (result.alphaMap) {
           result.alphaMap.wrapS = THREE.RepeatWrapping;
           result.alphaMap.wrapT = THREE.RepeatWrapping;
-          const maskAlphaMode = result.alphaMap.userData?.rwAlphaMode || 'cutout';
+          const maskAlphaMode = result.alphaMap.userData?.rwTextureAlphaMode
+            || result.alphaMap.userData?.rwAlphaMode
+            || 'cutout';
           applyAlphaMode(maskAlphaMode, maskAlphaMode === 'blend' ? 0 : 0.5);
         }
       }
