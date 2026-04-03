@@ -57,6 +57,22 @@ function findPackageAssetRecord(fileIndex, name, extension) {
   return fileIndex.findByPathHint(`${baseName}.${extension}`) || fileIndex.findByBasename(`${baseName}.${extension}`);
 }
 
+function applyActorPose(actor, actorTimeSeconds = 0) {
+  if (!actor?.root) return;
+  actor.mixer?.setTime?.(Math.max(0, Number(actorTimeSeconds) || 0));
+  const attachment = actor.attachmentRuntime?.get?.(actor.root) || null;
+  actor.attachment = attachment;
+  const rootMotion = actor.clipBundle?.rootMotion
+    ? rootMotionToThreeOffset(sampleRootMotion(actor.clipBundle.rootMotion, actorTimeSeconds))
+    : new THREE.Vector3(0, 0, 0);
+  if (attachment) {
+    actor.root.position.copy(rootMotion);
+  } else {
+    actor.root.position.copy(actor.baseOffset).add(rootMotion);
+  }
+  actor.root.updateMatrixWorld(true);
+}
+
 export class CutsceneActorRuntime {
   constructor(options = {}) {
     this.ifpLoader = options.ifpLoader || new IFPLoader();
@@ -294,12 +310,13 @@ export class CutsceneActorRuntime {
     actorRoot.name = actor.name;
     this.root.add(actorRoot);
     actor.root = actorRoot;
-    actor.motionEntry = findActorMotionEntry(this.definition, actor);
+      actor.motionEntry = findActorMotionEntry(this.definition, actor);
     actor.baseOffset = gtaPositionToThree(
       this.definition?.offset?.x || 0,
       this.definition?.offset?.y || 0,
       this.definition?.offset?.z || 0,
     );
+    actor.attachmentRuntime = this.attachmentRuntime;
 
     let resolvedModel = null;
     try {
@@ -427,17 +444,7 @@ export class CutsceneActorRuntime {
     for (const actor of this.state.actors) {
       if (!actor.root) continue;
       const actorTimeSeconds = mapCutsceneTimeToActorTime(this.definition, actor, timeSeconds);
-      actor.mixer?.setTime?.(actorTimeSeconds);
-      const attachment = this.attachmentRuntime.get(actor.root);
-      actor.attachment = attachment;
-      const rootMotion = actor.clipBundle?.rootMotion
-        ? rootMotionToThreeOffset(sampleRootMotion(actor.clipBundle.rootMotion, actorTimeSeconds))
-        : new THREE.Vector3(0, 0, 0);
-      if (attachment) {
-        actor.root.position.copy(rootMotion);
-      } else {
-        actor.root.position.copy(actor.baseOffset).add(rootMotion);
-      }
+      applyActorPose(actor, actorTimeSeconds);
     }
     this.state.timeMs = Math.max(0, Number(timeMs) || 0);
     return this.getDebugState();
@@ -456,17 +463,7 @@ export class CutsceneActorRuntime {
     for (const actor of this.state.actors) {
       if (!actor.root) continue;
       const actorTimeSeconds = mapCutsceneTimeToActorTime(this.definition, actor, timeSeconds);
-      actor.mixer?.update?.(dtSeconds);
-      const attachment = this.attachmentRuntime.get(actor.root);
-      actor.attachment = attachment;
-      const rootMotion = actor.clipBundle?.rootMotion
-        ? rootMotionToThreeOffset(sampleRootMotion(actor.clipBundle.rootMotion, actorTimeSeconds))
-        : new THREE.Vector3(0, 0, 0);
-      if (attachment) {
-        actor.root.position.copy(rootMotion);
-      } else {
-        actor.root.position.copy(actor.baseOffset).add(rootMotion);
-      }
+      applyActorPose(actor, actorTimeSeconds);
     }
     this.state.timeMs = nextTimeMs;
     return this.getDebugState();
