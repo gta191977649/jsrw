@@ -19,7 +19,8 @@ export function gtaPlacementQuaternionToThree(x, y, z, w, order = 'XYZW') {
   const ny = qy * invLen;
   const nz = qz * invLen;
   const nw = qw * invLen;
-  const gtaQuaternion = new THREE.Quaternion(nx, ny, nz, nw);
+  // IPL instance rotation matches librw/euryopa's rotate(conj(q)) path.
+  const gtaQuaternion = new THREE.Quaternion(nx, ny, nz, nw).conjugate();
   return GTA_TO_THREE_QUATERNION.clone()
     .multiply(gtaQuaternion)
     .multiply(THREE_TO_GTA_QUATERNION)
