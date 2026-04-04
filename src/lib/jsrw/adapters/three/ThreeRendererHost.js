@@ -69,6 +69,23 @@ export class ThreeRendererHost extends RendererHost {
     return this.renderer;
   }
 
+  getTextureLoadingOptions() {
+    const renderer = this.renderer;
+    const supportsCompressedTextures = Boolean(
+      renderer?.isWebGLRenderer
+      && (
+        renderer.extensions?.has?.('WEBGL_compressed_texture_s3tc')
+        || renderer.extensions?.has?.('WEBKIT_WEBGL_compressed_texture_s3tc')
+        || renderer.extensions?.has?.('MOZ_WEBGL_compressed_texture_s3tc')
+      ),
+    );
+    return {
+      preferCompressedTextures: supportsCompressedTextures,
+      supportsCompressedTextures,
+      allowCompressedFallbackDecode: true,
+    };
+  }
+
   dispose() {
     if (!this.renderer) return;
     if (typeof this.renderer.dispose === 'function') {

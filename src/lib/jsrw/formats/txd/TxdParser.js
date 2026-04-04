@@ -25,6 +25,8 @@ const D3DFORMAT = {
   D3DFMT_DXT5: 0x35545844,
 };
 
+const DXT_COMPRESSION_NAMES = new Set(['DXT1', 'DXT3', 'DXT5']);
+
 function getCompressionName(compression, d3dFormat) {
   const fmt = Number(d3dFormat);
   if (fmt === D3DFORMAT.D3DFMT_DXT1) return 'DXT1';
@@ -60,6 +62,281 @@ function parseTextureFormatFlags(value) {
     vAddressing: (flags >> 12) & 0x0F,
     pad: (flags >> 16) & 0xFFFF,
   };
+}
+
+function isDxtCompressionName(compressionName) {
+  return DXT_COMPRESSION_NAMES.has(String(compressionName || '').toUpperCase());
+}
+
+function getMipDimension(size, level) {
+  return Math.max(1, Number(size) >> level);
+}
+
+function rgb565ToRgba(color) {
+  const r = ((color >> 11) & 0x1F) * 255 / 31;
+  const g = ((color >> 5) & 0x3F) * 255 / 63;
+  const b = (color & 0x1F) * 255 / 31;
+  return [Math.round(r), Math.round(g), Math.round(b), 255];
+}
+
+function interpolateColor(c0, c1, factor) {
+  return [
+    Math.round(c0[0] + (c1[0] - c0[0]) * factor),
+    Math.round(c0[1] + (c1[1] - c0[1]) * factor),
+    Math.round(c0[2] + (c1[2] - c0[2]) * factor),
+    255,
+  ];
+}
+
+function decodeDXT1(data, width, height) {
+  const output = new Uint8Array(width * height * 4);
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  let srcOffset = 0;
+  for (let by = 0; by < blocksY; by += 1) {
+    for (let bx = 0; bx < blocksX; bx += 1) {
+      const c0 = data[srcOffset] | (data[srcOffset + 1] << 8);
+      const c1 = data[srcOffset + 2] | (data[srcOffset + 3] << 8);
+      srcOffset += 4;
+      const colors = [rgb565ToRgba(c0), rgb565ToRgba(c1)];
+      if (c0 > c1) {
+        colors[2] = interpolateColor(colors[0], colors[1], 1 / 3);
+        colors[3] = interpolateColor(colors[0], colors[1], 2 / 3);
+      } else {
+        colors[2] = interpolateColor(colors[0], colors[1], 0.5);
+        colors[3] = [0, 0, 0, 0];
+      }
+      const indices = data[srcOffset] | (data[srcOffset + 1] << 8) | (data[srcOffset + 2] << 16) | (data[srcOffset + 3] << 24);
+      srcOffset += 4;
+      for (let py = 0; py < 4; py += 1) {
+        for (let px = 0; px < 4; px += 1) {
+          const x = bx * 4 + px;
+          const y = by * 4 + py;
+          if (x >= width || y >= height) continue;
+          const idx = (indices >> ((py * 4 + px) * 2)) & 0x3;
+          const color = colors[idx];
+          const dstOffset = (y * width + x) * 4;
+          output[dstOffset + 0] = color[0];
+          output[dstOffset + 1] = color[1];
+          output[dstOffset + 2] = color[2];
+          output[dstOffset + 3] = color[3];
+        }
+      }
+    }
+  }
+  return output;
+}
+
+function decodeDXT3(data, width, height) {
+  const output = new Uint8Array(width * height * 4);
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  let srcOffset = 0;
+  for (let by = 0; by < blocksY; by += 1) {
+    for (let bx = 0; bx < blocksX; bx += 1) {
+      const alphaData = [];
+      for (let i = 0; i < 8; i += 1) alphaData.push(data[srcOffset + i]);
+      srcOffset += 8;
+      const c0 = data[srcOffset] | (data[srcOffset + 1] << 8);
+      const c1 = data[srcOffset + 2] | (data[srcOffset + 3] << 8);
+      srcOffset += 4;
+      const colors = [
+        rgb565ToRgba(c0),
+        rgb565ToRgba(c1),
+        interpolateColor(rgb565ToRgba(c0), rgb565ToRgba(c1), 1 / 3),
+        interpolateColor(rgb565ToRgba(c0), rgb565ToRgba(c1), 2 / 3),
+      ];
+      const indices = data[srcOffset] | (data[srcOffset + 1] << 8) | (data[srcOffset + 2] << 16) | (data[srcOffset + 3] << 24);
+      srcOffset += 4;
+      for (let py = 0; py < 4; py += 1) {
+        for (let px = 0; px < 4; px += 1) {
+          const x = bx * 4 + px;
+          const y = by * 4 + py;
+          if (x >= width || y >= height) continue;
+          const idx = (indices >> ((py * 4 + px) * 2)) & 0x3;
+          const color = colors[idx];
+          const alphaIdx = py * 4 + px;
+          const alphaByte = alphaData[Math.floor(alphaIdx / 2)];
+          const alpha = ((alphaIdx % 2 === 0) ? (alphaByte & 0xF) : (alphaByte >> 4)) * 17;
+          const dstOffset = (y * width + x) * 4;
+          output[dstOffset + 0] = color[0];
+          output[dstOffset + 1] = color[1];
+          output[dstOffset + 2] = color[2];
+          output[dstOffset + 3] = alpha;
+        }
+      }
+    }
+  }
+  return output;
+}
+
+function decodeDXT5(data, width, height) {
+  const output = new Uint8Array(width * height * 4);
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  let srcOffset = 0;
+  for (let by = 0; by < blocksY; by += 1) {
+    for (let bx = 0; bx < blocksX; bx += 1) {
+      const a0 = data[srcOffset];
+      const a1 = data[srcOffset + 1];
+      srcOffset += 2;
+      let alphaBits = 0n;
+      for (let i = 0; i < 6; i += 1) alphaBits |= BigInt(data[srcOffset + i]) << BigInt(i * 8);
+      srcOffset += 6;
+      const alphas = [a0, a1];
+      if (a0 > a1) {
+        for (let i = 1; i <= 6; i += 1) alphas.push(Math.floor(((7 - i) * a0 + i * a1) / 7));
+      } else {
+        for (let i = 1; i <= 4; i += 1) alphas.push(Math.floor(((5 - i) * a0 + i * a1) / 5));
+        alphas.push(0, 255);
+      }
+      const c0 = data[srcOffset] | (data[srcOffset + 1] << 8);
+      const c1 = data[srcOffset + 2] | (data[srcOffset + 3] << 8);
+      srcOffset += 4;
+      const colors = [
+        rgb565ToRgba(c0),
+        rgb565ToRgba(c1),
+        interpolateColor(rgb565ToRgba(c0), rgb565ToRgba(c1), 1 / 3),
+        interpolateColor(rgb565ToRgba(c0), rgb565ToRgba(c1), 2 / 3),
+      ];
+      const colorBits = data[srcOffset] | (data[srcOffset + 1] << 8) | (data[srcOffset + 2] << 16) | (data[srcOffset + 3] << 24);
+      srcOffset += 4;
+      for (let py = 0; py < 4; py += 1) {
+        for (let px = 0; px < 4; px += 1) {
+          const x = bx * 4 + px;
+          const y = by * 4 + py;
+          if (x >= width || y >= height) continue;
+          const color = colors[(colorBits >> ((py * 4 + px) * 2)) & 0x3];
+          const alphaIndex = Number((alphaBits >> BigInt((py * 4 + px) * 3)) & 0x7n);
+          const dstOffset = (y * width + x) * 4;
+          output[dstOffset + 0] = color[0];
+          output[dstOffset + 1] = color[1];
+          output[dstOffset + 2] = color[2];
+          output[dstOffset + 3] = alphas[alphaIndex];
+        }
+      }
+    }
+  }
+  return output;
+}
+
+function decodePal8(data, palette, width, height) {
+  const output = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i += 1) {
+    const index = data[i];
+    output[i * 4 + 0] = palette[index * 4 + 0];
+    output[i * 4 + 1] = palette[index * 4 + 1];
+    output[i * 4 + 2] = palette[index * 4 + 2];
+    output[i * 4 + 3] = palette[index * 4 + 3];
+  }
+  return output;
+}
+
+function decodePal4(data, palette, width, height) {
+  const output = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i += 1) {
+    const byteIndex = Math.floor(i / 2);
+    const paletteIndex = i % 2 === 0 ? (data[byteIndex] & 0xF) : (data[byteIndex] >> 4);
+    output[i * 4 + 0] = palette[paletteIndex * 4 + 0];
+    output[i * 4 + 1] = palette[paletteIndex * 4 + 1];
+    output[i * 4 + 2] = palette[paletteIndex * 4 + 2];
+    output[i * 4 + 3] = palette[paletteIndex * 4 + 3];
+  }
+  return output;
+}
+
+function decodeUncompressed(data, width, height, d3dFormat, rasterFormat) {
+  const output = new Uint8Array(width * height * 4);
+  const formatType = rasterFormat & 0x0F00;
+  const hasExplicitX8Pixels = formatType === TextureFormat.FORMAT_888 && data.length === width * height * 4;
+  for (let i = 0; i < width * height; i += 1) {
+    let r;
+    let g;
+    let b;
+    let a;
+    if (d3dFormat === D3DFORMAT.D3DFMT_A8R8G8B8 || formatType === TextureFormat.FORMAT_8888) {
+      b = data[i * 4 + 0];
+      g = data[i * 4 + 1];
+      r = data[i * 4 + 2];
+      a = data[i * 4 + 3];
+    } else if (d3dFormat === D3DFORMAT.D3DFMT_X8R8G8B8 || hasExplicitX8Pixels) {
+      b = data[i * 4 + 0];
+      g = data[i * 4 + 1];
+      r = data[i * 4 + 2];
+      a = 255;
+    } else if (formatType === TextureFormat.FORMAT_888) {
+      b = data[i * 3 + 0];
+      g = data[i * 3 + 1];
+      r = data[i * 3 + 2];
+      a = 255;
+    } else if (d3dFormat === D3DFORMAT.D3DFMT_R5G6B5 || formatType === TextureFormat.FORMAT_565) {
+      const pixel = data[i * 2] | (data[i * 2 + 1] << 8);
+      r = ((pixel >> 11) & 0x1F) * 255 / 31;
+      g = ((pixel >> 5) & 0x3F) * 255 / 63;
+      b = (pixel & 0x1F) * 255 / 31;
+      a = 255;
+    } else if (d3dFormat === D3DFORMAT.D3DFMT_A1R5G5B5 || formatType === TextureFormat.FORMAT_1555) {
+      const pixel = data[i * 2] | (data[i * 2 + 1] << 8);
+      a = (pixel >> 15) ? 255 : 0;
+      r = ((pixel >> 10) & 0x1F) * 255 / 31;
+      g = ((pixel >> 5) & 0x1F) * 255 / 31;
+      b = (pixel & 0x1F) * 255 / 31;
+    } else if (d3dFormat === D3DFORMAT.D3DFMT_A4R4G4B4 || formatType === TextureFormat.FORMAT_4444) {
+      const pixel = data[i * 2] | (data[i * 2 + 1] << 8);
+      a = ((pixel >> 12) & 0xF) * 17;
+      r = ((pixel >> 8) & 0xF) * 17;
+      g = ((pixel >> 4) & 0xF) * 17;
+      b = (pixel & 0xF) * 17;
+    } else {
+      b = data[i * 4 + 0] || 0;
+      g = data[i * 4 + 1] || 0;
+      r = data[i * 4 + 2] || 0;
+      a = data[i * 4 + 3] || 255;
+    }
+    output[i * 4 + 0] = r;
+    output[i * 4 + 1] = g;
+    output[i * 4 + 2] = b;
+    output[i * 4 + 3] = a;
+  }
+  return output;
+}
+
+export function decodeTextureEntryMipLevel(entry, level = 0) {
+  const mipLevel = Array.isArray(entry?.mipmaps) ? entry.mipmaps[level] : null;
+  if (!mipLevel?.data || !Number.isFinite(mipLevel.width) || !Number.isFinite(mipLevel.height)) return null;
+
+  const compressionName = getCompressionName(entry?.compression ?? 0, entry?.d3dFormat ?? 0);
+  if (compressionName === 'DXT1') return decodeDXT1(mipLevel.data, mipLevel.width, mipLevel.height);
+  if (compressionName === 'DXT3') return decodeDXT3(mipLevel.data, mipLevel.width, mipLevel.height);
+  if (compressionName === 'DXT5') return decodeDXT5(mipLevel.data, mipLevel.width, mipLevel.height);
+
+  const rasterFormat = Number(entry?.rasterFormat) || 0;
+  const isPal8 = (rasterFormat & TextureFormat.FORMAT_EXT_PAL8) !== 0;
+  const isPal4 = (rasterFormat & TextureFormat.FORMAT_EXT_PAL4) !== 0;
+  if (isPal8) return decodePal8(mipLevel.data, entry?.palette || null, mipLevel.width, mipLevel.height);
+  if (isPal4) return decodePal4(mipLevel.data, entry?.palette || null, mipLevel.width, mipLevel.height);
+  return decodeUncompressed(
+    mipLevel.data,
+    mipLevel.width,
+    mipLevel.height,
+    Number(entry?.d3dFormat) || 0,
+    rasterFormat,
+  );
+}
+
+export function decodeTextureEntryMipmaps(entry) {
+  if (!Array.isArray(entry?.mipmaps) || entry.mipmaps.length === 0) return [];
+  return entry.mipmaps
+    .map((mipLevel, levelIndex) => {
+      const rgba = decodeTextureEntryMipLevel(entry, levelIndex);
+      if (!rgba) return null;
+      return {
+        width: mipLevel.width,
+        height: mipLevel.height,
+        data: rgba,
+      };
+    })
+    .filter(Boolean);
 }
 
 export class TxdParser {
@@ -178,33 +455,33 @@ export class TxdParser {
       }
     }
 
-    const dataSize = this.readUInt32();
-    const rawData = new Uint8Array(this.arraybuffer, this.byteOffset + this.position, dataSize);
-    this.position += dataSize;
     const compressionName = getCompressionName(compression, d3dFormat);
-
-    let rgba;
-    if (compressionName === 'DXT1') rgba = this.decodeDXT1(rawData, width, height);
-    else if (compressionName === 'DXT3') rgba = this.decodeDXT3(rawData, width, height);
-    else if (compressionName === 'DXT5') rgba = this.decodeDXT5(rawData, width, height);
-    else if (isPal8) rgba = this.decodePal8(rawData, palette, width, height);
-    else if (isPal4) rgba = this.decodePal4(rawData, palette, width, height);
-    else rgba = this.decodeUncompressed(rawData, width, height, d3dFormat, rasterFormat);
-
-    for (let level = 1; level < numLevels; level += 1) {
+    const effectiveNumLevels = Math.max(1, Number(numLevels) || 0);
+    const mipmaps = [];
+    for (let level = 0; level < effectiveNumLevels; level += 1) {
       const mipSize = this.readUInt32();
+      const levelWidth = getMipDimension(width, level);
+      const levelHeight = getMipDimension(height, level);
+      const rawData = new Uint8Array(this.arraybuffer, this.byteOffset + this.position, mipSize);
+      mipmaps.push({
+        width: levelWidth,
+        height: levelHeight,
+        data: rawData,
+      });
       this.position += mipSize;
     }
 
     const extHeader = this.readHeader();
     this.position += extHeader.length;
 
-    return {
+    const isCompressed = isDxtCompressionName(compressionName);
+    const entry = {
       name,
       alphaName,
       width,
       height,
       depth,
+      numLevels: effectiveNumLevels,
       rasterType,
       platformId,
       textureFormatFlags,
@@ -212,12 +489,20 @@ export class TxdParser {
       legacyHasAlphaValue,
       compression,
       compressionName,
+      isCompressed,
       d3dFormat,
       platformProperties,
       platformPropertyValue,
       rasterFormat,
-      rgba,
+      palette,
+      mipmaps,
+      rgba: null,
     };
+    if (!isCompressed) {
+      entry.rgba = decodeTextureEntryMipLevel(entry, 0);
+    }
+
+    return entry;
   }
 
   parsePlatformProperties(platformId, propertyValue) {
@@ -274,232 +559,35 @@ export class TxdParser {
   }
 
   decodeDXT1(data, width, height) {
-    const output = new Uint8Array(width * height * 4);
-    const blocksX = Math.ceil(width / 4);
-    const blocksY = Math.ceil(height / 4);
-    let srcOffset = 0;
-    for (let by = 0; by < blocksY; by += 1) {
-      for (let bx = 0; bx < blocksX; bx += 1) {
-        const c0 = data[srcOffset] | (data[srcOffset + 1] << 8);
-        const c1 = data[srcOffset + 2] | (data[srcOffset + 3] << 8);
-        srcOffset += 4;
-        const colors = [this.rgb565ToRgba(c0), this.rgb565ToRgba(c1)];
-        if (c0 > c1) {
-          colors[2] = this.interpolateColor(colors[0], colors[1], 1 / 3);
-          colors[3] = this.interpolateColor(colors[0], colors[1], 2 / 3);
-        } else {
-          colors[2] = this.interpolateColor(colors[0], colors[1], 0.5);
-          colors[3] = [0, 0, 0, 0];
-        }
-        const indices = data[srcOffset] | (data[srcOffset + 1] << 8) | (data[srcOffset + 2] << 16) | (data[srcOffset + 3] << 24);
-        srcOffset += 4;
-        for (let py = 0; py < 4; py += 1) {
-          for (let px = 0; px < 4; px += 1) {
-            const x = bx * 4 + px;
-            const y = by * 4 + py;
-            if (x >= width || y >= height) continue;
-            const idx = (indices >> ((py * 4 + px) * 2)) & 0x3;
-            const color = colors[idx];
-            const dstOffset = (y * width + x) * 4;
-            output[dstOffset + 0] = color[0];
-            output[dstOffset + 1] = color[1];
-            output[dstOffset + 2] = color[2];
-            output[dstOffset + 3] = color[3];
-          }
-        }
-      }
-    }
-    return output;
+    return decodeDXT1(data, width, height);
   }
 
   decodeDXT3(data, width, height) {
-    const output = new Uint8Array(width * height * 4);
-    const blocksX = Math.ceil(width / 4);
-    const blocksY = Math.ceil(height / 4);
-    let srcOffset = 0;
-    for (let by = 0; by < blocksY; by += 1) {
-      for (let bx = 0; bx < blocksX; bx += 1) {
-        const alphaData = [];
-        for (let i = 0; i < 8; i += 1) alphaData.push(data[srcOffset + i]);
-        srcOffset += 8;
-        const c0 = data[srcOffset] | (data[srcOffset + 1] << 8);
-        const c1 = data[srcOffset + 2] | (data[srcOffset + 3] << 8);
-        srcOffset += 4;
-        const colors = [
-          this.rgb565ToRgba(c0),
-          this.rgb565ToRgba(c1),
-          this.interpolateColor(this.rgb565ToRgba(c0), this.rgb565ToRgba(c1), 1 / 3),
-          this.interpolateColor(this.rgb565ToRgba(c0), this.rgb565ToRgba(c1), 2 / 3),
-        ];
-        const indices = data[srcOffset] | (data[srcOffset + 1] << 8) | (data[srcOffset + 2] << 16) | (data[srcOffset + 3] << 24);
-        srcOffset += 4;
-        for (let py = 0; py < 4; py += 1) {
-          for (let px = 0; px < 4; px += 1) {
-            const x = bx * 4 + px;
-            const y = by * 4 + py;
-            if (x >= width || y >= height) continue;
-            const idx = (indices >> ((py * 4 + px) * 2)) & 0x3;
-            const color = colors[idx];
-            const alphaIdx = py * 4 + px;
-            const alphaByte = alphaData[Math.floor(alphaIdx / 2)];
-            const alpha = ((alphaIdx % 2 === 0) ? (alphaByte & 0xF) : (alphaByte >> 4)) * 17;
-            const dstOffset = (y * width + x) * 4;
-            output[dstOffset + 0] = color[0];
-            output[dstOffset + 1] = color[1];
-            output[dstOffset + 2] = color[2];
-            output[dstOffset + 3] = alpha;
-          }
-        }
-      }
-    }
-    return output;
+    return decodeDXT3(data, width, height);
   }
 
   decodeDXT5(data, width, height) {
-    const output = new Uint8Array(width * height * 4);
-    const blocksX = Math.ceil(width / 4);
-    const blocksY = Math.ceil(height / 4);
-    let srcOffset = 0;
-    for (let by = 0; by < blocksY; by += 1) {
-      for (let bx = 0; bx < blocksX; bx += 1) {
-        const a0 = data[srcOffset];
-        const a1 = data[srcOffset + 1];
-        srcOffset += 2;
-        let alphaBits = 0n;
-        for (let i = 0; i < 6; i += 1) alphaBits |= BigInt(data[srcOffset + i]) << BigInt(i * 8);
-        srcOffset += 6;
-        const alphas = [a0, a1];
-        if (a0 > a1) {
-          for (let i = 1; i <= 6; i += 1) alphas.push(Math.floor(((7 - i) * a0 + i * a1) / 7));
-        } else {
-          for (let i = 1; i <= 4; i += 1) alphas.push(Math.floor(((5 - i) * a0 + i * a1) / 5));
-          alphas.push(0, 255);
-        }
-        const c0 = data[srcOffset] | (data[srcOffset + 1] << 8);
-        const c1 = data[srcOffset + 2] | (data[srcOffset + 3] << 8);
-        srcOffset += 4;
-        const colors = [
-          this.rgb565ToRgba(c0),
-          this.rgb565ToRgba(c1),
-          this.interpolateColor(this.rgb565ToRgba(c0), this.rgb565ToRgba(c1), 1 / 3),
-          this.interpolateColor(this.rgb565ToRgba(c0), this.rgb565ToRgba(c1), 2 / 3),
-        ];
-        const colorBits = data[srcOffset] | (data[srcOffset + 1] << 8) | (data[srcOffset + 2] << 16) | (data[srcOffset + 3] << 24);
-        srcOffset += 4;
-        for (let py = 0; py < 4; py += 1) {
-          for (let px = 0; px < 4; px += 1) {
-            const x = bx * 4 + px;
-            const y = by * 4 + py;
-            if (x >= width || y >= height) continue;
-            const color = colors[(colorBits >> ((py * 4 + px) * 2)) & 0x3];
-            const alphaIndex = Number((alphaBits >> BigInt((py * 4 + px) * 3)) & 0x7n);
-            const dstOffset = (y * width + x) * 4;
-            output[dstOffset + 0] = color[0];
-            output[dstOffset + 1] = color[1];
-            output[dstOffset + 2] = color[2];
-            output[dstOffset + 3] = alphas[alphaIndex];
-          }
-        }
-      }
-    }
-    return output;
+    return decodeDXT5(data, width, height);
   }
 
   decodePal8(data, palette, width, height) {
-    const output = new Uint8Array(width * height * 4);
-    for (let i = 0; i < width * height; i += 1) {
-      const index = data[i];
-      output[i * 4 + 0] = palette[index * 4 + 0];
-      output[i * 4 + 1] = palette[index * 4 + 1];
-      output[i * 4 + 2] = palette[index * 4 + 2];
-      output[i * 4 + 3] = palette[index * 4 + 3];
-    }
-    return output;
+    return decodePal8(data, palette, width, height);
   }
 
   decodePal4(data, palette, width, height) {
-    const output = new Uint8Array(width * height * 4);
-    for (let i = 0; i < width * height; i += 1) {
-      const byteIndex = Math.floor(i / 2);
-      const paletteIndex = i % 2 === 0 ? (data[byteIndex] & 0xF) : (data[byteIndex] >> 4);
-      output[i * 4 + 0] = palette[paletteIndex * 4 + 0];
-      output[i * 4 + 1] = palette[paletteIndex * 4 + 1];
-      output[i * 4 + 2] = palette[paletteIndex * 4 + 2];
-      output[i * 4 + 3] = palette[paletteIndex * 4 + 3];
-    }
-    return output;
+    return decodePal4(data, palette, width, height);
   }
 
   decodeUncompressed(data, width, height, d3dFormat, rasterFormat) {
-    const output = new Uint8Array(width * height * 4);
-    const formatType = rasterFormat & 0x0F00;
-    const hasExplicitX8Pixels = formatType === TextureFormat.FORMAT_888 && data.length === width * height * 4;
-    for (let i = 0; i < width * height; i += 1) {
-      let r;
-      let g;
-      let b;
-      let a;
-      if (d3dFormat === D3DFORMAT.D3DFMT_A8R8G8B8 || formatType === TextureFormat.FORMAT_8888) {
-        b = data[i * 4 + 0];
-        g = data[i * 4 + 1];
-        r = data[i * 4 + 2];
-        a = data[i * 4 + 3];
-      } else if (d3dFormat === D3DFORMAT.D3DFMT_X8R8G8B8 || hasExplicitX8Pixels) {
-        b = data[i * 4 + 0];
-        g = data[i * 4 + 1];
-        r = data[i * 4 + 2];
-        a = 255;
-      } else if (formatType === TextureFormat.FORMAT_888) {
-        b = data[i * 3 + 0];
-        g = data[i * 3 + 1];
-        r = data[i * 3 + 2];
-        a = 255;
-      } else if (d3dFormat === D3DFORMAT.D3DFMT_R5G6B5 || formatType === TextureFormat.FORMAT_565) {
-        const pixel = data[i * 2] | (data[i * 2 + 1] << 8);
-        r = ((pixel >> 11) & 0x1F) * 255 / 31;
-        g = ((pixel >> 5) & 0x3F) * 255 / 63;
-        b = (pixel & 0x1F) * 255 / 31;
-        a = 255;
-      } else if (d3dFormat === D3DFORMAT.D3DFMT_A1R5G5B5 || formatType === TextureFormat.FORMAT_1555) {
-        const pixel = data[i * 2] | (data[i * 2 + 1] << 8);
-        a = (pixel >> 15) ? 255 : 0;
-        r = ((pixel >> 10) & 0x1F) * 255 / 31;
-        g = ((pixel >> 5) & 0x1F) * 255 / 31;
-        b = (pixel & 0x1F) * 255 / 31;
-      } else if (d3dFormat === D3DFORMAT.D3DFMT_A4R4G4B4 || formatType === TextureFormat.FORMAT_4444) {
-        const pixel = data[i * 2] | (data[i * 2 + 1] << 8);
-        a = ((pixel >> 12) & 0xF) * 17;
-        r = ((pixel >> 8) & 0xF) * 17;
-        g = ((pixel >> 4) & 0xF) * 17;
-        b = (pixel & 0xF) * 17;
-      } else {
-        b = data[i * 4 + 0] || 0;
-        g = data[i * 4 + 1] || 0;
-        r = data[i * 4 + 2] || 0;
-        a = data[i * 4 + 3] || 255;
-      }
-      output[i * 4 + 0] = r;
-      output[i * 4 + 1] = g;
-      output[i * 4 + 2] = b;
-      output[i * 4 + 3] = a;
-    }
-    return output;
+    return decodeUncompressed(data, width, height, d3dFormat, rasterFormat);
   }
 
   rgb565ToRgba(color) {
-    const r = ((color >> 11) & 0x1F) * 255 / 31;
-    const g = ((color >> 5) & 0x3F) * 255 / 63;
-    const b = (color & 0x1F) * 255 / 31;
-    return [Math.round(r), Math.round(g), Math.round(b), 255];
+    return rgb565ToRgba(color);
   }
 
   interpolateColor(c0, c1, factor) {
-    return [
-      Math.round(c0[0] + (c1[0] - c0[0]) * factor),
-      Math.round(c0[1] + (c1[1] - c0[1]) * factor),
-      Math.round(c0[2] + (c1[2] - c0[2]) * factor),
-      255,
-    ];
+    return interpolateColor(c0, c1, factor);
   }
 
   readUInt32() {

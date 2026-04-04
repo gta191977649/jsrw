@@ -6,6 +6,7 @@ export class Streaming {
     this.gameVersion = String(options.gameVersion || 'VCS').toUpperCase();
     this.onLog = typeof options.onLog === 'function' ? options.onLog : null;
     this.onFileEvent = typeof options.onFileEvent === 'function' ? options.onFileEvent : null;
+    this.textureLoadingOptions = options.textureLoadingOptions || {};
   }
 
   async loadWorld(fileIndex, options = {}) {
@@ -14,6 +15,7 @@ export class Streaming {
       gameVersion: options.gameVersion || this.gameVersion,
       onLog: options.onLog || this.onLog,
       onFileEvent: options.onFileEvent || this.onFileEvent,
+      textureLoadingOptions: options.textureLoadingOptions || this.textureLoadingOptions,
     });
     return worldLoader.load(options);
   }

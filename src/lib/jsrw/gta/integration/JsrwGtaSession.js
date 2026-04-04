@@ -144,6 +144,7 @@ function createRenderMetrics() {
   return {
     activeChunks: 0,
     activeInterior: 0,
+    forceRenderAllInteriors: false,
     interiorChunkCount: 0,
     frustumChunks: 0,
     activeItems: 0,
@@ -307,6 +308,12 @@ export class JsrwGtaSession {
     this.streamingRuntime = new WorldStreamingRuntime({ rendererSession: this.rendererSession });
     this.frameComposer = new FrameComposer({ rendererSession: this.rendererSession });
     this.worldContext = null;
+    this.textureLoadingOptions = {
+      preferCompressedTextures: false,
+      supportsCompressedTextures: false,
+      allowCompressedFallbackDecode: true,
+      ...(options.textureLoadingOptions || {}),
+    };
   }
 
   getRendererSession() {
@@ -315,6 +322,14 @@ export class JsrwGtaSession {
 
   getWorldContext() {
     return this.worldContext;
+  }
+
+  setTextureLoadingOptions(options = {}) {
+    this.textureLoadingOptions = {
+      ...this.textureLoadingOptions,
+      ...(options || {}),
+    };
+    return this.textureLoadingOptions;
   }
 
   ensureRenderQueue(root) {
@@ -456,11 +471,13 @@ export class JsrwGtaSession {
       lodUpdateStateRef.current.lastCameraNear = Number.NaN;
       lodUpdateStateRef.current.lastCameraFar = Number.NaN;
       lodUpdateStateRef.current.lastInteriorId = Number.NaN;
+      lodUpdateStateRef.current.lastForceRenderAllInteriors = false;
       lodUpdateStateRef.current.chunkScanCache = null;
     }
     if (uiStateRef?.current) {
       uiStateRef.current.currentInterior = 0;
       uiStateRef.current.availableInteriors = [0];
+      uiStateRef.current.forceRenderAllInteriors = false;
     }
     setShowGameIcon?.(false);
     if (renderResourcesReadyRef) renderResourcesReadyRef.current = false;
@@ -557,9 +574,11 @@ export class JsrwGtaSession {
             pushLoadedFile?.(kind, path, detail);
             pushLoadedFileConsoleEvent?.(kind, path, detail);
           },
+          textureLoadingOptions: this.textureLoadingOptions,
         });
         worldLoadResult = await streaming.loadWorld(fileIndex, {
           extraImgPaths: ['models/gta3.img'],
+          textureLoadingOptions: this.textureLoadingOptions,
         });
       } catch (error) {
         setStatus?.('gta.dat not found in uploaded files.');
@@ -742,14 +761,32 @@ export class JsrwGtaSession {
           const txd = resolvedModel.textureDictionary || null;
           const template = resolvedModel.template;
           const usedTextureEntries = new Map();
+          const assignTextureMetadata = (entry, textureInfo, textureObject = null) => {
+            if (!entry) return;
+            const info = textureInfo?.texture ? textureInfo : null;
+            const texture = textureObject || info?.texture || textureInfo || null;
+            const compressionMethod = info?.compressionMethod
+              || texture?.userData?.rwCompressionMethod
+              || null;
+            const pixelFormat = info?.pixelFormat
+              || texture?.userData?.rwPixelFormat
+              || null;
+            if (compressionMethod) entry.compressionMethod = compressionMethod;
+            if (pixelFormat) entry.pixelFormat = pixelFormat;
+          };
           const registerTexture = (textureName, texture) => {
             const name = String(textureName || '').trim().toLowerCase();
             if (!name) return;
             const existing = usedTextureEntries.get(name);
             if (!existing) {
-              usedTextureEntries.set(name, { name, texture: texture || null });
+              const nextEntry = { name, texture: texture || null };
+              assignTextureMetadata(nextEntry, null, texture);
+              usedTextureEntries.set(name, nextEntry);
             } else if (!existing.texture && texture) {
               existing.texture = texture;
+              assignTextureMetadata(existing, null, texture);
+            } else {
+              assignTextureMetadata(existing, null, texture);
             }
           };
           template.traverse((node) => {
@@ -784,10 +821,14 @@ export class JsrwGtaSession {
           const dffLights = Array.isArray(template.userData?.rwDffLights) ? template.userData.rwDffLights : [];
           if (txd && typeof txd.keys === 'function') {
             for (const entry of usedTextureEntries.values()) {
-              if (entry.texture) continue;
               const txdTexture = txd.get(entry.name);
               if (txdTexture) {
-                entry.texture = txdTexture.texture || txdTexture;
+                if (!entry.texture) {
+                  entry.texture = txdTexture.texture || txdTexture;
+                }
+                assignTextureMetadata(entry, txdTexture, txdTexture.texture || txdTexture);
+              } else if (entry.texture) {
+                assignTextureMetadata(entry, null, entry.texture);
               }
             }
           }

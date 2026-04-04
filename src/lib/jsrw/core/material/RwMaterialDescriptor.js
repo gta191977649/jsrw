@@ -7,7 +7,7 @@ function clonePlainColor(color, fallback = { r: 1, g: 1, b: 1 }) {
   };
 }
 
-export const RW_ALPHA_REF_DEFAULT = 2 / 255;
+export const RW_ALPHA_REF_DEFAULT = 3 / 255;
 
 export function cloneRwColor(color, fallback) {
   return clonePlainColor(color, fallback);

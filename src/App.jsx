@@ -49,6 +49,7 @@ import {
   normalizeTraversalRoots,
   WORLD_CHUNK_SIZE,
 } from './lib/jsrw/utils/worldUtils.js';
+import { decodeCompressedTexturePreview } from './lib/jsrw/adapters/three/ThreeTextureFactory.js';
 import { WINDOW_DEFS } from './ui/windows';
 import {
   applyObjectSelectionHighlight,
@@ -885,6 +886,7 @@ function App() {
     lastShowTobjs: false,
     lastEnableOcclusion: false,
     lastInteriorId: 0,
+    lastForceRenderAllInteriors: false,
     lastCameraAspect: Number.NaN,
     lastCameraFov: Number.NaN,
     lastCameraNear: Number.NaN,
@@ -935,6 +937,7 @@ function App() {
     },
     currentInterior: 0,
     availableInteriors: [0],
+    forceRenderAllInteriors: false,
     backendSelection: 'WebGL',
     windows: Object.fromEntries(WINDOW_DEFS.map((item) => [item.key, item.defaultVisible])),
   });
@@ -1317,6 +1320,7 @@ function App() {
       }
       renderer = nextRenderer;
       rendererRef.current = nextRenderer;
+      gtaSessionRef.current.setTextureLoadingOptions(rendererHost.getTextureLoadingOptions());
       if (activeBackend === 'WebGPU' && rendererHost.backend === 'WebGPU') {
         pushConsoleLine('info', 'WebGPU backend initialized');
       }
@@ -1956,7 +1960,31 @@ function App() {
         const height = image?.videoHeight ?? image?.height ?? 0;
         if (!width || !height) throw new Error('invalid texture size');
 
-        if (image?.data && ArrayBuffer.isView(image.data)) {
+        if (textureSource?.isCompressedTexture) {
+          const pixelCount = width * height * 4;
+          const cachedPreview = textureSource.userData?.rwDecodedPreviewPixels;
+          const previewPixels = cachedPreview instanceof Uint8Array && cachedPreview.length === pixelCount
+            ? cachedPreview
+            : decodeCompressedTexturePreview(textureSource);
+          if (!(previewPixels instanceof Uint8Array) || previewPixels.length !== pixelCount) {
+            throw new Error('compressed texture preview unavailable');
+          }
+          textureSource.userData = {
+            ...(textureSource.userData || {}),
+            rwDecodedPreviewPixels: previewPixels,
+          };
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            width,
+            height,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            previewPixels,
+          );
+        } else if (image?.data && ArrayBuffer.isView(image.data)) {
           const format = textureSource?.format === THREE.RGBFormat ? gl.RGB : gl.RGBA;
           gl.texImage2D(
             gl.TEXTURE_2D,
@@ -2774,16 +2802,27 @@ function App() {
             ? [...uiStateRef.current.availableInteriors].sort((left, right) => left - right)
             : [0];
           const currentInterior = normalizeInteriorId(uiStateRef.current.currentInterior);
+          let forceRenderAllInteriors = uiStateRef.current.forceRenderAllInteriors === true;
           const hasCurrentInterior = availableInteriors.includes(currentInterior);
 
-          ImGui.Text(`Active interior: ${currentInterior}`);
+          ImGui.Text(`Active interior: ${forceRenderAllInteriors ? '0 (forced all)' : currentInterior}`);
           ImGui.Text(`Interior range: 0-${availableInteriors[availableInteriors.length - 1] ?? 0}`);
+          if (ImGui.Checkbox(
+            'Force Render All Interiors',
+            (value = forceRenderAllInteriors) => {
+              forceRenderAllInteriors = value;
+              return value;
+            },
+          )) {
+            uiStateRef.current.forceRenderAllInteriors = forceRenderAllInteriors;
+          }
           if (ImGui.Button('World (0)')) {
             uiStateRef.current.currentInterior = 0;
           }
           ImGui.SameLine();
           ImGui.TextDisabled('IPL inst[2]');
 
+          if (forceRenderAllInteriors) ImGui.BeginDisabled();
           if (ImGui.BeginCombo('Current Interior', hasCurrentInterior ? String(currentInterior) : `${currentInterior} (custom)`)) {
             for (const interiorId of availableInteriors) {
               const selected = interiorId === currentInterior;
@@ -2794,12 +2833,13 @@ function App() {
             }
             ImGui.EndCombo();
           }
+          if (forceRenderAllInteriors) ImGui.EndDisabled();
 
-          if (!hasCurrentInterior) {
+          if (!forceRenderAllInteriors && !hasCurrentInterior) {
             ImGui.TextWrapped('Current interior is not present in the loaded IPL set. Pick one of the loaded ids or switch back to world interior 0.');
           }
           ImGui.Separator();
-          ImGui.TextWrapped('World buildings are filtered and streamed by IPL interior id. Switching this value updates the active interior in real time.');
+          ImGui.TextWrapped('World buildings are filtered and streamed by IPL interior id. Force Render All Interiors bypasses that filter and draws every interior together as world 0.');
           ImGui.End();
         }
 

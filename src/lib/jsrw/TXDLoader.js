@@ -3,11 +3,16 @@ import { TxdParser } from './formats/txd/TxdParser.js';
 import { ThreeTextureFactory } from './adapters/three/ThreeTextureFactory.js';
 
 class TXDLoader extends THREE.Loader {
-  constructor(manager) {
+  constructor(manager, options = {}) {
     super(manager);
     this.textures = new Map();
     this.parser = new TxdParser();
-    this.factory = new ThreeTextureFactory();
+    this.factory = new ThreeTextureFactory(options);
+  }
+
+  setTextureOptions(options = {}) {
+    this.factory.setOptions(options);
+    return this;
   }
 
   load(url, onLoad, onProgress, onError) {

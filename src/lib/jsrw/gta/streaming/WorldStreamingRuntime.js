@@ -58,6 +58,10 @@ function getActiveInteriorId(uiStateRef) {
   return normalizeInteriorId(uiStateRef?.current?.currentInterior);
 }
 
+function shouldForceRenderAllInteriors(uiStateRef) {
+  return uiStateRef?.current?.forceRenderAllInteriors === true;
+}
+
 function getChunkLookupState(renderChunkLookupRef) {
   const lookup = renderChunkLookupRef?.current;
   if (lookup instanceof Map) {
@@ -75,15 +79,17 @@ function getChunkLookupState(renderChunkLookupRef) {
   };
 }
 
-function getChunkLookupForInterior(renderChunkLookupRef, interiorId) {
+function getChunkLookupForInterior(renderChunkLookupRef, interiorId, forceAll = false) {
   const lookup = getChunkLookupState(renderChunkLookupRef);
+  if (forceAll) return lookup.all;
   return lookup.byInterior.get(normalizeInteriorId(interiorId)) || new Map();
 }
 
-function getBigBuildingItemsForInterior(bigBuildingItemsRef, interiorId) {
+function getBigBuildingItemsForInterior(bigBuildingItemsRef, interiorId, forceAll = false) {
   const source = bigBuildingItemsRef?.current;
   if (Array.isArray(source)) return source;
   if (Array.isArray(source?.all) && source?.byInterior instanceof Map) {
+    if (forceAll) return source.all;
     return source.byInterior.get(normalizeInteriorId(interiorId)) || [];
   }
   return [];
@@ -592,8 +598,8 @@ export class WorldStreamingRuntime {
     if (queueDirty) rwRenderQueueRef.current?.markDirty?.();
   }
 
-  collectGroundScanChunks(camera, renderDistance, priorityDistance, renderChunkLookupRef, activeInterior) {
-    const chunkLookup = getChunkLookupForInterior(renderChunkLookupRef, activeInterior);
+  collectGroundScanChunks(camera, renderDistance, priorityDistance, renderChunkLookupRef, activeInterior, forceAllInteriors = false) {
+    const chunkLookup = getChunkLookupForInterior(renderChunkLookupRef, activeInterior, forceAllInteriors);
     if (!(chunkLookup instanceof Map) || chunkLookup.size === 0 || !camera) return [];
 
     const resolvedRenderDistance = Math.max(WORLD_CHUNK_SIZE, renderDistance || WORLD_CHUNK_SIZE);
@@ -630,9 +636,9 @@ export class WorldStreamingRuntime {
     return candidates.map((entry) => entry.chunk);
   }
 
-  getCachedGroundScanChunks(camera, renderDistance, priorityDistance, renderChunkLookupRef, lodState, activeInterior) {
+  getCachedGroundScanChunks(camera, renderDistance, priorityDistance, renderChunkLookupRef, lodState, activeInterior, forceAllInteriors = false) {
     const cameraChunk = getCameraChunkCoords(camera);
-    const chunkLookup = getChunkLookupForInterior(renderChunkLookupRef, activeInterior);
+    const chunkLookup = getChunkLookupForInterior(renderChunkLookupRef, activeInterior, forceAllInteriors);
     const lookupSize = chunkLookup instanceof Map ? chunkLookup.size : 0;
     if (!cameraChunk || lookupSize === 0) return [];
 
@@ -644,19 +650,28 @@ export class WorldStreamingRuntime {
       && cache.renderDistance === renderDistance
       && cache.priorityDistance === priorityDistance
       && cache.activeInterior === activeInterior
+      && cache.forceAllInteriors === forceAllInteriors
       && cache.lookupSize === lookupSize
       && Array.isArray(cache.chunks)
     ) {
       return cache.chunks;
     }
 
-    const chunks = this.collectGroundScanChunks(camera, renderDistance, priorityDistance, renderChunkLookupRef, activeInterior);
+    const chunks = this.collectGroundScanChunks(
+      camera,
+      renderDistance,
+      priorityDistance,
+      renderChunkLookupRef,
+      activeInterior,
+      forceAllInteriors,
+    );
     lodState.chunkScanCache = {
       cameraChunkX: cameraChunk.x,
       cameraChunkZ: cameraChunk.z,
       renderDistance,
       priorityDistance,
       activeInterior,
+      forceAllInteriors,
       lookupSize,
       chunks,
     };
@@ -760,6 +775,8 @@ export class WorldStreamingRuntime {
     const showTobjs = uiStateRef.current.showTobjs;
     const enableOcclusion = uiStateRef.current.enableOcclusion === true;
     const activeInterior = getActiveInteriorId(uiStateRef);
+    const forceAllInteriors = shouldForceRenderAllInteriors(uiStateRef);
+    const activeInteriorKey = forceAllInteriors ? -1 : activeInterior;
 
     const configChanged = (
       lodState.lastDrawDistance !== drawDistance
@@ -768,7 +785,8 @@ export class WorldStreamingRuntime {
       || lodState.lastForceLodOnly !== forceLodOnly
       || lodState.lastShowTobjs !== showTobjs
       || lodState.lastEnableOcclusion !== enableOcclusion
-      || lodState.lastInteriorId !== activeInterior
+      || lodState.lastInteriorId !== activeInteriorKey
+      || lodState.lastForceRenderAllInteriors !== forceAllInteriors
     );
     if (configChanged) {
       lodState.lastDrawDistance = drawDistance;
@@ -777,7 +795,8 @@ export class WorldStreamingRuntime {
       lodState.lastForceLodOnly = forceLodOnly;
       lodState.lastShowTobjs = showTobjs;
       lodState.lastEnableOcclusion = enableOcclusion;
-      lodState.lastInteriorId = activeInterior;
+      lodState.lastInteriorId = activeInteriorKey;
+      lodState.lastForceRenderAllInteriors = forceAllInteriors;
       lodState.needsRefresh = true;
     }
 
@@ -836,11 +855,19 @@ export class WorldStreamingRuntime {
     const previousActiveChunks = activeRenderChunksRef.current;
     const chunkScanStartMs = beginCpuProfile(profileEnabled);
     const candidateChunks = fullRefresh
-      ? this.getCachedGroundScanChunks(camera, chunkScanDistance, drawDistance, renderChunkLookupRef, lodState, activeInterior)
+      ? this.getCachedGroundScanChunks(
+        camera,
+        chunkScanDistance,
+        drawDistance,
+        renderChunkLookupRef,
+        lodState,
+        activeInterior,
+        forceAllInteriors,
+      )
       : Array.from(previousActiveChunks);
     const chunkScanMs = endCpuProfile(profileEnabled, chunkScanStartMs);
     const occlusionState = resetChunkOcclusionState(chunkOcclusionStateRef.current);
-    const bigBuildingItems = getBigBuildingItemsForInterior(bigBuildingItemsRef, activeInterior);
+    const bigBuildingItems = getBigBuildingItemsForInterior(bigBuildingItemsRef, activeInterior, forceAllInteriors);
     const nextActiveChunks = new Set();
     const protectedItems = new Set();
     const processedItems = new Set();
@@ -996,7 +1023,7 @@ export class WorldStreamingRuntime {
       const setupEntityStartMs = beginCpuProfile(profileEnabled);
       if (!ent || processedItems.has(ent)) return VIS_INVISIBLE;
       processedItems.add(ent);
-      if (normalizeInteriorId(ent.interior) !== activeInterior) {
+      if (!forceAllInteriors && normalizeInteriorId(ent.interior) !== activeInterior) {
         this.hideRenderItemCompletely(ent, dirtyBatches, context);
         visibilityCpuMs += endCpuProfile(profileEnabled, setupEntityStartMs);
         return VIS_INVISIBLE;
@@ -1252,8 +1279,9 @@ export class WorldStreamingRuntime {
 
     const metrics = renderMetricsRef.current;
     metrics.activeChunks = activeChunks;
-    metrics.activeInterior = activeInterior;
-    metrics.interiorChunkCount = getChunkLookupForInterior(renderChunkLookupRef, activeInterior).size;
+    metrics.activeInterior = forceAllInteriors ? 0 : activeInterior;
+    metrics.forceRenderAllInteriors = forceAllInteriors;
+    metrics.interiorChunkCount = getChunkLookupForInterior(renderChunkLookupRef, activeInterior, forceAllInteriors).size;
     metrics.frustumChunks = frustumChunks;
     metrics.activeItems = activeItems;
     metrics.visibleNear = visibleNear;

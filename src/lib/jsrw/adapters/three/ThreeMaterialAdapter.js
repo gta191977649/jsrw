@@ -38,35 +38,38 @@ function mapPixelFormat(rasterFormat, d3dFormat) {
   return `0x${fmt.toString(16).toUpperCase()}`;
 }
 
-function inferAlphaModeFromPixels(texture) {
-  const data = texture?.image?.data;
-  const width = Number(texture?.image?.width) || 0;
-  const height = Number(texture?.image?.height) || 0;
-  if (!data || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
-  if ((data.length % 4) !== 0) return null;
-
-  const pixelCount = data.length / 4;
-  const sampleStep = Math.max(1, Math.floor(pixelCount / 4096));
-  let midAlphaCount = 0;
-  let sampleCount = 0;
-  for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += sampleStep) {
-    const alpha = data[(pixelIndex * 4) + 3];
-    sampleCount += 1;
-    if (alpha > 16 && alpha < 239) midAlphaCount += 1;
+function inferAlphaModeFromTexture(texture) {
+  if (!texture?.isTexture) return null;
+  const mapped = String(
+    texture.userData?.rwTextureAlphaMode
+    || texture.userData?.rwAlphaMode
+    || '',
+  ).trim().toLowerCase();
+  if (mapped === 'cutout' || mapped === 'blend' || mapped === 'additive' || mapped === 'opaque') {
+    return mapped;
   }
-  if (sampleCount === 0) return null;
-  return (midAlphaCount / sampleCount) <= 0.02 ? 'cutout' : 'blend';
+
+  const hasAlpha = texture.hasAlpha === true || texture.userData?.rwHasAlpha === true;
+  if (!hasAlpha) return 'opaque';
+
+  const compressionMethod = String(texture.userData?.rwCompressionMethod || '').toUpperCase();
+  if (compressionMethod === 'DXT1') return 'cutout';
+  if (compressionMethod === 'DXT3' || compressionMethod === 'DXT5') return 'cutout';
+
+  const pixelFormat = String(texture.userData?.rwPixelFormat || '').toUpperCase();
+  if (pixelFormat === 'A1R5G5B5' || pixelFormat === 'A4R4G4B4' || pixelFormat === 'RASTER_1555' || pixelFormat === 'RASTER_4444') {
+    return 'cutout';
+  }
+  return 'cutout';
 }
 
 function decideAlphaMode(_texture, hasAlpha, compressionMethod, pixelFormat) {
   if (!hasAlpha) return 'opaque';
-  const inferredAlphaMode = inferAlphaModeFromPixels(_texture);
-  if (inferredAlphaMode) return inferredAlphaMode;
   if (compressionMethod === 'DXT1') return 'cutout';
-  if (compressionMethod === 'DXT3' || compressionMethod === 'DXT5') return 'blend';
+  if (compressionMethod === 'DXT3' || compressionMethod === 'DXT5') return 'cutout';
   if (pixelFormat === 'A1R5G5B5') return 'cutout';
-  if (pixelFormat === 'A4R4G4B4') return 'blend';
-  return 'blend';
+  if (pixelFormat === 'A4R4G4B4') return 'cutout';
+  return 'cutout';
 }
 
 function getDescriptorSide(side) {
@@ -77,6 +80,10 @@ function inferMaterialAlphaMode(material) {
   if (material?.blending === THREE.AdditiveBlending) return 'additive';
   if ((Number(material?.alphaTest) || 0) > 0) return 'cutout';
   if (material?.transparent || ((typeof material?.opacity === 'number') && material.opacity < 1)) return 'blend';
+  const mapAlphaMode = inferAlphaModeFromTexture(material?.map);
+  if (mapAlphaMode && mapAlphaMode !== 'opaque') return mapAlphaMode;
+  const alphaMapAlphaMode = inferAlphaModeFromTexture(material?.alphaMap);
+  if (alphaMapAlphaMode && alphaMapAlphaMode !== 'opaque') return alphaMapAlphaMode;
   return 'opaque';
 }
 
@@ -115,7 +122,7 @@ function buildRWDescriptor(material, geometry, overrides = {}) {
     color: cloneColor(material.color),
     opacity: typeof material.opacity === 'number' ? material.opacity : 1,
     alphaMode,
-    alphaRef: overrides.alphaRef ?? ((alphaMode === 'cutout' && (Number(material.alphaTest) || 0) <= 0) ? 0.5 : (Number(material.alphaTest) || 0)),
+    alphaRef: overrides.alphaRef ?? ((alphaMode === 'cutout' && (Number(material.alphaTest) || 0) <= 0) ? RW_ALPHA_REF_DEFAULT : (Number(material.alphaTest) || 0)),
     depthTest: typeof material.depthTest === 'boolean' ? material.depthTest : true,
     depthWrite: typeof material.depthWrite === 'boolean' ? material.depthWrite : !baseTransparent,
     transparent: overrides.transparent ?? baseTransparent,
@@ -313,9 +320,17 @@ export function normalizeTextureDictionary(dict, options = {}) {
       rwD3dFormat: Number(meta.d3dFormat ?? rawEntry?.d3dFormat) || 0,
       rwRasterFormat: Number(meta.rasterFormat ?? rawEntry?.rasterFormat) || 0,
     };
+    const nativeMipCount = Number(texture.userData?.rwTextureMipCount)
+      || (Array.isArray(texture?.mipmaps) ? texture.mipmaps.length : 0);
+    const hasNativeTextureLevels = nativeMipCount > 0;
     texture.magFilter = THREE.LinearFilter;
-    texture.minFilter = alphaMode === 'blend' ? THREE.LinearFilter : THREE.LinearMipmapLinearFilter;
-    texture.generateMipmaps = alphaMode === 'cutout';
+    if (texture.isCompressedTexture || hasNativeTextureLevels) {
+      texture.minFilter = nativeMipCount > 1 ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+      texture.generateMipmaps = false;
+    } else {
+      texture.minFilter = alphaMode === 'blend' ? THREE.LinearFilter : THREE.LinearMipmapLinearFilter;
+      texture.generateMipmaps = alphaMode === 'cutout';
+    }
     texture.needsUpdate = true;
     normalized.set(key, {
       texture,

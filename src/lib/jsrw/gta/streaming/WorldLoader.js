@@ -59,6 +59,7 @@ export class WorldLoader {
     this.gameVersion = String(options.gameVersion || 'VCS').toUpperCase();
     this.onLog = typeof options.onLog === 'function' ? options.onLog : null;
     this.onFileEvent = typeof options.onFileEvent === 'function' ? options.onFileEvent : null;
+    this.textureLoadingOptions = options.textureLoadingOptions || {};
     this.datLoader = options.datLoader || new GTADatLoader();
     this.ideLoader = options.ideLoader || new IdeLoader();
     this.iplLoader = options.iplLoader || new IplLoader({ gameVersion: this.gameVersion });
@@ -113,6 +114,7 @@ export class WorldLoader {
       imagePaths: texturePaths,
       sourceIndex: textureSourceIndex,
       onLog: this.onLog,
+      textureLoadingOptions: options.textureLoadingOptions || this.textureLoadingOptions,
     });
     const modelResolver = new ModelResolver({
       fileSystem: this.fileSystem,

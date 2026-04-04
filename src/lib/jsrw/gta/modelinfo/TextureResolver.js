@@ -2,8 +2,8 @@ import { normalizeTextureDictionary } from '../../adapters/three/ThreeMaterialAd
 import { TXDLoader } from '../../TXDLoader.js';
 import { hasExtension, joinPath, normalizeAssetName, normalizeName, stripExtension } from './ResourceLocator.js';
 
-function createMetadataPatchedLoader() {
-  const loader = new TXDLoader();
+function createMetadataPatchedLoader(textureLoadingOptions = {}) {
+  const loader = new TXDLoader(undefined, textureLoadingOptions);
   const metadataByNameRef = { current: new Map() };
 
   const baseReadTextureNative = loader.readTextureNative.bind(loader);
@@ -18,6 +18,8 @@ function createMetadataPatchedLoader() {
         width: parsed.width,
         height: parsed.height,
         hasAlpha: parsed.hasAlpha,
+        numLevels: parsed.numLevels,
+        isCompressed: parsed.isCompressed,
       });
     }
     return parsed;
@@ -47,7 +49,8 @@ export class TextureResolver {
     this.imagePaths = Array.isArray(options.imagePaths) ? options.imagePaths : [];
     this.sourceIndex = options.sourceIndex || null;
     this.onLog = typeof options.onLog === 'function' ? options.onLog : null;
-    const patchedLoader = createMetadataPatchedLoader();
+    this.textureLoadingOptions = options.textureLoadingOptions || {};
+    const patchedLoader = createMetadataPatchedLoader(this.textureLoadingOptions);
     this.loader = patchedLoader.loader;
     this.metadataByNameRef = patchedLoader.metadataByNameRef;
     this.sources = new Map();
